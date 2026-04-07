@@ -15,6 +15,7 @@ from utils.json_utils import extract_json
 from db_files.db import log_request
 from feature_modules.key_clause_extraction import classify_document, DOCUMENT_HANDLERS, extract_text_from_upload
 from feature_modules.risk_detection import analyze_document_risks
+from feature_modules.red_flag_scanner import scan_red_flags
 from auth import verify_api_key
 
 logger = logging.getLogger(__name__)
@@ -288,6 +289,73 @@ async def detect_risks(
         )
         if os.path.exists(file_path):
             os.remove(file_path)
+
+
+# ---------------------------------------------------------------------------
+# POST /red-flag-scanner
+# ---------------------------------------------------------------------------
+
+@router.post("/red-flag-scanner")
+async def red_flag_scanner(
+    file: UploadFile = File(...),
+):
+    """
+    AI Red Flag Scanner — identifies dangerous or unusual contract language.
+
+    Returns structured warnings such as:
+      ⚠ Unlimited liability clause detected
+      ⚠ This contract does not include a termination clause
+
+    Each flag includes severity, the exact clause excerpt, why it's dangerous,
+    and a concrete recommendation for negotiation or fix.
+    """
+    text, pages_to_read, total_pages, request_id, t_start, file_path = await extract_text_from_upload(
+        file,
+        endpoint="/red-flag-scanner"
+    )
+
+    status    = "success"
+    error_msg = None
+
+    try:
+        logger.info(f"[{request_id}] Starting Red Flag Scan...")
+        result = await scan_red_flags(text)
+
+        elapsed = time.perf_counter() - t_start
+        logger.info(
+            f"[{request_id}] ── RED FLAG SCAN COMPLETE — {elapsed:.2f}s "
+            f"flags={len(result.get('detected_flags', []))} "
+            f"risk={result.get('overall_risk_level', 'Unknown')}"
+        )
+        return {
+            "status": "success",
+            "total_flags": len(result.get("detected_flags", [])),
+            "overall_risk_level": result.get("overall_risk_level", "Low"),
+            "summary": result.get("summary", ""),
+            "detected_flags": result.get("detected_flags", []),
+            "missing_protections": result.get("missing_protections", []),
+        }
+
+    except Exception as e:
+        status    = "error"
+        error_msg = str(e)
+        logger.exception(f"[{request_id}] Red flag scan failed: {e}")
+        raise HTTPException(status_code=500, detail="Internal error during red flag scan.")
+    finally:
+        elapsed = time.perf_counter() - t_start
+        await log_request(
+            request_id        = request_id,
+            pdf_name          = file.filename or "unknown",
+            total_pages       = total_pages,
+            pages_analysed    = pages_to_read,
+            completion_time_s = elapsed,
+            endpoint          = "/red-flag-scanner",
+            status            = status,
+            error_message     = error_msg,
+        )
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logger.debug(f"[{request_id}] Temp file deleted: '{file_path}'")
 
 
 # ---------------------------------------------------------------------------

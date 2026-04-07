@@ -71,6 +71,7 @@ app = FastAPI(
 - **POST /analyze/stream** — Same but streams results via SSE
 - **POST /key-clause-extraction** — Extract key clauses by document type
 - **POST /detect-risks** — Detect legal/financial risks in a document
+- **POST /red-flag-scanner** — AI red flag scan: identifies dangerous/unusual contract language with ⚠ warnings
 - **POST /convert/pdf-to-docx** — Convert PDF to DOCX
 
 ### Document Generation (HTML)
