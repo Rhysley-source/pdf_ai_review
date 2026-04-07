@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-
+MODEL_NAME_OB = os.environ.get("MODEL_NAME_OB", "gpt-4o")
 MODEL_NAME     = os.environ.get("MODEL_NAME", "gpt-5-nano")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 if not OPENAI_API_KEY:
@@ -211,6 +211,53 @@ def _build_api_kwargs(
 
     return kwargs
 
+def _build_api_kwargs_ob(
+    messages:   list[dict],
+    use_json:   bool = False,
+    streaming:  bool = False,
+) -> dict:
+    """
+    Build OpenAI API kwargs handling model differences.
+
+    use_json=True  → sets response_format=json_object
+                     ONLY use when messages contain the word "json"
+                     (OpenAI requirement) — PDF analysis calls only.
+
+    use_json=False → NO response_format
+                     Required for key-clause-extraction, risk-detection,
+                     and any plain-text call where prompt lacks "json".
+    """
+    model = os.environ.get("MODEL_NAME_OB", MODEL_NAME_OB)
+
+    kwargs: dict = {
+        "model":    model,
+        "messages": messages,
+    }
+
+    # temperature: not supported by gpt-5-nano, o1, o3 family
+    if model not in _FIXED_TEMPERATURE_MODELS:
+        kwargs["temperature"] = 0.0
+
+    # seed: makes output deterministic across repeated calls with the same input
+    kwargs["seed"] = 42
+
+    # token limit parameter name differs by model
+    if model in _MAX_COMPLETION_TOKENS_MODELS:
+        kwargs["max_completion_tokens"] = MAX_OUTPUT_TOKENS
+    else:
+        kwargs["max_tokens"] = MAX_OUTPUT_TOKENS
+
+    # JSON mode — ONLY when prompt contains word "json"
+    if use_json:
+        kwargs["response_format"] = {"type": "json_object"}
+
+    # streaming
+    if streaming:
+        kwargs["stream"]         = True
+        kwargs["stream_options"] = {"include_usage": True}
+
+    return kwargs
+
 
 # ---------------------------------------------------------------------------
 # _run_inference_json
@@ -284,6 +331,33 @@ async def _run_inference_text(
     except Exception as e:
         logger.exception(f"{tag}OpenAI API call failed: {e}")
         raise
+
+async def _run_inference_text_obligation(
+    messages: list[dict],
+    label:    str = "",
+) -> tuple[str, int, int]:
+    """
+    OpenAI call WITHOUT response_format — plain text output.
+    Use for key-clause-extraction, risk-detection, and any call
+    where the prompt does NOT explicitly ask for JSON.
+    Returns (content, input_tokens, output_tokens).
+    """
+    tag    = f"[{label}] " if label else ""
+    t0     = time.perf_counter()
+    kwargs = _build_api_kwargs_ob(messages, use_json=False, streaming=False)
+
+    try:
+        response      = await _client.chat.completions.create(**kwargs)
+        elapsed       = time.perf_counter() - t0
+        content       = response.choices[0].message.content or ""
+        input_tokens  = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        logger.info(f"{tag}in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
+        return content, input_tokens, output_tokens
+    except Exception as e:
+        logger.exception(f"{tag}OpenAI API call failed: {e}")
+        raise
+
 
 
 # ---------------------------------------------------------------------------
