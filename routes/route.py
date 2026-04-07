@@ -321,19 +321,26 @@ async def red_flag_scanner(
         logger.info(f"[{request_id}] Starting Red Flag Scan...")
         result = await scan_red_flags(text)
 
-        elapsed = time.perf_counter() - t_start
+        flags    = result.get("detected_flags", [])
+        elapsed  = time.perf_counter() - t_start
         logger.info(
             f"[{request_id}] ── RED FLAG SCAN COMPLETE — {elapsed:.2f}s "
-            f"flags={len(result.get('detected_flags', []))} "
-            f"risk={result.get('overall_risk_level', 'Unknown')}"
+            f"flags={len(flags)} risk={result.get('overall_risk_level', 'Unknown')}"
         )
         return {
-            "status": "success",
-            "total_flags": len(result.get("detected_flags", [])),
+            "status":             "success",
             "overall_risk_level": result.get("overall_risk_level", "Low"),
-            "summary": result.get("summary", ""),
-            "detected_flags": result.get("detected_flags", []),
-            "missing_protections": result.get("missing_protections", []),
+            "summary":            result.get("summary", ""),
+            "counts": {
+                "total":     len(flags),
+                "dangerous": sum(1 for f in flags if f.get("category") == "Dangerous"),
+                "unusual":   sum(1 for f in flags if f.get("category") == "Unusual"),
+                "missing":   sum(1 for f in flags if f.get("category") == "Missing"),
+                "critical":  sum(1 for f in flags if f.get("severity") == "Critical"),
+                "high":      sum(1 for f in flags if f.get("severity") == "High"),
+                "medium":    sum(1 for f in flags if f.get("severity") == "Medium"),
+            },
+            "detected_flags": flags,
         }
 
     except Exception as e:
