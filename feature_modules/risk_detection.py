@@ -451,26 +451,17 @@ async def analyze_document_risks(text: str) -> dict:
         logger.info(f"[risk_detection] Using dynamic analysis for '{doc_label}'")
         analysis = await _analyze_risks_dynamic(text, doc_label)
 
-    analysis.pop("risk_score", None)
-
-    # Drop any missing_field item where field_name is null/empty
-    analysis["missing_fields"] = [
-        f for f in (analysis.get("missing_fields") or [])
-        if isinstance(f, dict)
-        and f.get("field_name") not in (None, "")
-    ]
-
-    detected_count = len(analysis.get("detected_risks") or [])
-    missing_count  = len(analysis["missing_fields"])
+    detected_count = len(analysis.get("detected_risks", []))
+    missing_count  = len(analysis.get("missing_fields", []))
 
     return {
-        "status":        "success",
-        "analysis_type": "risk_detection",
-        "document_type": doc_label,
+        "status":               "success",
+        "analysis_type":        "risk_detection",
+        "document_type":        doc_label,
         "risk_count": {
-            "detected_risks": detected_count,
-            "missing_fields": missing_count,
-            "total":          detected_count + missing_count,
+            "detected_risks":   detected_count,
+            "missing_fields":   missing_count,
+            "total":            detected_count + missing_count,
         },
         "data": analysis,
     }
