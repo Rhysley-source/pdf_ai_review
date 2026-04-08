@@ -40,12 +40,16 @@ pytesseract==0.3.13
 python-docx
 
 # ------------------------------------------------------------
-# LangChain
+# LangChain + LangGraph + RAG
 # ------------------------------------------------------------
-langchain==0.0.352
-langchain-community==0.0.20
-langchain-core==0.1.23
-langsmith==0.0.87
+langchain>=0.2.0
+langchain-core>=0.2.0
+langchain-community>=0.2.0
+langchain-openai>=0.1.0
+langchain-text-splitters>=0.2.0
+langsmith>=0.1.0
+langgraph>=0.2.0
+faiss-cpu>=1.7.4
 
 # ------------------------------------------------------------
 # Image / CV processing

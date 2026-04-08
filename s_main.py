@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from routes.route import router
 from routes.convert_route import router as convert_router
 from document_generation.document_generator import router as document_generate_router
+from routes.rag_route import router as rag_router
 from db_files.db import init_db, close_pool
 
 # ---------------------------------------------------------------------------
@@ -74,6 +75,13 @@ app = FastAPI(
 - **POST /red-flag-scanner** — AI red flag scan: identifies dangerous/unusual contract language with ⚠ warnings
 - **POST /convert/pdf-to-docx** — Convert PDF to DOCX
 
+### Document Q&A (RAG)
+- **POST /document-qa/index** — Upload and index a PDF in FAISS for Q&A
+- **POST /document-qa/ask** — Ask a natural-language question (LangGraph RAG pipeline)
+- **POST /document-qa/analyze** — Run key-clause, risk, and red-flag tools on indexed document
+- **DELETE /document-qa/session/{id}** — Delete an indexed session
+- **GET /document-qa/sessions** — List active sessions
+
 ### Document Generation (HTML)
 - **POST /generate-html** — Generate an HTML document of any type from a text prompt
 - **POST /regenerate-html** — Modify an existing HTML document by document_id
@@ -85,3 +93,4 @@ app = FastAPI(
 app.include_router(router)
 app.include_router(convert_router)
 app.include_router(document_generate_router)
+app.include_router(rag_router)
