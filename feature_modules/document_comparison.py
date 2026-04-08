@@ -1,319 +1,514 @@
+"""
+document_comparison.py
+
+Compares two documents and produces a structured JSON result that matches
+the target schema:
+
+{
+  "status": "success",
+  "log_id": <int from DB>,
+  "duration_ms": <int>,
+  "comparison": {
+    "session_id": "...",
+    "doc1_filename": "...",
+    "doc2_filename": "...",
+    "compared_at": "...",
+    "total_changes": <int>,
+    "high_risk_changes": <int>,
+    "overall_risk_level": "high|medium|low",
+    "recommendation": "...",
+    "clause_changes": [
+      {
+        "clause": "payment_terms",
+        "change_type": "modified|added|removed",
+        "original_value": "...",
+        "revised_value": "...",      # null when removed
+        "severity": "high|medium|low",
+        "summary": "..."
+      }
+    ],
+    "semantic_insights": ["...", ...],
+    "text_diff_stats": {
+      "lines_added": <int>,
+      "lines_removed": <int>,
+      "lines_changed": <int>,
+      "lines_unchanged": <int>,
+      "similarity_score": <float>,
+      "similarity_percent": "94.2%"
+    }
+  }
+}
+
+Key design decisions vs. the old version:
+  - Risk analysis of doc2 in isolation (analyze_document_risks) has been
+    removed — it's not in the target schema and costs an extra LLM call.
+  - grouped_changes and redline arrays are removed from the top-level output
+    (not in target schema).
+  - clause_changes uses original_value / revised_value (target field names),
+    not original / revised.
+  - severity is lowercase ("high") not title-case ("High").
+  - text_diff_stats includes lines_added / lines_removed / lines_changed /
+    lines_unchanged computed from difflib.
+  - The LLM prompt is substantially richer: it receives the full clause
+    change list and is asked to produce (a) a per-clause summary and
+    (b) semantic_insights and (c) an overall recommendation.
+  - overall_risk_level is lowercase.
+  - The function signature now accepts doc1_filename / doc2_filename /
+    session_id so the caller (route.py) can pass them through.
+"""
+
 import logging
 import difflib
 import asyncio
 import time
-from typing import Dict, Any, List, Tuple
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional
 from difflib import SequenceMatcher
 
 from llm_model.ai_model import run_llm
 from utils.json_utils import extract_json_raw as extract_json_from_text
-from feature_modules.risk_detection import analyze_document_risks
 
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# CONFIG
-# ============================================================
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
-HIGH_RISK = {"payment", "liability", "termination", "cost", "penalty"}
-MEDIUM_RISK = {"timeline", "delivery", "scope", "renewal"}
-
-GROUPS = {
-    "financial": {"payment", "cost", "pricing"},
-    "legal": {"liability", "termination", "law"},
-    "operational": {"timeline", "delivery", "scope"},
+# Clause keys whose changes are always "high" severity
+HIGH_RISK_CLAUSES = {
+    "payment_terms", "liability", "termination", "indemnification",
+    "penalties", "pricing", "intellectual_property",
 }
 
-MIN_CLAUSE_LENGTH = 40
-MATCH_THRESHOLD = 0.65
+# Clause keys whose changes are "medium" severity
+MEDIUM_RISK_CLAUSES = {
+    "contract_term", "renewal_conditions", "scope_of_work",
+    "delivery_timeline", "non_compete", "warranties",
+    "force_majeure", "data_protection",
+}
+
+# Minimum character length for a clause value to be considered usable
+MIN_CLAUSE_LENGTH = 30
+
+# Minimum similarity score between two clause values to call it a "match"
+MATCH_THRESHOLD = 0.55
 
 
-# ============================================================
-# HELPERS
-# ============================================================
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-def _normalize(text: str) -> str:
+def _norm(text: str) -> str:
     return (text or "").lower().strip()
 
 
-def _similarity(a: str, b: str) -> float:
-    return SequenceMatcher(None, _normalize(a), _normalize(b)).ratio()
+def _sim(a: str, b: str) -> float:
+    return SequenceMatcher(None, _norm(a), _norm(b)).ratio()
 
 
-def _combined_similarity(k1: str, v1: str, k2: str, v2: str) -> float:
+def _key_sim(k1: str, k2: str) -> float:
+    """Normalised key similarity — underscores treated as spaces."""
+    a = k1.replace("_", " ")
+    b = k2.replace("_", " ")
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _combined_sim(k1: str, v1: str, k2: str, v2: str) -> float:
     """
-    Hybrid similarity:
-    - clause key similarity
-    - clause content similarity
+    Weighted hybrid:
+      50% key similarity  (ensures "payment_terms" → "payment_terms")
+      50% value similarity (helps when keys are slightly different)
     """
-    key_score = _similarity(k1, k2)
-    value_score = _similarity(v1[:500], v2[:500])  # limit size
-    return (0.4 * key_score) + (0.6 * value_score)
+    ks = _key_sim(k1, k2)
+    vs = _sim(v1[:400], v2[:400])
+    return 0.50 * ks + 0.50 * vs
 
 
-def _get_severity(clause: str) -> str:
-    if any(k in clause for k in HIGH_RISK):
-        return "High"
-    if any(k in clause for k in MEDIUM_RISK):
-        return "Medium"
-    return "Low"
-
-
-def _get_group(clause: str) -> str:
-    for g, keys in GROUPS.items():
-        if any(k in clause for k in keys):
-            return g
-    return "general"
+def _severity(clause_key: str) -> str:
+    """Return lowercase severity string for a clause key."""
+    if clause_key in HIGH_RISK_CLAUSES:
+        return "high"
+    if clause_key in MEDIUM_RISK_CLAUSES:
+        return "medium"
+    return "low"
 
 
 def _clean_clauses(clauses: Dict[str, str]) -> Dict[str, str]:
-    """
-    Remove noisy or too-small clauses.
-    """
     return {
-        k: v for k, v in clauses.items()
-        if v and len(v) >= MIN_CLAUSE_LENGTH
+        k: v.strip()
+        for k, v in (clauses or {}).items()
+        if isinstance(v, str) and len(v.strip()) >= MIN_CLAUSE_LENGTH
     }
 
 
-# ============================================================
-# CLAUSE MATCHING (IMPROVED)
-# ============================================================
+# ---------------------------------------------------------------------------
+# Clause matching
+# ---------------------------------------------------------------------------
 
-def _match_clauses(c1: dict, c2: dict) -> Dict[str, str | None]:
-    matched = {}
+def _match_clauses(c1: Dict[str, str], c2: Dict[str, str]) -> Dict[str, Optional[str]]:
+    """
+    For every clause in doc1, find the best-matching clause in doc2.
+    Returns {c1_key: c2_key | None}.
+
+    Preference order:
+      1. Exact key match (score=1.0 shortcut)
+      2. Combined key+value similarity above threshold
+    """
+    matched: Dict[str, Optional[str]] = {}
 
     for k1, v1 in c1.items():
-        best_match = None
-        best_score = 0
+        # Shortcut: exact key exists in doc2
+        if k1 in c2:
+            matched[k1] = k1
+            logger.debug(f"[match] {k1} → {k1} (exact)")
+            continue
+
+        best_key: Optional[str] = None
+        best_score: float = 0.0
 
         for k2, v2 in c2.items():
-            score = _combined_similarity(k1, v1, k2, v2)
-
+            score = _combined_sim(k1, v1, k2, v2)
             if score > best_score:
                 best_score = score
-                best_match = k2
+                best_key = k2
 
-        matched[k1] = best_match if best_score >= MATCH_THRESHOLD else None
-
-        logger.debug(f"[match] {k1} → {best_match} (score={best_score:.2f})")
+        matched[k1] = best_key if best_score >= MATCH_THRESHOLD else None
+        logger.debug(f"[match] {k1} → {best_key} (score={best_score:.2f})")
 
     return matched
 
 
-# ============================================================
-# WORD DIFF
-# ============================================================
+# ---------------------------------------------------------------------------
+# Text diff stats
+# ---------------------------------------------------------------------------
 
-def _word_diff_structured(a: str, b: str) -> List[Dict]:
-    diff = difflib.ndiff((a or "").split(), (b or "").split())
+def _compute_text_diff_stats(t1: str, t2: str) -> Dict[str, Any]:
+    """
+    Compute line-level diff statistics.
 
-    result = []
-    for token in diff:
-        if token.startswith("- "):
-            result.append({"type": "removed", "text": token[2:]})
-        elif token.startswith("+ "):
-            result.append({"type": "added", "text": token[2:]})
-        else:
-            result.append({"type": "same", "text": token[2:]})
+    Returns:
+      lines_added, lines_removed, lines_changed, lines_unchanged,
+      similarity_score, similarity_percent
+    """
+    lines1 = t1.splitlines()
+    lines2 = t2.splitlines()
 
-    return result
+    sm = SequenceMatcher(None, lines1, lines2)
+    similarity = round(sm.ratio(), 4)
+
+    lines_added = 0
+    lines_removed = 0
+    lines_changed = 0     # lines that appear in both but differ
+    lines_unchanged = 0
+
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            lines_unchanged += i2 - i1
+        elif tag == "insert":
+            lines_added += j2 - j1
+        elif tag == "delete":
+            lines_removed += i2 - i1
+        elif tag == "replace":
+            # Count as both a removal and an addition; the smaller count is "changed"
+            n_removed = i2 - i1
+            n_added   = j2 - j1
+            changed   = min(n_removed, n_added)
+            lines_changed  += changed
+            lines_removed  += n_removed - changed
+            lines_added    += n_added   - changed
+
+    return {
+        "lines_added":     lines_added,
+        "lines_removed":   lines_removed,
+        "lines_changed":   lines_changed,
+        "lines_unchanged": lines_unchanged,
+        "similarity_score":   similarity,
+        "similarity_percent": f"{round(similarity * 100, 1)}%",
+    }
 
 
-# ============================================================
-# CLAUSE COMPARISON
-# ============================================================
+# ---------------------------------------------------------------------------
+# Clause comparison (produces raw changes list with original/revised values)
+# ---------------------------------------------------------------------------
 
-def _compare_clauses(c1: dict, c2: dict) -> List[Dict]:
+def _compare_clauses(c1: Dict[str, str], c2: Dict[str, str]) -> List[Dict]:
+    """
+    Compare clauses from doc1 vs doc2.
+
+    Returns list of change dicts:
+      clause, change_type, original_value, revised_value, severity
+    (No 'summary' yet — that is added by the LLM in _run_llm.)
+    """
     matches = _match_clauses(c1, c2)
-    changes = []
+    changes: List[Dict] = []
 
     for k1, k2 in matches.items():
         v1 = c1.get(k1)
         v2 = c2.get(k2) if k2 else None
 
-        if v1 == v2:
+        # Skip identical clauses
+        if v1 and v2 and _sim(v1, v2) > 0.97:
             continue
 
-        change_type = "added" if not v1 else "removed" if not v2 else "modified"
+        change_type = (
+            "added"    if not v1 and v2  else
+            "removed"  if v1 and not v2  else
+            "modified"
+        )
 
         changes.append({
-            "clause": k1,
-            "matched_with": k2,
-            "group": _get_group(k1),
-            "severity": _get_severity(k1),
-            "change_type": change_type,
-            "original": v1,
-            "revised": v2,
-            "redline": _word_diff_structured(v1, v2)
+            "clause":         k1,
+            "change_type":    change_type,
+            "original_value": v1,
+            "revised_value":  v2,
+            "severity":       _severity(k1),
+            "summary":        "",   # filled by LLM
         })
+
+    # Clauses in doc2 that have NO match in doc1 → "added"
+    matched_c2_keys = set(v for v in matches.values() if v)
+    for k2, v2 in c2.items():
+        if k2 not in matched_c2_keys and k2 not in c1:
+            changes.append({
+                "clause":         k2,
+                "change_type":    "added",
+                "original_value": None,
+                "revised_value":  v2,
+                "severity":       _severity(k2),
+                "summary":        "",
+            })
 
     return changes
 
 
-# ============================================================
-# TEXT DIFF
-# ============================================================
+# ---------------------------------------------------------------------------
+# Risk scoring
+# ---------------------------------------------------------------------------
 
-def _text_diff(t1: str, t2: str):
-    """
-    Compute text-level diff using both diffing (difflib) and semantic similarity.
-    """
-    sim = SequenceMatcher(None, t1, t2).ratio()
-
-    return {
-        "similarity_score": round(sim, 4),
-        "similarity_percent": f"{round(sim * 100, 1)}%",
-        "detailed_diff": _generate_detailed_diff(t1, t2)  # Adds the diff as a list of changes
-    }
-
-def _generate_detailed_diff(t1: str, t2: str) -> list:
-    """
-    Generate a list of detailed changes between two texts.
-    """
-    diff = difflib.ndiff(t1.splitlines(), t2.splitlines())
-    return [{"type": "added" if line.startswith('+') else "removed" if line.startswith('-') else "same", "line": line[2:]} for line in diff]
-
-
-# ============================================================
-# RISK ENGINE
-# ============================================================
-
-def _risk_score(changes: List[Dict]):
-    h = sum(1 for c in changes if c["severity"] == "High")
-    m = sum(1 for c in changes if c["severity"] == "Medium")
-    l = sum(1 for c in changes if c["severity"] == "Low")
+def _risk_score(changes: List[Dict]) -> Dict[str, Any]:
+    h = sum(1 for c in changes if c["severity"] == "high")
+    m = sum(1 for c in changes if c["severity"] == "medium")
+    l = sum(1 for c in changes if c["severity"] == "low")
 
     score = min((h * 30) + (m * 15) + (l * 5), 100)
 
     return {
-        "risk_score": score,
-        "overall_risk": "High" if score >= 70 else "Medium" if score >= 30 else "Low",
-        "high_risk_changes": h
+        "risk_score":        score,
+        "overall_risk_level": "high" if score >= 70 else "medium" if score >= 30 else "low",
+        "high_risk_changes": h,
     }
 
 
-# ============================================================
-# LLM INSIGHTS
-# ============================================================
+# ---------------------------------------------------------------------------
+# LLM enrichment — per-clause summaries + semantic insights + recommendation
+# ---------------------------------------------------------------------------
 
-def _build_prompt(doc1: str, doc2: str, changes: List[Dict]):
+def _build_llm_prompt(
+    text1: str,
+    text2: str,
+    changes: List[Dict],
+) -> str:
+    change_lines = []
+    for c in changes[:20]:
+        orig = (c["original_value"] or "")[:300]
+        rev  = (c["revised_value"]  or "")[:300]
+        change_lines.append(
+            f"Clause: {c['clause']} | change_type: {c['change_type']} | severity: {c['severity']}\n"
+            f"  original_value: {orig or '[absent]'}\n"
+            f"  revised_value:  {rev  or '[absent]'}"
+        )
+    changes_block = "\n\n".join(change_lines) or "No clause-level changes detected."
 
-    summary = "\n".join(
-        f"- {c['clause']} ({c['change_type']}, {c['severity']})"
-        for c in changes[:15]
-    ) or "No major changes."
+    return f"""You are a senior legal analyst reviewing two versions of a contract.
 
-    return f"""
-Analyze document differences.
+DETECTED CLAUSE CHANGES:
+{changes_block}
 
-Changes:
-{summary}
+DOCUMENT 1 (original):
+---
+{text1[:2500]}
+---
 
-Return STRICT JSON:
+DOCUMENT 2 (revised):
+---
+{text2[:2500]}
+---
+
+Return ONLY a valid JSON object with exactly these fields:
+
 {{
-  "insights": [],
-  "clause_risks": [],
-  "negotiation_suggestions": [],
-  "recommendation": ""
+  "clause_summaries": {{
+    "<clause_key>": "<one clear sentence describing what changed and why it matters>",
+    ...
+  }},
+  "semantic_insights": [
+    "<specific, quantified insight about a change — e.g. 'Payment terms tightened from Net 30 to Net 15, increasing cash-flow pressure on the service provider.'>",
+    "<insight>",
+    "<overall conclusion about which party the revised document favours and why>"
+  ],
+  "recommendation": "<2–3 sentence executive summary recommendation for the recipient>"
 }}
 
-Doc1:
-{doc1[:3000]}
+Rules:
+- clause_summaries: one entry per clause that changed. Key must match the clause key exactly.
+- semantic_insights: 4–7 items. Be specific — name the values, percentages, durations changed.
+  Last item must be an overall conclusion about which party benefits from the revisions.
+- recommendation: actionable guidance (not just 'seek legal advice').
+- Return ONLY the JSON object. No markdown, no explanation outside it."""
 
-Doc2:
-{doc2[:3000]}
-"""
 
+async def _run_llm_enrichment(
+    text1: str,
+    text2: str,
+    changes: List[Dict],
+) -> Dict[str, Any]:
+    """
+    Ask the LLM to:
+      1. Write a one-sentence summary for each changed clause.
+      2. Produce semantic_insights (specific, quantified).
+      3. Write an overall recommendation.
 
-async def _run_llm(doc1, doc2, changes):
+    Returns dict with keys: clause_summaries, semantic_insights, recommendation.
+    """
+    if not changes:
+        return {"clause_summaries": {}, "semantic_insights": [], "recommendation": ""}
+
     try:
-        raw = await run_llm("", _build_prompt(doc1, doc2, changes))
+        prompt = _build_llm_prompt(text1, text2, changes)
+        raw    = await run_llm("", prompt)
         result = extract_json_from_text(raw)
 
-        if result:
+        if result and (result.get("semantic_insights") or result.get("recommendation")):
             return result
 
-        logger.warning("[comparison] retry LLM")
-        raw = await run_llm("", "Return ONLY valid JSON")
-        return extract_json_from_text(raw) or {}
+        # Single retry with a stripped-down prompt
+        logger.warning("[comparison] LLM enrichment attempt 1 returned no usable data — retrying")
+        retry_prompt = (
+            "Return ONLY valid JSON with keys: clause_summaries (object), "
+            "semantic_insights (array of strings), recommendation (string).\n\n"
+            + prompt[:2000]
+        )
+        raw    = await run_llm("", retry_prompt)
+        result = extract_json_from_text(raw)
+        return result or {"clause_summaries": {}, "semantic_insights": [], "recommendation": ""}
 
     except Exception as e:
-        logger.exception(f"[comparison] LLM failed: {e}")
-        return {}
+        logger.exception(f"[comparison] LLM enrichment failed: {e}")
+        return {"clause_summaries": {}, "semantic_insights": [], "recommendation": ""}
 
 
-# ============================================================
-# MAIN FUNCTION (FINAL)
-# ============================================================
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
 
 async def compare_documents(
     text1: str,
     text2: str,
     clauses1: Dict[str, str],
     clauses2: Dict[str, str],
+    *,
+    doc1_filename: str = "document_1.pdf",
+    doc2_filename: str = "document_2.pdf",
+    session_id: str = "",
+    log_id: Optional[int] = None,
 ) -> Dict[str, Any]:
+    """
+    Compare two documents and return a structured result matching the target schema.
 
-    start = time.time()
+    Parameters
+    ----------
+    text1, text2        : raw document text for each document
+    clauses1, clauses2  : extracted clause dicts from clause_extraction.extract_clauses()
+    doc1_filename       : original filename (for metadata)
+    doc2_filename       : revised filename (for metadata)
+    session_id          : UUID string from the route layer
+    log_id              : DB row id populated after DB insert (passed back by route)
+
+    Returns
+    -------
+    Dict matching the target JSON schema.
+    """
+    t_start = time.perf_counter()
 
     if len(text1.split()) < 20 or len(text2.split()) < 20:
-        raise ValueError("Documents too short")
+        raise ValueError("Documents too short for meaningful comparison.")
 
-    # Clean clauses
-    clauses1 = _clean_clauses(clauses1 or {})
-    clauses2 = _clean_clauses(clauses2 or {})
+    # ── 1. Clean clauses ────────────────────────────────────────────────
+    c1 = _clean_clauses(clauses1)
+    c2 = _clean_clauses(clauses2)
 
-    # Fallback safety (CRITICAL)
-    if not clauses1 or not clauses2:
-        logger.warning("[comparison] empty clauses → fallback to full text chunking")
-        clauses1 = {"full_text": text1[:4000]}
-        clauses2 = {"full_text": text2[:4000]}
+    # Fallback: if either side has no usable clauses, use first 4000 chars
+    # as a single blob so we can still produce text diff stats and LLM insights
+    if not c1 or not c2:
+        logger.warning(
+            "[comparison] One or both clause dicts are empty after cleaning — "
+            "falling back to full-text blob. This produces lower-quality clause diff."
+        )
+        c1 = c1 or {"full_text": text1[:4000]}
+        c2 = c2 or {"full_text": text2[:4000]}
 
-    # Clean up empty clauses before comparison
-    clauses1 = {k: v for k, v in clauses1.items() if v}
-    clauses2 = {k: v for k, v in clauses2.items() if v}
+    logger.info(f"[comparison] doc1 clauses={list(c1.keys())}  doc2 clauses={list(c2.keys())}")
 
-    # Log the cleaned clauses for debugging
-    logger.info(f"[clauses1] {clauses1}")
-    logger.info(f"[clauses2] {clauses2}")
-    # Parallel execution
-    clause_task = asyncio.to_thread(_compare_clauses, clauses1, clauses2)
-    diff_task = asyncio.to_thread(_text_diff, text1, text2)
-    risk_task = analyze_document_risks(text2)
+    # ── 2. Parallel: clause diff + text diff stats ───────────────────────
+    clause_task = asyncio.to_thread(_compare_clauses, c1, c2)
+    diff_task   = asyncio.to_thread(_compute_text_diff_stats, text1, text2)
 
-    clause_changes, text_diff, risk_ai = await asyncio.gather(
-        clause_task, diff_task, risk_task
+    raw_changes, text_diff_stats = await asyncio.gather(clause_task, diff_task)
+
+    # ── 3. Risk scoring ──────────────────────────────────────────────────
+    risk = _risk_score(raw_changes)
+
+    # ── 4. LLM enrichment (per-clause summaries + insights + recommendation)
+    llm_data = await _run_llm_enrichment(text1, text2, raw_changes)
+
+    clause_summaries    = llm_data.get("clause_summaries", {})
+    semantic_insights   = llm_data.get("semantic_insights", [])
+    recommendation      = llm_data.get("recommendation", "")
+
+    # ── 5. Merge LLM summaries into clause_changes ───────────────────────
+    clause_changes: List[Dict] = []
+    for c in raw_changes:
+        key     = c["clause"]
+        summary = clause_summaries.get(key, "")
+        if not summary:
+            # Auto-generate a fallback summary so the field is never blank
+            ct = c["change_type"]
+            summary = (
+                f"{key.replace('_', ' ').capitalize()} clause has been {ct}."
+            )
+        clause_changes.append({
+            "clause":         key,
+            "change_type":    c["change_type"],
+            "original_value": c["original_value"],
+            "revised_value":  c["revised_value"],
+            "severity":       c["severity"],
+            "summary":        summary,
+        })
+
+    duration_ms = int((time.perf_counter() - t_start) * 1000)
+
+    logger.info(
+        f"[comparison] done — {duration_ms}ms "
+        f"changes={len(clause_changes)} "
+        f"risk={risk['overall_risk_level']} "
+        f"insights={len(semantic_insights)}"
     )
 
-    risk = _risk_score(clause_changes)
-
-    llm_data = await _run_llm(text1, text2, clause_changes)
-
-    duration = int((time.time() - start) * 1000)
-
     return {
-        "status": "success",
-        "duration_ms": duration,
-
-        "summary": {
-            "total_changes": len(clause_changes),
-            "risk_score": risk["risk_score"],
-            "overall_risk": risk["overall_risk"],
+        "status":      "success",
+        "log_id":      log_id,
+        "duration_ms": duration_ms,
+        "comparison": {
+            "session_id":        session_id,
+            "doc1_filename":     doc1_filename,
+            "doc2_filename":     doc2_filename,
+            "compared_at":       datetime.now(timezone.utc).isoformat(),
+            "total_changes":     len(clause_changes),
             "high_risk_changes": risk["high_risk_changes"],
-            "recommendation": llm_data.get("recommendation", "")
+            "overall_risk_level": risk["overall_risk_level"],
+            "recommendation":    recommendation,
+            "clause_changes":    clause_changes,
+            "semantic_insights": semantic_insights,
+            "text_diff_stats":   text_diff_stats,
         },
-
-        "grouped_changes": {
-            g: [c for c in clause_changes if c["group"] == g]
-            for g in ["financial", "legal", "operational", "general"]
-        },
-
-        "clause_changes": clause_changes,
-
-        "semantic_insights": llm_data.get("insights", []),
-        "clause_risk_analysis": llm_data.get("clause_risks", []),
-        "negotiation_suggestions": llm_data.get("negotiation_suggestions", []),
-
-        "text_diff": text_diff,
-        "risk_analysis": risk_ai
     }

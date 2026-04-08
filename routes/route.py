@@ -613,112 +613,118 @@ async def compare_documents_api(
     file1: UploadFile = File(...),
     file2: UploadFile = File(...),
 ):
+    """
+    Compare two PDF documents and return a structured diff matching the
+    target JSON schema.
+ 
+    Steps:
+      1. Extract text from both PDFs in parallel.
+      2. Classify document types in parallel.
+      3. Extract clauses from both documents in parallel (LLM-first).
+      4. Run compare_documents() → produces target-shaped JSON.
+      5. Log the result to the DB and inject log_id into the response.
+    """
     request_id = str(uuid.uuid4())
     session_id = str(uuid.uuid4())
-    t_start = time.perf_counter()
-
-    status = "success"
-    error_msg = None
-
-    duration_ms = 0
-    total_changes = 0
-    high_risk_changes = 0
-    overall_risk_level = "low"
-    similarity_percent = ""
-
-    input_tokens = 0
-    output_tokens = 0
-
-    path1 = path2 = None
-
-    logger.info(f"[{request_id}] ── COMPARE REQUEST START ───────────────────")
-    logger.info(f"[{request_id}] files=({file1.filename}, {file2.filename})")
-
+    t_start    = time.perf_counter()
+ 
+    status              = "success"
+    error_msg           = None
+    duration_ms         = 0
+    total_changes       = 0
+    high_risk_changes   = 0
+    overall_risk_level  = "low"
+    similarity_percent  = ""
+    input_tokens        = 0
+    output_tokens       = 0
+    compare_result      = {}
+    path1 = path2       = None
+ 
+    logger.info(f"[{request_id}] ── COMPARE START ── files=({file1.filename}, {file2.filename})")
+ 
     try:
-        # STEP 1 — Extract text (parallel)
-        task1 = extract_text_from_upload(file1, endpoint="/compare-documents")
-        task2 = extract_text_from_upload(file2, endpoint="/compare-documents")
-
+        # ── Step 1: Extract text (parallel) ──────────────────────────────
         (text1, pages1, total1, _, _, path1), \
-        (text2, pages2, total2, _, _, path2) = await asyncio.gather(task1, task2)
-
-        # STEP 2 — Validate
-        if len(text1.split()) < 20 or len(text2.split()) < 20:
-            raise HTTPException(status_code=400, detail="Documents too short for comparison")
-
-        # STEP 3 — Classify (parallel)
-        doc_type1_task = classify_document(text1)
-        doc_type2_task = classify_document(text2)
-
-        doc_type1, doc_type2 = await asyncio.gather(doc_type1_task, doc_type2_task)
-
-        # STEP 4 — Clause extraction (parallel)
-        clauses1_task = extract_clauses(text1)
-        clauses2_task = extract_clauses(text2)
-
-        clauses1, clauses2 = await asyncio.gather(clauses1_task, clauses2_task)
-
-        # STEP 5 — Comparison
-        compare_result = await compare_documents(
-            text1, text2, clauses1, clauses2
+        (text2, pages2, total2, _, _, path2) = await asyncio.gather(
+            extract_text_from_upload(file1, endpoint="/compare-documents"),
+            extract_text_from_upload(file2, endpoint="/compare-documents"),
         )
-
-        # STEP 6 — Extract logging metrics
-        summary = compare_result.get("summary", {})
-        total_changes = summary.get("total_changes", 0)
-        high_risk_changes = summary.get("high_risk_changes", 0)
-        overall_risk_level = summary.get("overall_risk_level", "low").lower()
-        similarity_percent = compare_result.get("text_diff", {}).get("similarity_percent", "")
-
-        llm_data = compare_result.get("llm_risk_analysis", {})
-        input_tokens = llm_data.get("input_tokens", 0)
-        output_tokens = llm_data.get("output_tokens", 0)
-
+ 
+        # ── Step 2: Validate length ───────────────────────────────────────
+        if len(text1.split()) < 20 or len(text2.split()) < 20:
+            raise HTTPException(
+                status_code=400,
+                detail="One or both documents are too short for comparison.",
+            )
+ 
+        # ── Step 3: Classify + Extract clauses (parallel) ─────────────────
+        (doc_type1, doc_type2), (clauses1, clauses2) = await asyncio.gather(
+            asyncio.gather(classify_document(text1), classify_document(text2)),
+            asyncio.gather(extract_clauses(text1),   extract_clauses(text2)),
+        )
+ 
+        logger.info(
+            f"[{request_id}] types=({doc_type1}, {doc_type2}) "
+            f"clauses=({len(clauses1)}, {len(clauses2)})"
+        )
+ 
+        # ── Step 4: Compare ───────────────────────────────────────────────
+        compare_result = await compare_documents(
+            text1, text2, clauses1, clauses2,
+            doc1_filename=file1.filename or "document_1.pdf",
+            doc2_filename=file2.filename or "document_2.pdf",
+            session_id=session_id,
+            log_id=None,    # will be backfilled after DB insert
+        )
+ 
+        # Extract metrics for DB logging
+        comp  = compare_result.get("comparison", {})
+        total_changes      = comp.get("total_changes", 0)
+        high_risk_changes  = comp.get("high_risk_changes", 0)
+        overall_risk_level = comp.get("overall_risk_level", "low")
+        similarity_percent = comp.get("text_diff_stats", {}).get("similarity_percent", "")
+ 
     except HTTPException:
-        status = "failed"
+        status    = "failed"
         error_msg = "HTTP error"
         raise
-
+ 
     except Exception as e:
-        status = "failed"
+        status    = "failed"
         error_msg = str(e)
-        logger.exception(f"[{request_id}] compare error: {e}")
-        raise HTTPException(status_code=500, detail="Comparison failed")
-
-    finally:
-        duration_ms = int((time.perf_counter() - t_start) * 1000)
-
-        # DB LOGGING
-        await log_comparison_request(
-            session_id=session_id,
-            request_id=request_id,
-            doc1_filename=file1.filename or "unknown",
-            doc2_filename=file2.filename or "unknown",
-            status=status,
-            duration_ms=duration_ms,
-            total_changes=total_changes,
-            high_risk_changes=high_risk_changes,
-            overall_risk_level=overall_risk_level,
-            similarity_percent=similarity_percent,
-            result_json=compare_result if status == "success" else None,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            error_message=error_msg,
-        )
-
-        # cleanup
-        for p in [path1, path2]:
-            if p and os.path.exists(p):
-                os.remove(p)
-
-    logger.info(f"[{request_id}] ── COMPLETE — {duration_ms}ms ─────────────")
-
-    return {
-        "status": status,
-        "request_id": request_id,
-        "document_types": {
-            "doc1": doc_type1,
-            "doc2": doc_type2
-        },
-        "comparison": compare_result
-    }
+        logger.exception(f"[{request_id}] comparison error: {e}")
+        raise HTTPException(status_code=500, detail="Document comparison failed.")
+ 
+    # finally:
+    #     duration_ms = int((time.perf_counter() - t_start) * 1000)
+ 
+    #     # ── Step 5: Log to DB ─────────────────────────────────────────────
+    #     log_id = await log_comparison_request(
+    #         session_id=session_id,
+    #         request_id=request_id,
+    #         doc1_filename=file1.filename or "unknown",
+    #         doc2_filename=file2.filename or "unknown",
+    #         status=status,
+    #         duration_ms=duration_ms,
+    #         total_changes=total_changes,
+    #         high_risk_changes=high_risk_changes,
+    #         overall_risk_level=overall_risk_level,
+    #         similarity_percent=similarity_percent,
+    #         result_json=compare_result if status == "success" else None,
+    #         input_tokens=input_tokens,
+    #         output_tokens=output_tokens,
+    #         error_message=error_msg,
+    #     )
+ 
+    #     # Cleanup temp files
+    #     for p in [path1, path2]:
+    #         if p and os.path.exists(p):
+    #             os.remove(p)
+ 
+    #     logger.info(f"[{request_id}] ── COMPLETE — {duration_ms}ms ──")
+ 
+    # # Inject log_id into response (DB layer returns the inserted row id)
+    # if compare_result and log_id:
+    #     compare_result["log_id"] = log_id
+ 
+    return compare_result

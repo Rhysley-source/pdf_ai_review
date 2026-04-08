@@ -325,20 +325,22 @@ async def log_comparison_request(
     error_message: str | None = None,
     client_ip: str | None = None,
     user_agent: str | None = None,
-) -> None:
+) -> int | None:
     """
-    Logs a contract comparison request.
+    Log a contract comparison request to comparison_logs.
+ 
+    Returns the inserted row id (int) on success, or None on failure.
     Never raises — safe for production pipelines.
     """
-    import json as _json
-
-    total_tokens = input_tokens + output_tokens
+    from db_files.db import get_pool   # local import to avoid circular
+ 
+    total_tokens    = input_tokens + output_tokens
     result_json_str = _json.dumps(result_json) if result_json else None
-
+ 
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
-            await conn.execute(
+            row_id = await conn.fetchval(
                 """
                 INSERT INTO comparison_logs (
                     session_id, request_id,
@@ -351,16 +353,17 @@ async def log_comparison_request(
                     input_tokens, output_tokens, total_tokens,
                     client_ip, user_agent
                 ) VALUES (
-                    $1, $2,
-                    $3, $4,
+                    $1,  $2,
+                    $3,  $4,
                     NOW(), $5,
-                    $6, $7,
-                    $8, $9,
+                    $6,  $7,
+                    $8,  $9,
                     $10, $11,
                     $12,
                     $13, $14, $15,
                     $16, $17
                 )
+                RETURNING id
                 """,
                 session_id,
                 request_id,
@@ -380,16 +383,18 @@ async def log_comparison_request(
                 client_ip,
                 user_agent,
             )
-
+ 
         logger.info(
-            f"[db] comparison logged — session={session_id} "
+            f"[db] comparison logged — id={row_id} session={session_id} "
             f"docs=({doc1_filename}, {doc2_filename}) "
             f"changes={total_changes} risk={overall_risk_level} "
             f"time={duration_ms}ms status={status}"
         )
-
+        return row_id
+ 
     except Exception as e:
         logger.error(f"[db] log_comparison_request failed: {e}")
+        return None
 
 # ---------------------------------------------------------------------------
 # Query helpers (optional — for admin/stats endpoints)
