@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from routes.route import router
 from routes.convert_route import router as convert_router
 from document_generation.document_generator import router as document_generate_router
+from document_validation_route import router as document_validation_router
 from db_files.db import init_db, close_pool
 
 # ---------------------------------------------------------------------------
