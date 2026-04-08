@@ -12,10 +12,14 @@ from functools import partial
 from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from llm_model.ai_model import generate_analysis, generate_analysis_stream, transcribe_audio
 from utils.json_utils import extract_json
-from db_files.db import log_request
+from db_files.db import log_request, log_comparison_request
 from feature_modules.key_clause_extraction import classify_document, DOCUMENT_HANDLERS, extract_text_from_upload
 from feature_modules.risk_detection import analyze_document_risks
 from auth import verify_api_key
+
+# for comparison endpoint
+from feature_modules.clause_extraction import extract_clauses
+from feature_modules.document_comparison import compare_documents
 
 logger = logging.getLogger(__name__)
 
@@ -602,3 +606,119 @@ async def convert_pdf_to_docx(
         if os.path.exists(file_path):
             os.remove(file_path)
             logger.debug(f"[{request_id}] temp file deleted")
+
+# POST /compare-documents
+@router.post("/compare-documents")
+async def compare_documents_api(
+    file1: UploadFile = File(...),
+    file2: UploadFile = File(...),
+):
+    request_id = str(uuid.uuid4())
+    session_id = str(uuid.uuid4())
+    t_start = time.perf_counter()
+
+    status = "success"
+    error_msg = None
+
+    duration_ms = 0
+    total_changes = 0
+    high_risk_changes = 0
+    overall_risk_level = "low"
+    similarity_percent = ""
+
+    input_tokens = 0
+    output_tokens = 0
+
+    path1 = path2 = None
+
+    logger.info(f"[{request_id}] ── COMPARE REQUEST START ───────────────────")
+    logger.info(f"[{request_id}] files=({file1.filename}, {file2.filename})")
+
+    try:
+        # STEP 1 — Extract text (parallel)
+        task1 = extract_text_from_upload(file1, endpoint="/compare-documents")
+        task2 = extract_text_from_upload(file2, endpoint="/compare-documents")
+
+        (text1, pages1, total1, _, _, path1), \
+        (text2, pages2, total2, _, _, path2) = await asyncio.gather(task1, task2)
+
+        # STEP 2 — Validate
+        if len(text1.split()) < 20 or len(text2.split()) < 20:
+            raise HTTPException(status_code=400, detail="Documents too short for comparison")
+
+        # STEP 3 — Classify (parallel)
+        doc_type1_task = classify_document(text1)
+        doc_type2_task = classify_document(text2)
+
+        doc_type1, doc_type2 = await asyncio.gather(doc_type1_task, doc_type2_task)
+
+        # STEP 4 — Clause extraction (parallel)
+        clauses1_task = extract_clauses(text1)
+        clauses2_task = extract_clauses(text2)
+
+        clauses1, clauses2 = await asyncio.gather(clauses1_task, clauses2_task)
+
+        # STEP 5 — Comparison
+        compare_result = await compare_documents(
+            text1, text2, clauses1, clauses2
+        )
+
+        # STEP 6 — Extract logging metrics
+        summary = compare_result.get("summary", {})
+        total_changes = summary.get("total_changes", 0)
+        high_risk_changes = summary.get("high_risk_changes", 0)
+        overall_risk_level = summary.get("overall_risk_level", "low").lower()
+        similarity_percent = compare_result.get("text_diff", {}).get("similarity_percent", "")
+
+        llm_data = compare_result.get("llm_risk_analysis", {})
+        input_tokens = llm_data.get("input_tokens", 0)
+        output_tokens = llm_data.get("output_tokens", 0)
+
+    except HTTPException:
+        status = "failed"
+        error_msg = "HTTP error"
+        raise
+
+    except Exception as e:
+        status = "failed"
+        error_msg = str(e)
+        logger.exception(f"[{request_id}] compare error: {e}")
+        raise HTTPException(status_code=500, detail="Comparison failed")
+
+    finally:
+        duration_ms = int((time.perf_counter() - t_start) * 1000)
+
+        # DB LOGGING
+        await log_comparison_request(
+            session_id=session_id,
+            request_id=request_id,
+            doc1_filename=file1.filename or "unknown",
+            doc2_filename=file2.filename or "unknown",
+            status=status,
+            duration_ms=duration_ms,
+            total_changes=total_changes,
+            high_risk_changes=high_risk_changes,
+            overall_risk_level=overall_risk_level,
+            similarity_percent=similarity_percent,
+            result_json=compare_result if status == "success" else None,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            error_message=error_msg,
+        )
+
+        # cleanup
+        for p in [path1, path2]:
+            if p and os.path.exists(p):
+                os.remove(p)
+
+    logger.info(f"[{request_id}] ── COMPLETE — {duration_ms}ms ─────────────")
+
+    return {
+        "status": status,
+        "request_id": request_id,
+        "document_types": {
+            "doc1": doc_type1,
+            "doc2": doc_type2
+        },
+        "comparison": compare_result
+    }
