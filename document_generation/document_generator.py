@@ -2,13 +2,20 @@ import base64
 import io
 import json
 import os
+import re
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-from .prompt_templates import DOCUMENT_GENERATION_PROMPT, REGENERATE_PROMPT
+from .prompt_templates import (
+    QUERY_ANALYSIS_PROMPT,
+    DOCUMENT_GENERATION_V2_PROMPT,
+    SECTION_TEMPLATES,
+    build_generation_context,
+    REGENERATE_PROMPT,
+)
 from auth import verify_api_key
 
 load_dotenv()
@@ -115,6 +122,50 @@ async def _call_llm(system_prompt: str, user_message: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Input validation — reject gibberish / meaningless prompts
+# ---------------------------------------------------------------------------
+
+_FORMAT_HINT = (
+    "Please provide a clear document generation request. Examples:\n"
+    "  • \"Generate a service agreement between Company A and Company B\"\n"
+    "  • \"Create an employment offer letter for a software engineer role\"\n"
+    "  • \"Draft a non-disclosure agreement between two parties\"\n"
+    "  • \"Make an invoice for web development services worth $2,000\"\n"
+    "  • \"Write a residential lease agreement for a 1-year term\""
+)
+
+
+def _is_gibberish(text: str) -> bool:
+    """
+    Returns True when the prompt looks like gibberish or has no meaningful content.
+
+    Checks:
+    1. Too short after stripping whitespace.
+    2. Alphabetic characters make up less than 50 % of the text
+       (catches strings like "123 @@@ !!!" or random symbols).
+    3. Fewer than 2 words that are at least 3 alphabetic characters long
+       (catches single-char spam like "a b c d e" or keyboard mashing).
+    """
+    stripped = text.strip()
+
+    # Too short to mean anything
+    if len(stripped) < 5:
+        return True
+
+    # Low alphabetic ratio — mostly numbers / symbols / spaces
+    alpha_count = sum(1 for c in stripped if c.isalpha())
+    if len(stripped) > 0 and (alpha_count / len(stripped)) < 0.50:
+        return True
+
+    # Not enough real words (3+ consecutive alpha chars)
+    real_words = re.findall(r"[A-Za-z]{3,}", stripped)
+    if len(real_words) < 2:
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Output cleaning
 # ---------------------------------------------------------------------------
 
@@ -134,6 +185,66 @@ def _clean_html(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Pipeline helpers — Step 1, Step 2, Step 3
+# ---------------------------------------------------------------------------
+
+def _parse_analysis_json(raw: str) -> dict:
+    """
+    Robustly parses the Step 1 LLM response into a dict.
+    Strips markdown fences if present, validates required keys,
+    and clamps doc_type to known SECTION_TEMPLATES keys.
+    """
+    cleaned = raw.strip()
+    if "```" in cleaned:
+        cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Step 1 returned non-JSON: {raw[:200]}") from exc
+
+    if not isinstance(parsed, dict) or "doc_type" not in parsed:
+        raise ValueError(f"Step 1 JSON missing 'doc_type': {raw[:200]}")
+
+    # Clamp doc_type to known types
+    if parsed["doc_type"] not in SECTION_TEMPLATES:
+        parsed["doc_type"] = "other"
+
+    # Ensure fields is always a dict
+    if not isinstance(parsed.get("fields"), dict):
+        parsed["fields"] = {}
+
+    return parsed
+
+
+async def _analyze_query(user_prompt: str) -> dict:
+    """Step 1 — LLM call to detect document type and extract field values."""
+    logger.info("[doc-gen] Step 1: analysing query...")
+    raw = await _call_llm(QUERY_ANALYSIS_PROMPT.template, user_prompt)
+    logger.info(f"[doc-gen] Step 1 raw output: {raw[:300]}")
+    return _parse_analysis_json(raw)
+
+
+def _build_template_context(analysis: dict) -> dict:
+    """Step 2 — pure Python template merge. No LLM involved."""
+    doc_type         = analysis["doc_type"]
+    section_template = SECTION_TEMPLATES.get(doc_type, SECTION_TEMPLATES["other"])
+    context          = build_generation_context(analysis, section_template)
+    logger.info(f"[doc-gen] Step 2: built template context for doc_type='{doc_type}'")
+    return context
+
+
+async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
+    """Step 3 — final LLM call using the enriched type-specific context."""
+    logger.info(f"[doc-gen] Step 3: generating HTML for '{context['doc_label']}'...")
+    system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
+        **context,
+        user_request=user_prompt,
+    )
+    return await _call_llm(system_prompt, user_prompt)
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -143,14 +254,29 @@ async def generate_document_html(
     _: None = Depends(verify_api_key),
 ):
     """
-    Generates an HTML document of any type based on user_prompt.
-    The LLM infers the document type automatically from the prompt.
-    Saves to html_db.json and returns raw HTML.
+    3-step pipeline:
+      Step 1 (LLM)    — detect document type + extract field values from user_prompt
+      Step 2 (Python) — select type-specific section template, merge extracted fields
+      Step 3 (LLM)    — generate final HTML using the enriched context
     """
-    system_prompt = DOCUMENT_GENERATION_PROMPT.format(user_request=request.user_prompt)
+    if _is_gibberish(request.user_prompt):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Invalid request: your prompt appears to be gibberish or unclear.\n\n"
+                + _FORMAT_HINT
+            ),
+        )
 
     try:
-        raw_html     = await _call_llm(system_prompt, request.user_prompt)
+        # Step 1: query analysis
+        analysis = await _analyze_query(request.user_prompt)
+
+        # Step 2: template building (pure Python)
+        context = _build_template_context(analysis)
+
+        # Step 3: final HTML generation
+        raw_html     = await _generate_html_from_context(context, request.user_prompt)
         cleaned_html = _clean_html(raw_html)
 
         if not cleaned_html.strip():
@@ -177,6 +303,19 @@ async def regenerate_document_html(
     Looks up HTML by document_id, applies user modifications,
     updates storage, and returns the modified HTML.
     """
+    if _is_gibberish(request.modification_query):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Invalid request: your modification query appears to be gibberish or unclear.\n\n"
+                "Please describe what you want to change. Examples:\n"
+                "  • \"Change the vendor name to Acme Corp\"\n"
+                "  • \"Update the due date to 30th April 2025\"\n"
+                "  • \"Add a 10% GST row to the totals table\"\n"
+                "  • \"Replace the client address with 123 Main Street, New York\""
+            ),
+        )
+
     db            = get_storage()
     existing_html = db.get(request.document_id)
 
