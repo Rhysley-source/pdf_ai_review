@@ -248,7 +248,6 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
 {{
   "document_type": "other",
   "document_label": "{doc_label}",
-  "risk_score": <integer calculated as described in Rules below, capped at 100>,
   "detected_risks": [
     {{
       "risk_name": "<specific risk name relevant to {doc_label}>",
@@ -274,10 +273,6 @@ Rules:
 - Only include fields actually missing
 - If no risks found, return detected_risks as []
 - If no fields missing, return missing_fields as []
-- risk_score = min(
-    (High*30 + Medium*15 + Low*5) + (Critical*25 + Important*10 + Optional*5),
-    100
-  )
 
 Document:
 ---
@@ -302,7 +297,6 @@ Return this exact structure filled in:
 {{
   "document_type": "other",
   "document_label": "{doc_label}",
-  "risk_score": 0,
   "detected_risks": [],
   "missing_fields": [],
   "overall_assessment": ""
@@ -320,7 +314,6 @@ Document:
         result = {
             "document_type": "other",
             "document_label": doc_label,
-            "risk_score": 0,
             "detected_risks": [],
             "missing_fields": [],
             "overall_assessment": "Risk analysis could not be completed for this document.",
@@ -354,7 +347,6 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
 {{
   "document_type": "{doc_type}",
   "document_label": "{doc_label}",
-  "risk_score": <integer calculated EXACTLY as described below, capped at 100>,
   "detected_risks": [
     {{
       "risk_name": "<risk category name>",
@@ -379,13 +371,6 @@ Rules:
 - Only include fields that are actually missing
 - If no risks found, return detected_risks as []
 - If no fields missing, return missing_fields as []
-- risk_score MUST be calculated by adding BOTH components below, then capping at 100:
-    Component 1 — detected_risks severity:
-      High * 30 + Medium * 15 + Low * 5
-    Component 2 — missing_fields importance:
-      Critical * 25 + Important * 10 + Optional * 5
-    Final: min(Component1 + Component2, 100)
-- Example: 1 High risk + 1 Critical missing field = (1*30) + (1*25) = 55
 
 Document Text:
 ---
@@ -411,7 +396,6 @@ Document Text:
 {{
   "document_type": "{doc_type}",
   "document_label": "{doc_label}",
-  "risk_score": 0,
   "detected_risks": [],
   "missing_fields": [],
   "overall_assessment": ""
@@ -433,7 +417,6 @@ Document:
         result = {
             "document_type": doc_type,
             "document_label": doc_label,
-            "risk_score": 0,
             "detected_risks": [],
             "missing_fields": [],
             "overall_assessment": "Risk analysis could not be completed for this document.",
@@ -468,9 +451,26 @@ async def analyze_document_risks(text: str) -> dict:
         logger.info(f"[risk_detection] Using dynamic analysis for '{doc_label}'")
         analysis = await _analyze_risks_dynamic(text, doc_label)
 
+    analysis.pop("risk_score", None)
+
+    # Drop any missing_field item where field_name is null/empty
+    analysis["missing_fields"] = [
+        f for f in (analysis.get("missing_fields") or [])
+        if isinstance(f, dict)
+        and f.get("field_name") not in (None, "")
+    ]
+
+    detected_count = len(analysis.get("detected_risks") or [])
+    missing_count  = len(analysis["missing_fields"])
+
     return {
-        "status": "success",
+        "status":        "success",
         "analysis_type": "risk_detection",
         "document_type": doc_label,
+        "risk_count": {
+            "detected_risks": detected_count,
+            "missing_fields": missing_count,
+            "total":          detected_count + missing_count,
+        },
         "data": analysis,
     }
