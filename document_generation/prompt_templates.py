@@ -524,6 +524,35 @@ User Modification Request:
 
 
 # ---------------------------------------------------------------------------
+# Regeneration intent check prompt
+# Classifies whether a modification query is trying to switch to a completely
+# different document type vs. modifying the existing document.
+# Returns a single JSON with "intent": "modify" | "new_document" and "reason".
+# ---------------------------------------------------------------------------
+
+REGENERATION_INTENT_PROMPT = SimulatedPromptTemplate(
+    template="""You are a strict intent classifier for document modification requests.
+
+Current document type: {current_doc_type}
+
+User's modification query: "{modification_query}"
+
+Decide the user's intent:
+
+- "modify"       → the user wants to change, improve, update, or restyle the EXISTING {current_doc_type}
+                   (e.g. change a value, improve layout, add a row, rename a field, make it look better)
+
+- "new_document" → the user wants to generate a COMPLETELY DIFFERENT type of document
+                   (e.g. convert an invoice into a contract, turn a resume into an NDA,
+                   make this a purchase order instead, generate a lease from this invoice)
+
+Return ONLY this JSON — no markdown, no explanation:
+{{"intent": "modify" | "new_document", "reason": "<one short sentence>"}}""",
+    input_variables=["current_doc_type", "modification_query"],
+)
+
+
+# ---------------------------------------------------------------------------
 # Intent check prompt — kept for backward compatibility (currently unused).
 # ---------------------------------------------------------------------------
 

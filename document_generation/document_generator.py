@@ -14,6 +14,7 @@ from .prompt_templates import (
     QUERY_ANALYSIS_PROMPT,
     TEMPLATE_BUILD_PROMPT,
     DOCUMENT_GENERATION_V2_PROMPT,
+    REGENERATION_INTENT_PROMPT,
     SECTION_TEMPLATES,
     build_generation_context,
     REGENERATE_PROMPT,
@@ -138,33 +139,57 @@ _FORMAT_HINT = (
 
 
 _MODIFICATION_KEYWORDS = {
+    # direct action words
     "change", "update", "replace", "edit", "modify", "fix", "correct",
     "add", "remove", "delete", "insert", "rename", "set", "adjust",
     "rewrite", "move", "swap", "convert", "format", "increase", "decrease",
-    "append", "clear", "shift", "put", "make it", "turn",
+    "append", "clear", "shift", "put", "turn",
+    # improvement / style words
+    "improve", "better", "enhance", "refine", "redesign", "beautify",
+    "nicer", "cleaner", "professional", "prettier", "modernize", "upgrade",
+    "simplify", "bold", "resize", "align", "restyle", "revamp",
+    # phrase fragments (checked as substrings)
+    "make it", "make the", "use a", "use different", "look better",
+    "look more", "more professional", "more formal", "more clean",
 }
 
-_NEW_GENERATION_KEYWORDS = {
-    "generate", "create", "draft", "write a", "make a", "build a",
-    "produce", "compose", "prepare a", "give me a", "new document",
+# Only phrases that clearly mean "create a brand new document"
+_NEW_GENERATION_PHRASES = {
+    "generate a", "generate an", "generate new",
+    "create a", "create an", "create new",
+    "draft a", "draft an",
+    "write a new", "write an new",
+    "build a", "build an",
+    "produce a", "produce an",
+    "give me a new", "give me an new",
+    "new document", "new invoice", "new contract", "new resume",
 }
 
 
 def _is_modification_query(text: str) -> bool:
     """
-    Returns True if the text looks like a modification request on an existing document.
-    Returns False if it looks like a new document generation request.
+    Returns True if the text looks like a modification/improvement request
+    on an existing document.
+    Returns False only if it clearly asks for a brand new document.
     """
     lower = text.lower()
 
-    # Reject if it reads like a new document request
-    for phrase in _NEW_GENERATION_KEYWORDS:
+    # Reject only if it explicitly asks for a brand new document
+    for phrase in _NEW_GENERATION_PHRASES:
         if phrase in lower:
             return False
 
-    # Accept if it contains at least one modification keyword
+    # Accept if any modification/improvement keyword is present
     words = set(re.findall(r"[a-z]+", lower))
-    return bool(words & _MODIFICATION_KEYWORDS)
+    if words & _MODIFICATION_KEYWORDS:
+        return True
+
+    # Also check multi-word phrases as substrings
+    for phrase in _MODIFICATION_KEYWORDS:
+        if " " in phrase and phrase in lower:
+            return True
+
+    return False
 
 
 def _is_gibberish(text: str) -> bool:
@@ -370,6 +395,64 @@ async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Regeneration intent checker
+# ---------------------------------------------------------------------------
+
+def _extract_doc_type_from_html(html: str) -> str:
+    """
+    Best-effort extraction of the document type from stored HTML.
+    Looks for a <title> or the first <h1>/<h2> tag as a readable label.
+    Falls back to 'existing document' if nothing is found.
+    """
+    import re as _re
+    title_match = _re.search(r"<title[^>]*>(.*?)</title>", html, _re.IGNORECASE | _re.DOTALL)
+    if title_match:
+        return title_match.group(1).strip()
+    h_match = _re.search(r"<h[12][^>]*>(.*?)</h[12]>", html, _re.IGNORECASE | _re.DOTALL)
+    if h_match:
+        # Strip inner HTML tags
+        return _re.sub(r"<[^>]+>", "", h_match.group(1)).strip()
+    return "existing document"
+
+
+async def _check_regeneration_intent(modification_query: str, existing_html: str) -> None:
+    """
+    Calls LLM to verify the modification query intends to modify the existing
+    document — not generate a completely different document type.
+    Raises HTTP 422 if the intent is 'new_document'.
+    Silently passes on parse errors (fail open — let the LLM handle it).
+    """
+    current_doc_type = _extract_doc_type_from_html(existing_html)
+
+    system_prompt = REGENERATION_INTENT_PROMPT.format(
+        current_doc_type=current_doc_type,
+        modification_query=modification_query,
+    )
+
+    try:
+        raw = await _call_llm(system_prompt, modification_query)
+        cleaned = raw.strip().replace("```json", "").replace("```", "").strip()
+        parsed  = json.loads(cleaned)
+        intent  = parsed.get("intent", "modify")
+        reason  = parsed.get("reason", "")
+    except Exception:
+        # Fail open — if LLM or parse fails, don't block the user
+        logger.warning("[doc-gen] Regeneration intent check failed — skipping")
+        return
+
+    if intent == "new_document":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error":   "wrong_endpoint",
+                "message": f"Your request appears to be asking for a new type of document, not a modification of the existing one.",
+                "reason":  reason,
+                "hint":    "Use /generate-html to create a new document. Use /regenerate-html only to modify the existing document.",
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -397,28 +480,99 @@ async def generate_document_html(
 
     try:
         # Step 1: query analysis
-        analysis = await _analyze_query(request.user_prompt)
+        try:
+            analysis = await _analyze_query(request.user_prompt)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("[doc-gen] Step 1 failed")
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "step1_failed",
+                    "step": "Query Analysis",
+                    "message": "Failed to analyse your request. The AI model did not respond correctly.",
+                    "hint": "Try rephrasing your prompt.",
+                    "detail": str(e),
+                },
+            )
 
         # Step 2: blueprint building (LLM)
-        context = await _build_template_context(analysis)
+        try:
+            context = await _build_template_context(analysis)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("[doc-gen] Step 2 failed")
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "step2_failed",
+                    "step": "Blueprint Building",
+                    "message": "Failed to build the document blueprint. Falling back was not possible.",
+                    "hint": "Try again — this is usually a transient model error.",
+                    "detail": str(e),
+                },
+            )
 
         # Step 3: final HTML generation
-        raw_html     = await _generate_html_from_context(context, request.user_prompt)
+        try:
+            raw_html = await _generate_html_from_context(context, request.user_prompt)
+        except Exception as e:
+            logger.exception("[doc-gen] Step 3 failed")
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "step3_failed",
+                    "step": "HTML Generation",
+                    "message": "The AI model failed to generate the document HTML.",
+                    "hint": "Try again or simplify your prompt.",
+                    "detail": str(e),
+                },
+            )
+
         cleaned_html = _clean_html(raw_html)
 
         if not cleaned_html.strip():
             raise HTTPException(
                 status_code=500,
-                detail=f"AI generated empty HTML. Raw output: {raw_html[:500]}"
+                detail={
+                    "error": "empty_output",
+                    "step": "HTML Generation",
+                    "message": "The AI model returned an empty document.",
+                    "hint": "Try again or add more detail to your prompt.",
+                    "raw_preview": raw_html[:300],
+                },
             )
 
-        update_storage(doc_id, cleaned_html)
+        try:
+            update_storage(doc_id, cleaned_html)
+        except Exception as e:
+            logger.exception("[doc-gen] Storage write failed")
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "storage_failed",
+                    "step": "Save Document",
+                    "message": "Document was generated but could not be saved to storage.",
+                    "detail": str(e),
+                },
+            )
+
         return HTMLResponse(content=cleaned_html, headers={"X-Document-Id": doc_id})
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+        logger.exception("[doc-gen] Unexpected error in /generate-html")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "unexpected_error",
+                "message": "An unexpected error occurred during document generation.",
+                "detail": str(e),
+            },
+        )
 
 
 @router.post("/regenerate-html", response_class=HTMLResponse)
@@ -466,22 +620,58 @@ async def regenerate_document_html(
             detail=f"No document found with ID '{request.document_id}'. Generate it first."
         )
 
+    # LLM intent check — reject if user is trying to generate a different document type
+    await _check_regeneration_intent(request.modification_query, existing_html)
+
     system_prompt = REGENERATE_PROMPT.format(
         existing_html=existing_html,
         modification_query=request.modification_query
     )
 
     try:
-        raw_html     = await _call_llm(system_prompt, request.modification_query)
-        cleaned_html = _clean_html(raw_html)
-
-        update_storage(request.document_id, cleaned_html)
-        return HTMLResponse(content=cleaned_html)
-
-    except HTTPException:
-        raise
+        raw_html = await _call_llm(system_prompt, request.modification_query)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Regeneration failed: {str(e)}")
+        logger.exception("[doc-gen] Regeneration LLM call failed")
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "llm_failed",
+                "step": "Apply Modification",
+                "message": "The AI model failed to apply your modification.",
+                "hint": "Try again or rephrase what you want to change.",
+                "detail": str(e),
+            },
+        )
+
+    cleaned_html = _clean_html(raw_html)
+
+    if not cleaned_html.strip():
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "empty_output",
+                "step": "Apply Modification",
+                "message": "The AI model returned an empty document after modification.",
+                "hint": "Try again — the original document is still saved.",
+                "raw_preview": raw_html[:300],
+            },
+        )
+
+    try:
+        update_storage(request.document_id, cleaned_html)
+    except Exception as e:
+        logger.exception("[doc-gen] Storage write failed on regeneration")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "storage_failed",
+                "step": "Save Modified Document",
+                "message": "Modification was applied but could not be saved to storage.",
+                "detail": str(e),
+            },
+        )
+
+    return HTMLResponse(content=cleaned_html)
 
 
 @router.get("/get-html/{document_id}", response_class=HTMLResponse)
