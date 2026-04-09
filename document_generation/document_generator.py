@@ -74,12 +74,46 @@ def _cache_set(seed: int, value: dict) -> None:
     _pipeline_cache[seed] = value
 
 # ---------------------------------------------------------------------------
-# Storage — absolute path anchored to this file's directory
+# Storage — per-document files (fast O(1) read/write per doc)
+#
+# New writes go to  html_docs/<doc_id>.html  — one file per document.
+# This avoids reading+writing the entire html_db.json on every request.
+# Legacy html_db.json is kept as a read-only fallback for old documents.
 # ---------------------------------------------------------------------------
 
-_DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "html_db.json")
+_DOCS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "html_docs")
+_DB_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "html_db.json")
+os.makedirs(_DOCS_DIR, exist_ok=True)
 
 
+def _doc_path(doc_id: str) -> str:
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", doc_id)
+    return os.path.join(_DOCS_DIR, f"{safe_id}.html")
+
+
+def _save_document(doc_id: str, html: str) -> None:
+    """Write a single document file — no JSON serialization, no full-file rewrite."""
+    with open(_doc_path(doc_id), "w", encoding="utf-8") as f:
+        f.write(html)
+
+
+def _load_document(doc_id: str) -> str | None:
+    """Read a single document file. Falls back to legacy html_db.json if not found."""
+    path = _doc_path(doc_id)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    # Legacy fallback
+    if os.path.exists(_DB_FILE):
+        try:
+            with open(_DB_FILE, "r", encoding="utf-8") as f:
+                return json.load(f).get(doc_id)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return None
+
+
+# Kept for backward compatibility — reads legacy store only
 def get_storage() -> dict:
     if not os.path.exists(_DB_FILE):
         return {}
@@ -91,10 +125,8 @@ def get_storage() -> dict:
 
 
 def update_storage(doc_id: str, html_content: str) -> None:
-    db = get_storage()
-    db[doc_id] = html_content
-    with open(_DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(db, f, indent=4)
+    """Legacy writer — new code should call _save_document instead."""
+    _save_document(doc_id, html_content)
 
 
 # ---------------------------------------------------------------------------
@@ -134,10 +166,27 @@ def _prompt_seed(system_prompt: str, user_message: str) -> int:
     return int(digest[:8], 16)
 
 
-async def _call_llm(system_prompt: str, user_message: str, model: str | None = None) -> str:
+# Models that use max_completion_tokens instead of max_tokens
+_MAX_COMPLETION_TOKENS_MODELS = {
+    "gpt-5-nano", "gpt-4.1-nano", "gpt-4o-mini",
+    "o1", "o1-mini", "o3-mini", "o3",
+}
+
+# Token budgets per step
+_MAX_TOKENS_HTML  = 8192   # Step 3: full HTML document
+_MAX_TOKENS_JSON  = 2048   # Steps 1+2: small JSON responses
+
+
+async def _call_llm(
+    system_prompt: str,
+    user_message:  str,
+    model:         str | None = None,
+    max_tokens:    int = _MAX_TOKENS_HTML,
+) -> str:
     """
     Core LLM caller. Uses the full generation model by default.
     Pass model=_FAST_MODEL for lightweight JSON classification steps.
+    Pass max_tokens to cap output length per call.
     """
     model = model or os.environ.get("MODEL_NAME", _MODEL)
 
@@ -154,6 +203,12 @@ async def _call_llm(system_prompt: str, user_message: str, model: str | None = N
     if model not in _FIXED_TEMPERATURE_MODELS:
         kwargs["temperature"] = 0
 
+    # Token limit — parameter name differs by model family
+    if model in _MAX_COMPLETION_TOKENS_MODELS:
+        kwargs["max_completion_tokens"] = max_tokens
+    else:
+        kwargs["max_tokens"] = max_tokens
+
     try:
         response = await _CLIENT.chat.completions.create(**kwargs)
         choice   = response.choices[0]
@@ -164,7 +219,7 @@ async def _call_llm(system_prompt: str, user_message: str, model: str | None = N
             f"out={response.usage.completion_tokens} finish={finish}"
         )
         if finish == "length":
-            logger.warning("[html-gen] Response was cut off by the model's context limit (finish_reason=length)")
+            logger.warning("[html-gen] Response was cut off — increase max_tokens if HTML is incomplete")
         return content
     except Exception as e:
         logger.exception(f"[html-gen] OpenAI call failed: {e}")
@@ -173,7 +228,8 @@ async def _call_llm(system_prompt: str, user_message: str, model: str | None = N
 
 async def _call_llm_fast(system_prompt: str, user_message: str) -> str:
     """Lightweight LLM call using the fast model — for JSON classification only."""
-    return await _call_llm(system_prompt, user_message, model=_FAST_MODEL)
+    return await _call_llm(system_prompt, user_message,
+                           model=_FAST_MODEL, max_tokens=_MAX_TOKENS_JSON)
 
 
 # ---------------------------------------------------------------------------
@@ -481,13 +537,25 @@ def _analysis_summary(analysis: dict) -> dict:
 
 
 async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
-    """Step 3 — final LLM call using the enriched blueprint context."""
-    logger.info(f"[doc-gen] Step 3: generating HTML for '{context['doc_label']}'...")
+    """
+    Step 3 — final LLM call using the enriched blueprint context.
+    Result is cached by prompt seed — same context + same prompt → instant return.
+    """
     system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
         **context,
         user_request=user_prompt,
     )
-    return await _call_llm(system_prompt, user_prompt)
+    seed   = _prompt_seed(system_prompt, user_prompt)
+    cached = _cache_get(seed)
+    if cached and "html" in cached:
+        logger.info("[doc-gen] Step 3: cache hit — skipping LLM call")
+        return cached["html"]
+
+    logger.info(f"[doc-gen] Step 3: generating HTML for '{context['doc_label']}'...")
+    html = await _call_llm(system_prompt, user_prompt)
+
+    _cache_set(seed, {"html": html})
+    return html
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +707,7 @@ async def generate_document_html(
             )
 
         try:
-            update_storage(doc_id, cleaned_html)
+            await asyncio.to_thread(_save_document, doc_id, cleaned_html)
         except Exception as e:
             logger.exception("[doc-gen] Storage write failed")
             raise HTTPException(
@@ -691,10 +759,8 @@ async def regenerate_document_html(
             ),
         )
 
-    # Fetch existing HTML from storage (sync disk read wrapped in thread)
-    existing_html = await asyncio.to_thread(
-        lambda: get_storage().get(request.document_id)
-    )
+    # Fetch existing HTML — per-doc file read, wrapped in thread
+    existing_html = await asyncio.to_thread(_load_document, request.document_id)
 
     if not existing_html:
         raise HTTPException(
@@ -761,7 +827,7 @@ async def regenerate_document_html(
             })
 
         doc_id = request.document_id or str(uuid.uuid4())
-        update_storage(doc_id, cleaned_html)
+        await asyncio.to_thread(_save_document, doc_id, cleaned_html)
         return HTMLResponse(content=cleaned_html, headers={"X-Document-Id": doc_id})
 
     # ── Modify existing document path ───────────────────────────────────────
@@ -800,7 +866,7 @@ async def regenerate_document_html(
         )
 
     try:
-        update_storage(request.document_id, cleaned_html)
+        await asyncio.to_thread(_save_document, request.document_id, cleaned_html)
     except Exception as e:
         logger.exception("[doc-gen] Storage write failed on regeneration")
         raise HTTPException(
@@ -822,10 +888,9 @@ async def get_document_html(
     _: None = Depends(verify_api_key),
 ):
     """
-    Fetches previously generated HTML from html_db.json by document_id.
+    Fetches previously generated HTML by document_id.
     """
-    db = get_storage()
-    html = db.get(document_id)
+    html = await asyncio.to_thread(_load_document, document_id)
     if not html:
         raise HTTPException(
             status_code=404,
@@ -855,8 +920,7 @@ async def html_to_pdf(
         )
 
     if request.document_id:
-        db = get_storage()
-        html_content = db.get(request.document_id)
+        html_content = await asyncio.to_thread(_load_document, request.document_id)
         if not html_content:
             raise HTTPException(
                 status_code=404,
@@ -935,7 +999,7 @@ async def base64_to_text(
             detail="Invalid base64_data — could not decode to UTF-8 text."
         )
 
-    update_storage(request.doc_id, text_content)
+    await asyncio.to_thread(_save_document, request.doc_id, text_content)
     logger.info(f"[base64-text] updated doc_id='{request.doc_id}' ({len(text_content)} chars)")
 
     return {"doc_id": request.doc_id, "char_count": len(text_content)}
