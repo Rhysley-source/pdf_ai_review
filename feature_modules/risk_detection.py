@@ -312,23 +312,38 @@ async def _verify_missing_fields(
     system_prompt = f"""You are reviewing a section of a "{doc_label}" document.
 
 The following fields may be absent from the full document.
-Scan the text below and identify which of these fields ARE present — even if partial, implied, or expressed differently.
+Scan the text below and identify which of these fields have a REAL, filled-in value.
 
 Fields to check:
 {fields_list}
 
-Return ONLY a JSON array of the field names that you CAN find in this section (use the exact names from the list above):
+A field is PRESENT only if it contains an actual value (a real date, name, number, location, etc.).
+A field is NOT present if it:
+- Contains a placeholder like [Field Name], _____, TBD, <Field>, {{Field}}
+- Is blank or empty
+- Contains template instructions instead of real content
+
+Return ONLY a JSON array of the field names that have real values in this section (use the exact names from the list above):
 ["Field Name 1", "Field Name 2"]
 
-If none are found, return: []
-Do not include fields that are missing — only those that ARE present."""
+If none have real values, return: []
+No explanation, no markdown — only the JSON array."""
 
     async def _check_chunk(chunk: str) -> set[str]:
         try:
-            raw = await run_llm(chunk, system_prompt)
-            found = extract_json_from_text(raw)
-            if isinstance(found, list):
-                return {str(item).strip() for item in found if isinstance(item, str)}
+            raw     = await run_llm(chunk, system_prompt)
+            # extract_json_raw only handles dicts — parse the array directly
+            cleaned = raw.replace("```json", "").replace("```", "").strip()
+            parsed  = None
+            try:
+                parsed = json.loads(cleaned)
+            except json.JSONDecodeError:
+                start = cleaned.find("[")
+                end   = cleaned.rfind("]")
+                if start != -1 and end > start:
+                    parsed = json.loads(cleaned[start : end + 1])
+            if isinstance(parsed, list):
+                return {str(item).strip() for item in parsed if isinstance(item, str)}
         except Exception:
             pass
         return set()
@@ -448,9 +463,7 @@ async def _detect_placeholders_llm(text: str) -> list[dict]:
         return []
 
     count        = len(unique_placeholders)
-    display_list = ", ".join(f'"{p}"' for p in unique_placeholders[:10])
-    if count > 10:
-        display_list += f" … and {count - 10} more"
+    display_list = ", ".join(f'"{p}"' for p in unique_placeholders)
 
     logger.info(f"[risk_detection] Placeholder scan: {count} unique placeholder(s) found")
 
@@ -865,6 +878,27 @@ async def analyze_document_risks(text: str) -> dict:
         analysis["detected_risks"] = placeholder_risks + analysis.get("detected_risks", [])
 
     analysis = _normalize_result(analysis)
+
+    # Convert each confirmed missing field into a detected_risk entry as well.
+    # Missing required fields are a real risk — the document is incomplete.
+    # importance → severity mapping: Critical→High, Important→Medium, Optional→Low
+    _IMPORTANCE_TO_SEVERITY = {"Critical": "High", "Important": "Medium", "Optional": "Low"}
+    missing_as_risks = [
+        {
+            "risk_name":       f"Missing Required Field: {f['field_name']}",
+            "severity":        _IMPORTANCE_TO_SEVERITY.get(f["importance"], "Medium"),
+            "severity_reason": (
+                f"'{f['field_name']}' is a {f['importance'].lower()} field for a "
+                f"{doc_label} and is absent from the document."
+            ),
+            "clause_found":    "Not found",
+            "impact":          f['reason'],
+            "mitigation":      f"Add '{f['field_name']}' with a real value before the document is signed or used.",
+        }
+        for f in analysis.get("missing_fields", [])
+    ]
+    if missing_as_risks:
+        analysis["detected_risks"] = analysis.get("detected_risks", []) + missing_as_risks
 
     detected_count = len(analysis.get("detected_risks", []))
     missing_count  = len(analysis.get("missing_fields", []))
