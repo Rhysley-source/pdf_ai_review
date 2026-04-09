@@ -267,19 +267,6 @@ def _err_invalid_prompt(user_prompt: str) -> dict:
             f"Your query \"{user_prompt[:80]}{'...' if len(user_prompt) > 80 else ''}\" is unclear. "
             "Please provide your request in the correct format."
         ),
-        "what_went_wrong": (
-            "The query does not contain enough information to identify a document type or its key details."
-        ),
-        "correct_format": (
-            "<action> + <document type> + <key details (parties, amounts, dates, etc.)>"
-        ),
-        "how_to_fix": (
-            "Describe the document you want to create. Include: "
-            "(1) the document type, "
-            "(2) the parties or names involved, "
-            "(3) any key values like amounts, dates, or durations."
-        ),
-        "correct_query_examples": _GENERATE_EXAMPLES[:4],
     }
 
 
@@ -287,23 +274,10 @@ def _err_not_document_request(user_prompt: str) -> dict:
     """Returns a structured error when the prompt is not a document generation request."""
     return {
         "error":   "not_a_document_request",
-        "message": "Your query does not appear to be a document generation request.",
-        "what_went_wrong": (
-            f"Received: \"{user_prompt[:120]}{'...' if len(user_prompt) > 120 else ''}\" — "
-            "this looks like a question, calculation, or general instruction rather than "
-            "a request to create a document."
+        "message": (
+            f"Your query \"{user_prompt[:80]}{'...' if len(user_prompt) > 80 else ''}\" is not a document generation request. "
+            "Please provide your request in the correct format."
         ),
-        "how_to_fix": (
-            "Use action words like 'generate', 'create', 'draft', 'write', or 'make' "
-            "followed by the document type and the relevant details."
-        ),
-        "correct_query_examples": _GENERATE_EXAMPLES,
-        "supported_document_types": [
-            "Invoice", "Service Agreement / Contract", "Employment Offer Letter",
-            "Non-Disclosure Agreement (NDA)", "Lease / Rental Agreement",
-            "Resume / CV", "Business Proposal", "Purchase Order",
-            "Certificate", "Formal Letter / Recommendation Letter", "Report",
-        ],
     }
 
 
@@ -311,15 +285,7 @@ def _err_model_failed(step: str, user_prompt: str, detail: str) -> dict:
     """Returns a structured error for transient AI model failures."""
     return {
         "error":   f"{step.lower().replace(' ', '_')}_failed",
-        "message": f"The AI model encountered an error during: {step}.",
-        "what_went_wrong": detail,
-        "how_to_fix": (
-            "This is usually a temporary issue. Try the following:\n"
-            "  1. Retry your request — the model may respond correctly on the next attempt.\n"
-            "  2. Simplify your prompt — remove ambiguous or contradictory requirements.\n"
-            "  3. Be more specific — include document type, party names, and key values."
-        ),
-        "correct_query_examples": _GENERATE_EXAMPLES[:3],
+        "message": f"An error occurred during {step}. Please try again.",
     }
 
 
@@ -327,18 +293,7 @@ def _err_empty_output(user_prompt: str) -> dict:
     """Returns a structured error when the model returns empty HTML."""
     return {
         "error":   "empty_output",
-        "message": "The AI model returned an empty document. No HTML was generated.",
-        "what_went_wrong": (
-            "The model completed its response but produced no usable HTML content. "
-            "This can happen when the prompt is ambiguous or the model misunderstood the request."
-        ),
-        "how_to_fix": (
-            "Add more specific details to your prompt:\n"
-            "  • Name the exact document type (invoice, contract, NDA, lease, etc.)\n"
-            "  • Mention the parties involved (company names, person names)\n"
-            "  • Include key values (amounts, dates, durations, roles)"
-        ),
-        "correct_query_examples": _GENERATE_EXAMPLES[:4],
+        "message": "The AI model returned an empty response. Please try again with more specific details.",
     }
 
 
@@ -350,19 +305,6 @@ def _err_invalid_modification(modification_query: str) -> dict:
             f"Your query \"{modification_query[:80]}{'...' if len(modification_query) > 80 else ''}\" is unclear. "
             "Please provide your modification request in the correct format."
         ),
-        "what_went_wrong": (
-            "The query does not clearly describe what to change in the document."
-        ),
-        "correct_format": (
-            "<action> + <what to change> + <new value>"
-        ),
-        "how_to_fix": (
-            "Describe specifically what you want to change. Include:\n"
-            "  • What field or section to update\n"
-            "  • The new value or instruction\n"
-            "  • Where in the document (if relevant)"
-        ),
-        "correct_query_examples": _MODIFY_EXAMPLES,
     }
 
 
@@ -370,16 +312,7 @@ def _err_document_not_found(document_id: str) -> dict:
     """Returns a structured error when the requested document ID does not exist."""
     return {
         "error":   "document_not_found",
-        "message": f"No document found with ID '{document_id}'.",
-        "what_went_wrong": (
-            "The document ID you provided does not match any saved document. "
-            "It may have been deleted, never generated, or the ID may be incorrect."
-        ),
-        "how_to_fix": (
-            "First generate a document using POST /generate-html with your query. "
-            "The response header 'X-Document-Id' contains the ID to use for modifications."
-        ),
-        "correct_query_examples": _GENERATE_EXAMPLES[:3],
+        "message": f"No document found with ID '{document_id}'. Please generate a document first using /generate-html.",
     }
 
 
@@ -803,10 +736,7 @@ async def generate_document_html(
             logger.exception("[doc-gen] Step 2 failed")
             raise HTTPException(
                 status_code=502,
-                detail={
-                    **_err_model_failed("Blueprint Building", request.user_prompt, str(e)),
-                    **analysis_info,
-                },
+                detail=_err_model_failed("Blueprint Building", request.user_prompt, str(e)),
             )
 
         # Step 3: final HTML generation
@@ -816,10 +746,7 @@ async def generate_document_html(
             logger.exception("[doc-gen] Step 3 failed")
             raise HTTPException(
                 status_code=502,
-                detail={
-                    **_err_model_failed("HTML Generation", request.user_prompt, str(e)),
-                    **analysis_info,
-                },
+                detail=_err_model_failed("HTML Generation", request.user_prompt, str(e)),
             )
 
         cleaned_html = _clean_html(raw_html)
@@ -827,7 +754,7 @@ async def generate_document_html(
         if not cleaned_html.strip():
             raise HTTPException(
                 status_code=500,
-                detail={**_err_empty_output(request.user_prompt), **analysis_info},
+                detail=_err_empty_output(request.user_prompt),
             )
 
         try:
@@ -838,9 +765,7 @@ async def generate_document_html(
                 status_code=500,
                 detail={
                     "error":   "storage_failed",
-                    "message": "Your document was generated but could not be saved.",
-                    "what_went_wrong": str(e),
-                    "how_to_fix": "Please try again. If the problem persists, contact support.",
+                    "message": "Your document was generated but could not be saved. Please try again.",
                 },
             )
 
@@ -855,13 +780,6 @@ async def generate_document_html(
             detail={
                 "error":   "unexpected_error",
                 "message": "An unexpected error occurred. Please try again.",
-                "what_went_wrong": str(e),
-                "how_to_fix": (
-                    "Try rephrasing your prompt with more specific details. "
-                    "Example: \"Generate a service agreement between Acme Corp and Beta Ltd "
-                    "for software consulting services worth $5,000, governed by New York law.\""
-                ),
-                "correct_query_examples": _GENERATE_EXAMPLES[:3],
             },
         )
 
@@ -920,10 +838,7 @@ async def regenerate_document_html(
             logger.exception("[doc-gen] Step 2 failed during regeneration→generate")
             raise HTTPException(
                 status_code=502,
-                detail={
-                    **_err_model_failed("Blueprint Building", request.modification_query, str(e)),
-                    **analysis_info,
-                },
+                detail=_err_model_failed("Blueprint Building", request.modification_query, str(e)),
             )
 
         try:
@@ -932,10 +847,7 @@ async def regenerate_document_html(
             logger.exception("[doc-gen] Step 3 failed during regeneration→generate")
             raise HTTPException(
                 status_code=502,
-                detail={
-                    **_err_model_failed("HTML Generation", request.modification_query, str(e)),
-                    **analysis_info,
-                },
+                detail=_err_model_failed("HTML Generation", request.modification_query, str(e)),
             )
 
         cleaned_html = _clean_html(raw_html)
@@ -943,7 +855,7 @@ async def regenerate_document_html(
         if not cleaned_html.strip():
             raise HTTPException(
                 status_code=500,
-                detail={**_err_empty_output(request.modification_query), **analysis_info},
+                detail=_err_empty_output(request.modification_query),
             )
 
         doc_id = request.document_id or str(uuid.uuid4())
@@ -970,10 +882,7 @@ async def regenerate_document_html(
     if not cleaned_html.strip():
         raise HTTPException(
             status_code=500,
-            detail={
-                **_err_empty_output(request.modification_query),
-                "note": "The original document is still saved — your previous version is safe.",
-            },
+            detail=_err_empty_output(request.modification_query),
         )
 
     try:
@@ -984,9 +893,7 @@ async def regenerate_document_html(
             status_code=500,
             detail={
                 "error":   "storage_failed",
-                "message": "Modification was applied but could not be saved.",
-                "what_went_wrong": str(e),
-                "how_to_fix": "Please try again. If the problem persists, contact support.",
+                "message": "Modification was applied but could not be saved. Please try again.",
             },
         )
 
