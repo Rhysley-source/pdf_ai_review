@@ -240,40 +240,48 @@ def _risk_key(risk_name: str) -> str:
 _SEVERITY_RANK = {"High": 3, "Medium": 2, "Low": 1}
 
 
-def _merge_risks(lists: list[list[dict]]) -> list[dict]:
+def _merge_risks(lists: list[list]) -> list[dict]:
     """
     Merges multiple detected_risks lists.
     Deduplicates by normalised risk_name.
     When the same risk appears in multiple sources, keeps the highest severity.
+    Skips any item that is not a dict (guards against LLM returning strings).
     """
-    seen:   dict[str, dict] = {}
+    seen: dict[str, dict] = {}
     for risk_list in lists:
+        if not isinstance(risk_list, list):
+            continue
         for risk in risk_list:
+            if not isinstance(risk, dict):
+                continue
             key = _risk_key(risk.get("risk_name", ""))
             if not key:
                 continue
             if key not in seen:
                 seen[key] = risk
             else:
-                # Keep highest severity entry
                 existing_rank = _SEVERITY_RANK.get(seen[key].get("severity", "Medium"), 2)
                 incoming_rank = _SEVERITY_RANK.get(risk.get("severity", "Medium"), 2)
                 if incoming_rank > existing_rank:
                     seen[key] = risk
-                # Enrich clause_found if the existing one is "Not found"
                 if seen[key].get("clause_found", "Not found") == "Not found" and \
                    risk.get("clause_found", "Not found") != "Not found":
                     seen[key]["clause_found"] = risk["clause_found"]
     return list(seen.values())
 
 
-def _merge_missing_fields(lists: list[list[dict]]) -> list[dict]:
+def _merge_missing_fields(lists: list[list]) -> list[dict]:
     """
     Merges multiple missing_fields lists, deduplicating by field_name.
+    Skips any item that is not a dict (guards against LLM returning strings).
     """
     seen: dict[str, dict] = {}
     for field_list in lists:
+        if not isinstance(field_list, list):
+            continue
         for field in field_list:
+            if not isinstance(field, dict):
+                continue
             key = re.sub(r"[^a-z0-9]", "", field.get("field_name", "").lower())
             if key and key not in seen:
                 seen[key] = field
