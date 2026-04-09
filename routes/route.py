@@ -13,7 +13,7 @@ from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from llm_model.ai_model import generate_analysis, generate_analysis_stream, transcribe_audio
 from utils.json_utils import extract_json
 from db_files.db import log_request
-from feature_modules.key_clause_extraction import classify_document, DOCUMENT_HANDLERS, extract_text_from_upload
+from feature_modules.key_clause_extraction import extract_key_clauses, extract_text_from_upload
 from feature_modules.risk_detection import analyze_document_risks
 from feature_modules.red_flag_scanner import scan_red_flags
 from auth import verify_api_key
@@ -200,27 +200,14 @@ async def key_clause_extraction(
     error_msg = None
 
     try:
-        doc_type = await classify_document(text)
-        doc_type = doc_type.lower().strip()
-        logger.info(f"[{request_id}] Step 3 — classified as: '{doc_type}'")
-
-        handler = DOCUMENT_HANDLERS.get(doc_type)
-
-        if handler:
-            result = await handler(text)
-            logger.info(
-                f"[{request_id}] ── REQUEST COMPLETE — "
-                f"total time: {time.perf_counter() - t_start:.2f}s ──────"
-            )
-            return result
-
-        status = "unsupported"
-        logger.warning(f"[{request_id}] No handler found for doc_type='{doc_type}'")
-        return {
-            "status": "unsupported",
-            "document_type": doc_type,
-            "message": "Unsupported document type."
-        }
+        logger.info(f"[{request_id}] Step 3 — extracting key clauses...")
+        result = await extract_key_clauses(text)
+        logger.info(
+            f"[{request_id}] ── REQUEST COMPLETE — "
+            f"clauses={result.get('total_clauses', 0)} "
+            f"total time: {time.perf_counter() - t_start:.2f}s ──────"
+        )
+        return result
 
     except HTTPException:
         status    = "error"
