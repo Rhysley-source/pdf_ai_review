@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import uuid
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -66,7 +67,7 @@ def update_storage(doc_id: str, html_content: str) -> None:
 # ---------------------------------------------------------------------------
 
 class DocumentGenerationRequest(BaseModel):
-    document_id: str
+    document_id: str | None = None
     user_prompt: str
 
 
@@ -218,11 +219,30 @@ def _parse_analysis_json(raw: str) -> dict:
 
 
 async def _analyze_query(user_prompt: str) -> dict:
-    """Step 1 — LLM call to detect document type and extract field values."""
+    """Step 1 — LLM call to detect document type and extract field values.
+    Raises HTTP 422 immediately if the query is not a document generation request.
+    """
     logger.info("[doc-gen] Step 1: analysing query...")
     raw = await _call_llm(QUERY_ANALYSIS_PROMPT.template, user_prompt)
     logger.info(f"[doc-gen] Step 1 raw output: {raw[:300]}")
-    return _parse_analysis_json(raw)
+
+    analysis = _parse_analysis_json(raw)
+
+    if not analysis.get("is_document_request", True):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Your query is not related to document generation.\n\n"
+                "Please provide a request to create a specific document. Examples:\n"
+                "  • \"Generate a service agreement between Company A and Company B\"\n"
+                "  • \"Create an invoice for web development services worth $2,000\"\n"
+                "  • \"Draft an employment offer letter for a software engineer\"\n"
+                "  • \"Make a non-disclosure agreement between two parties\"\n"
+                "  • \"Write a residential lease agreement for a 1-year term\""
+            ),
+        )
+
+    return analysis
 
 
 def _build_template_context(analysis: dict) -> dict:
@@ -268,6 +288,8 @@ async def generate_document_html(
             ),
         )
 
+    doc_id = request.document_id or str(uuid.uuid4())
+
     try:
         # Step 1: query analysis
         analysis = await _analyze_query(request.user_prompt)
@@ -285,8 +307,8 @@ async def generate_document_html(
                 detail=f"AI generated empty HTML. Raw output: {raw_html[:500]}"
             )
 
-        update_storage(request.document_id, cleaned_html)
-        return HTMLResponse(content=cleaned_html)
+        update_storage(doc_id, cleaned_html)
+        return HTMLResponse(content=cleaned_html, headers={"X-Document-Id": doc_id})
 
     except HTTPException:
         raise
