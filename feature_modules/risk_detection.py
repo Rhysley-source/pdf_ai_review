@@ -140,8 +140,8 @@ _RISK_PROFILES = {
 # Splits long documents into overlapping windows so no clause is missed.
 # ---------------------------------------------------------------------------
 
-_CHUNK_SIZE    = 10_000   # chars per chunk
-_CHUNK_OVERLAP = 500      # overlap between consecutive chunks
+_CHUNK_SIZE    = 20_000   # chars per chunk — larger window reduces fragmentation
+_CHUNK_OVERLAP = 1_000    # overlap between consecutive chunks
 
 
 def _chunk_text(text: str) -> list[str]:
@@ -289,12 +289,123 @@ def _merge_missing_fields(lists: list[list]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Consolidation helpers
+# Run after all chunks are merged:
+#   1. _consolidate_missing_fields — verifies missing fields against full document
+#      (chunks may falsely flag fields as missing when they appear in another chunk)
+#   2. _synthesize_overall_assessment — single LLM pass over the entire merged
+#      risk list to produce an accurate cross-document executive summary
+# ---------------------------------------------------------------------------
+
+async def _consolidate_missing_fields(
+    full_text: str,
+    candidate_fields: list[dict],
+    doc_label: str,
+) -> list[dict]:
+    """
+    Takes the merged candidate missing_fields list from chunk analysis and
+    verifies each field against the FULL document text.
+    Returns only fields that are genuinely absent from the entire document.
+    Silently returns the original list on any LLM/parse failure.
+    """
+    if not candidate_fields:
+        return []
+
+    field_names = [f.get("field_name", "") for f in candidate_fields if isinstance(f, dict)]
+    if not field_names:
+        return candidate_fields
+
+    fields_list = "\n".join(f"  - {name}" for name in field_names)
+
+    system_prompt = f"""You are a document reviewer checking whether specific fields are present in a "{doc_label}" document.
+
+For each field listed below, determine whether it is present anywhere in the document (even partially or implicitly).
+
+Fields to check:
+{fields_list}
+
+Return ONLY a valid JSON object:
+{{
+  "present":  ["<field name>", ...],
+  "absent":   ["<field name>", ...]
+}}
+
+Rules:
+- A field is "present" if it appears anywhere in the document — even if incomplete or informal
+- A field is "absent" only if it is completely missing from the entire document
+- Return ONLY the JSON — no explanation, no markdown"""
+
+    try:
+        raw    = await run_llm(full_text[:20000], system_prompt)
+        parsed = extract_json_from_text(raw)
+        absent = set(parsed.get("absent") or [])
+        if not absent and not parsed.get("present"):
+            raise ValueError("empty response")
+        # Keep only fields confirmed absent
+        result = [f for f in candidate_fields
+                  if isinstance(f, dict) and f.get("field_name", "") in absent]
+        logger.info(f"[risk_detection] Missing field consolidation: {len(candidate_fields)} candidates → {len(result)} confirmed absent")
+        return result
+    except Exception as e:
+        logger.warning(f"[risk_detection] Missing field consolidation failed — keeping original list: {e}")
+        return candidate_fields
+
+
+async def _synthesize_overall_assessment(
+    merged_risks: list[dict],
+    missing_fields: list[dict],
+    doc_label: str,
+    full_text: str,
+) -> str:
+    """
+    Produces a single accurate overall_assessment by synthesizing
+    the full merged risk list and the entire document.
+    """
+    if not merged_risks and not missing_fields:
+        return f"No significant risks or missing fields were identified in this {doc_label}."
+
+    risks_summary = "\n".join(
+        f"  - [{r.get('severity','?')}] {r.get('risk_name','?')}: {r.get('clause_found','')[:80]}"
+        for r in merged_risks[:20]
+    )
+    fields_summary = "\n".join(
+        f"  - [{f.get('importance','?')}] {f.get('field_name','?')}"
+        for f in missing_fields[:10]
+    )
+
+    system_prompt = f"""You are a senior legal and financial risk analyst writing an executive summary.
+
+You have completed a full risk analysis of a "{doc_label}" document.
+
+Detected Risks ({len(merged_risks)} total):
+{risks_summary or "  None"}
+
+Missing Required Fields ({len(missing_fields)} total):
+{fields_summary or "  None"}
+
+Write a concise 3-4 sentence executive summary covering:
+1. Overall risk level (High / Medium / Low) and why
+2. The most critical risks found
+3. Key missing fields and their impact
+4. Overall recommendation
+
+Return ONLY the summary text — no JSON, no bullet points, no headers."""
+
+    try:
+        raw = await run_llm(full_text[:5000], system_prompt)
+        return raw.strip()
+    except Exception as e:
+        logger.warning(f"[risk_detection] Overall assessment synthesis failed: {e}")
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Step 1 — Detect document type
 # Improvement #1: classification window 1500 → 4000 chars
 # ---------------------------------------------------------------------------
 
 async def _detect_document_type(text: str) -> tuple[str, str]:
-    prompt = f"""Analyse the document and return a JSON object with exactly two fields:
+    system_prompt = """Analyse the document and return a JSON object with exactly two fields:
 
 "slug"  — classify into EXACTLY ONE of: contract, employment, nda, lease, invoice, resume, other
 "label" — the specific document type as a short human-readable name (2-5 words)
@@ -324,12 +435,9 @@ Label rules:
                  "Financial Statement", "Medical Report", "Loan Agreement", etc.
 
 Return ONLY this JSON object — no explanation, no markdown:
-{{"slug": "<one of 7 slugs>", "label": "<specific document name>"}}
+{"slug": "<one of 7 slugs>", "label": "<specific document name>"}"""
 
-Document (first 4000 chars):
-\"\"\"{text[:4000]}\"\"\""""
-
-    raw    = await run_llm("", prompt)
+    raw    = await run_llm(text[:4000], system_prompt)
     parsed = extract_json_from_text(raw)
     slug   = (parsed.get("slug")  or "").lower().strip()
     label  = (parsed.get("label") or "").strip()
@@ -365,14 +473,14 @@ Document (first 4000 chars):
 
 async def _analyze_chunk_dynamic(chunk: str, doc_label: str, chunk_label: str) -> dict:
     """Runs dynamic risk analysis on a single text chunk."""
-    prompt = f"""You are a senior legal and financial risk analyst.
+    system_prompt = f"""You are a senior legal and financial risk analyst.
 
-A document identified as "{doc_label}" has been uploaded for risk analysis.
+The document provided is a "{doc_label}".
 
-YOUR TASK — perform a complete risk analysis:
+YOUR TASK — perform a complete risk analysis on the document content:
 
 PART 1 — RISK DETECTION:
-Identify and flag any risks present in this document excerpt. Think about:
+Identify and flag any risks present. Think about:
 - Clauses that are dangerous or unfair to one party
 - Unusual or non-standard language
 - Excessive liability, penalties, or obligations
@@ -408,26 +516,22 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
 
 Rules:
 - Risks must be SPECIFIC to "{doc_label}" — not generic boilerplate
-- Only include risks actually present in this excerpt
+- Only include risks actually present in the document
 - Only include fields actually missing
 - Justify every severity rating in severity_reason
 - If no risks found, return detected_risks as []
-- If no fields missing, return missing_fields as []
-
-Document excerpt:
----
-{chunk}
----"""
+- If no fields missing, return missing_fields as []"""
 
     logger.info(f"[risk_detection] Dynamic analysis — {chunk_label}")
-    raw    = await run_llm("", prompt)
+    raw    = await run_llm(chunk, system_prompt)
     result = extract_json_from_text(raw)
 
     if not result or (not result.get("detected_risks") and not result.get("overall_assessment")):
         logger.warning(f"[risk_detection] Dynamic {chunk_label}: empty parse — retrying")
-        retry_prompt = f"""Return ONLY a raw JSON object. No markdown, no backticks.
+        retry_system = f"""Return ONLY a raw JSON object. No markdown, no backticks.
 
-Analyse the following "{doc_label}" document excerpt for risks and missing fields.
+Analyse the "{doc_label}" document for risks and missing fields.
+Fill in this exact structure:
 
 {{
   "document_type": "other",
@@ -435,13 +539,8 @@ Analyse the following "{doc_label}" document excerpt for risks and missing field
   "detected_risks": [],
   "missing_fields": [],
   "overall_assessment": ""
-}}
-
-Document excerpt:
----
-{chunk[:8000]}
----"""
-        raw    = await run_llm("", retry_prompt)
+}}"""
+        raw    = await run_llm(chunk, retry_system)
         result = extract_json_from_text(raw)
 
     if not result:
@@ -469,18 +568,19 @@ async def _analyze_risks_dynamic(text: str, doc_label: str) -> dict:
         for i, chunk in enumerate(chunks)
     ])
 
-    # Pick the most informative overall_assessment (longest non-empty)
-    overall = max(
-        (r.get("overall_assessment", "") for r in chunk_results),
-        key=len,
-        default="",
+    merged_risks  = _merge_risks([r.get("detected_risks", []) for r in chunk_results])
+    merged_fields = await _consolidate_missing_fields(
+        text,
+        _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results]),
+        doc_label,
     )
+    overall = await _synthesize_overall_assessment(merged_risks, merged_fields, doc_label, text)
 
     return {
         "document_type":      "other",
         "document_label":     doc_label,
-        "detected_risks":     _merge_risks([r.get("detected_risks", []) for r in chunk_results]),
-        "missing_fields":     _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results]),
+        "detected_risks":     merged_risks,
+        "missing_fields":     merged_fields,
         "overall_assessment": overall,
     }
 
@@ -495,14 +595,14 @@ async def _analyze_chunk_fixed(chunk: str, doc_type: str, doc_label: str,
                                 risks_list: str, fields_list: str,
                                 chunk_label: str) -> dict:
     """Runs fixed-profile risk analysis on a single text chunk."""
-    prompt = f"""You are a legal and financial risk analyst specializing in {doc_label} documents.
+    system_prompt = f"""You are a legal and financial risk analyst specializing in {doc_label} documents.
 
 TASK 1 — RISK DETECTION:
-Scan the document excerpt for the following risk categories and flag any that are present:
+Scan the document for the following risk categories and flag any that are present:
 {risks_list}
 
 TASK 2 — MISSING REQUIRED FIELDS:
-Check if the following required fields are present in the excerpt.
+Check if the following required fields are present in the document.
 Flag any that are missing or unclear:
 {fields_list}
 
@@ -531,41 +631,32 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
 }}
 
 Rules:
-- Only include risks that are actually present in this excerpt
+- Only include risks that are actually present in the document
 - Only include fields that are actually missing
 - Justify every severity rating in severity_reason
 - If no risks found, return detected_risks as []
-- If no fields missing, return missing_fields as []
-
-Document excerpt:
----
-{chunk}
----"""
+- If no fields missing, return missing_fields as []"""
 
     logger.info(f"[risk_detection] Fixed profile ({doc_type}) — {chunk_label}")
-    raw    = await run_llm("", prompt)
+    raw    = await run_llm(chunk, system_prompt)
     result = extract_json_from_text(raw)
 
     if not result or (not result.get("detected_risks") and not result.get("overall_assessment")):
         logger.warning(f"[risk_detection] Fixed {chunk_label}: empty parse — retrying")
-        retry_prompt = f"""Return ONLY a raw JSON object. No markdown, no backticks, no explanation.
+        retry_system = f"""Return ONLY a raw JSON object. No markdown, no backticks, no explanation.
 
+Analyse the {doc_label} document for these risks:
+{risks_list}
+
+Fill in this exact structure:
 {{
   "document_type": "{doc_type}",
   "document_label": "{doc_label}",
   "detected_risks": [],
   "missing_fields": [],
   "overall_assessment": ""
-}}
-
-Now fill in the above JSON by analysing this excerpt for these risks:
-{risks_list}
-
-Document excerpt:
----
-{chunk[:8000]}
----"""
-        raw    = await run_llm("", retry_prompt)
+}}"""
+        raw    = await run_llm(chunk, retry_system)
         result = extract_json_from_text(raw)
 
     if not result:
@@ -634,14 +725,15 @@ async def _analyze_risks_hybrid(text: str, doc_type: str, doc_label: str) -> dic
         fixed_result.get("detected_risks", []),
         dynamic_result.get("detected_risks", []),
     ])
-    merged_fields = _merge_missing_fields([
-        fixed_result.get("missing_fields", []),
-        dynamic_result.get("missing_fields", []),
-    ])
-
-    # Prefer the fixed-profile overall_assessment (more structured);
-    # fall back to dynamic if fixed is empty
-    overall = fixed_result.get("overall_assessment") or dynamic_result.get("overall_assessment", "")
+    merged_fields = await _consolidate_missing_fields(
+        text,
+        _merge_missing_fields([
+            fixed_result.get("missing_fields", []),
+            dynamic_result.get("missing_fields", []),
+        ]),
+        doc_label,
+    )
+    overall = await _synthesize_overall_assessment(merged_risks, merged_fields, doc_label, text)
 
     return {
         "document_type":      doc_type,
