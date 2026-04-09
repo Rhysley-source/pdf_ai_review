@@ -14,31 +14,20 @@ _RISK_PROFILES = {
     "contract": {
         "label": "Contract / Legal Agreement",
         "risks": [
-            "Auto-renewal: clauses that silently commit to another term without notice",
+            "Auto-renewal: clauses that silently commit to another term",
             "Indemnity: broad financial liability placed on one party",
             "Termination penalties: excessive exit costs or lock-in periods",
             "Non-compete / Non-solicitation: restrictions on future business or hiring",
             "Missing liability caps: no upper limit on damages owed",
             "Jurisdiction / Governing law: disputes forced in unfavorable location",
-            "Unilateral amendment: one party can change terms without the other's consent",
-            "Intellectual property assignment: broad IP ownership transfer including prior works",
+            "Unilateral amendment: one party can change terms without consent",
+            "Intellectual property assignment: broad IP ownership transfer",
             "Force majeure gaps: events that excuse performance not clearly defined",
-            "Dispute resolution: mandatory arbitration removing right to sue in court",
-            "Payment terms: vague or one-sided payment obligations",
-            "Confidentiality obligations: overly broad or indefinite duration",
-            "Assignment clause: contract can be transferred to unknown third party",
-            "Warranty disclaimers: all warranties disclaimed leaving no recourse",
-            "Liquidated damages: pre-set penalties that may be disproportionate",
+            "Dispute resolution: mandatory arbitration removing right to sue",
         ],
         "required_fields": [
-            "Effective Date",
-            "Contract Term / Duration",
-            "Termination Notice Period",
-            "Governing Law / Jurisdiction",
-            "Payment Terms and Schedule",
-            "Renewal Conditions",
-            "Parties' Full Legal Names and Addresses",
-            "Signatures of All Parties",
+            "Effective Date", "Contract Term", "Termination Notice Period",
+            "Governing Law", "Payment Terms", "Renewal Conditions",
         ],
     },
     "employment": {
@@ -46,158 +35,108 @@ _RISK_PROFILES = {
         "risks": [
             "At-will termination: employer can fire without cause or notice",
             "Non-compete clause: restricts working for competitors after leaving",
-            "Non-solicitation: prevents hiring former colleagues or approaching clients",
+            "Non-solicitation: prevents hiring former colleagues",
             "Broad IP assignment: all inventions owned by employer including personal projects",
-            "Clawback provisions: bonuses or equity can be taken back",
+            "Clawback provisions: bonuses/equity can be taken back",
             "Arbitration clause: waives right to sue in court",
-            "Probation period risks: reduced protections or easier termination during probation",
-            "Vague performance metrics: subjective criteria that could justify termination",
-            "Relocation clauses: forced relocation without sufficient compensation",
-            "Salary or equity not clearly defined or subject to change",
-            "Excessive working hours or on-call requirements not compensated",
-            "Garden leave: paid but barred from working during notice period",
-            "Moonlighting restriction: barred from any outside work or freelancing",
+            "Probation period risks: reduced protections during probation",
+            "Vague performance metrics: subjective criteria for termination",
+            "Relocation clauses: forced relocation without compensation",
+            "Salary/equity not clearly defined",
         ],
         "required_fields": [
-            "Start Date",
-            "Salary / Base Compensation",
-            "Notice Period (both parties)",
-            "Equity / Bonus Terms and Vesting Schedule",
-            "Job Title and Reporting Structure",
-            "Governing Law / Jurisdiction",
-            "Probation Period Terms",
-            "Benefits Summary (health, PTO, etc.)",
+            "Start Date", "Salary / Compensation", "Notice Period",
+            "Equity / Bonus Terms", "Job Title / Role", "Governing Law",
         ],
     },
     "nda": {
         "label": "Non-Disclosure Agreement",
         "risks": [
-            "Overly broad definition of confidential information covering everything",
-            "No expiry on confidentiality obligations: perpetual / lasts forever",
-            "One-sided obligations: only one party is bound",
-            "No carve-outs for publicly available or independently developed information",
-            "Excessive remedies: injunctions and unlimited damages for any breach",
+            "Overly broad definition of confidential information",
+            "No expiry on confidentiality obligations: lasts forever",
+            "One-sided obligations: only one party bound",
+            "No carve-outs for publicly available information",
+            "Excessive remedies: injunctions and unlimited damages",
             "Residuals clause: allows use of retained memory of confidential info",
-            "No clear permitted disclosure exceptions (legal compulsion, regulatory)",
-            "Missing return or destruction of information clause",
-            "No definition of who is a permitted recipient within each party",
-            "No limitation on the purpose for which confidential info can be used",
+            "No clear permitted disclosure exceptions (legal, regulatory)",
+            "Missing return/destruction of information clause",
         ],
         "required_fields": [
-            "Effective Date",
-            "Duration of Confidentiality Obligations",
-            "Governing Law / Jurisdiction",
-            "Definition of Confidential Information",
-            "Permitted Disclosures / Exceptions",
-            "Parties' Full Legal Names",
-            "Signatures",
+            "Effective Date", "Duration of Confidentiality", "Governing Law",
+            "Definition of Confidential Information", "Permitted Disclosures",
         ],
     },
     "lease": {
         "label": "Lease / Rental Agreement",
         "risks": [
-            "Automatic rent escalation without a cap or notice requirement",
-            "Landlord entry without notice or with very short notice period",
+            "Automatic rent escalation without cap",
+            "Landlord entry without notice or with very short notice",
             "Broad tenant liability for all damages including normal wear and tear",
-            "Early termination penalty: excessive fees to exit the lease",
-            "Restriction on subletting or assignment without landlord's consent",
-            "Security deposit terms: conditions for withholding are unclear or overly broad",
-            "Maintenance and repair responsibility shifted entirely to tenant",
-            "No clear dispute resolution or escalation process",
-            "Renewal at landlord's sole discretion with no tenant rights",
-            "Holding over penalty: excessive charges if tenant stays past end date",
-            "Utilities responsibility not clearly assigned",
-            "Pet or guest restrictions that are excessively broad",
+            "Early termination penalty: excessive fees to exit lease",
+            "Restriction on subletting or assignment",
+            "Security deposit terms: unclear or hard to recover",
+            "Maintenance responsibility shifted entirely to tenant",
+            "No clear dispute resolution process",
+            "Renewal at landlord's discretion only",
         ],
         "required_fields": [
-            "Lease Start Date",
-            "Lease End Date",
-            "Monthly Rent Amount",
-            "Security Deposit Amount and Return Conditions",
-            "Notice Period to Vacate",
-            "Renewal Terms",
-            "Landlord's Full Name and Contact Information",
-            "Property Address",
-            "Permitted Use of Property",
+            "Lease Start Date", "Lease End Date", "Monthly Rent",
+            "Security Deposit", "Notice Period to Vacate", "Renewal Terms",
         ],
     },
     "invoice": {
         "label": "Invoice / Billing Document",
         "risks": [
-            "Missing payment due date: no clear deadline for payment",
+            "Missing payment due date: no clear deadline",
             "No late payment penalty terms defined",
-            "Vague or incomplete description of goods or services delivered",
-            "Missing tax breakdown (VAT, GST, sales tax, etc.)",
-            "No dispute resolution window or process for billing errors",
+            "Vague description of goods/services delivered",
+            "Missing tax breakdown (VAT, GST, etc.)",
+            "No dispute resolution window for billing errors",
             "Currency not specified for international transactions",
-            "No PO number or reference number for tracking and reconciliation",
-            "Missing remittance instructions: how and where to pay",
-            "No itemized breakdown for multi-line invoices",
+            "No PO number or reference for tracking",
         ],
         "required_fields": [
-            "Invoice Number",
-            "Invoice Date",
-            "Payment Due Date",
-            "Vendor / Supplier Name and Address",
-            "Client / Buyer Name and Address",
-            "Total Amount Due",
-            "Tax Amount and Rate",
-            "Payment Method / Bank Details / Account Information",
-            "Description of Goods or Services",
+            "Invoice Number", "Invoice Date", "Due Date",
+            "Vendor Name", "Total Amount", "Tax Amount",
+            "Payment Method / Bank Details",
         ],
     },
     "resume": {
         "label": "Resume / CV",
         "risks": [
-            "Unfilled template placeholders: [brackets] used instead of real data",
-            "Employment gap: unexplained periods of inactivity between jobs",
-            "Missing contact information: no email, phone number, or location",
-            "No quantified achievements: only job duties listed, no metrics or outcomes",
-            "Vague or generic job titles that don't reflect actual role or seniority",
-            "Missing or incomplete education details: degree, institution, or graduation year absent",
-            "Skills section missing, outdated, or does not match the stated job experience",
-            "Inconsistent date formats or reverse-chronological order not followed",
-            "No professional summary or objective statement",
-            "LinkedIn, GitHub, or portfolio links missing for technical or creative roles",
-            "Only generic responsibilities listed with no evidence of impact",
-            "Certifications section absent for a technical or regulated profession",
+            "Employment gap: unexplained periods of inactivity",
+            "Missing contact information",
+            "No quantified achievements (only responsibilities listed)",
+            "Vague job titles that don't reflect actual role",
+            "Missing education details or dates",
+            "No skills section",
+            "Inconsistent date formats or chronology",
         ],
         "required_fields": [
-            "Full Name",
-            "Email Address",
-            "Phone Number",
-            "Location (City / Country)",
-            "Professional Summary or Objective Statement",
-            "Work Experience with Company Names, Titles, and Dates",
-            "Education with Institution Name and Graduation Year",
-            "Skills Section",
+            "Full Name", "Contact Information (email/phone)",
+            "Work Experience with Dates", "Education", "Skills",
         ],
     },
     "other": {
         "label": "General Document",
         "risks": [
-            "Ambiguous obligations: unclear who is responsible for what action",
+            "Ambiguous obligations: unclear who is responsible for what",
             "Missing dates or validity period",
             "No signatures or authorization section",
             "Undefined terms or jargon without explanation",
             "Inconsistent data or figures within the document",
             "Missing governing law or jurisdiction",
             "No dispute resolution clause",
-            "Unfilled template placeholders: [brackets] used instead of real data",
-            "Missing party identification: who the document applies to is unclear",
         ],
         "required_fields": [
-            "Document Date",
-            "Parties Involved",
-            "Purpose / Subject Matter",
-            "Signatures or Authorization",
+            "Document Date", "Parties Involved", "Purpose / Subject Matter",
         ],
     },
 }
 
 
 # ---------------------------------------------------------------------------
-# Chunking
+# Chunking — improvement #3
 # Splits long documents into overlapping windows so no clause is missed.
 # ---------------------------------------------------------------------------
 
@@ -227,13 +166,10 @@ def _chunk_text(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Placeholder detector
 # Scans for unfilled template values like [Email], [Company Name], [Start Date].
-# Excludes pure numeric citations like [1], [42], [123].
 # This is a programmatic pass — independent of LLM — so it is always reliable.
 # ---------------------------------------------------------------------------
 
-# Matches [text] but NOT pure numeric citations like [1] or [42]
 _PLACEHOLDER_RE = re.compile(r'\[([^\]\[]{2,60})\]')
-_NUMERIC_RE     = re.compile(r'^\s*\d+\s*$')
 
 
 def _detect_placeholders(text: str, doc_label: str) -> tuple[list[dict], list[dict]]:
@@ -248,9 +184,6 @@ def _detect_placeholders(text: str, doc_label: str) -> tuple[list[dict], list[di
     seen: set[str] = set()
     unique: list[str] = []
     for m in matches:
-        # Skip pure numeric references like [1], [42]
-        if _NUMERIC_RE.match(m):
-            continue
         key = re.sub(r'\s+', ' ', m.strip().lower())
         if key not in seen:
             seen.add(key)
@@ -261,7 +194,7 @@ def _detect_placeholders(text: str, doc_label: str) -> tuple[list[dict], list[di
 
     logger.info(f"[risk_detection] {len(unique)} unfilled placeholder(s) found in '{doc_label}'")
 
-    examples = ", ".join(f"[{p}]" for p in unique[:4])
+    examples = ", ".join(f"[{p}]" for p in unique[:3])
     risk = {
         "risk_name": "Unfilled Template Placeholders",
         "severity": "High",
@@ -355,13 +288,8 @@ def _normalize_result(result: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Deduplication helpers
+# Deduplication helpers — improvement #2 + #3
 # ---------------------------------------------------------------------------
-
-def _field_key(name: str) -> str:
-    """Normalised key — lowercase, alphanumeric only."""
-    return re.sub(r"[^a-z0-9]", "", name.lower())
-
 
 def _risk_key(risk_name: str) -> str:
     """Normalised key for deduplication — lowercase, alphanumeric only."""
@@ -375,9 +303,8 @@ def _merge_risks(lists: list[list]) -> list[dict]:
     """
     Merges multiple detected_risks lists.
     Deduplicates by normalised risk_name.
-    When the same risk appears in multiple sources, keeps the highest severity
-    and the best clause_found excerpt.
-    Output is sorted High → Medium → Low.
+    When the same risk appears in multiple sources, keeps the highest severity.
+    Skips any item that is not a dict (guards against LLM returning strings).
     """
     seen: dict[str, dict] = {}
     for risk_list in lists:
@@ -390,31 +317,23 @@ def _merge_risks(lists: list[list]) -> list[dict]:
             if not key:
                 continue
             if key not in seen:
-                seen[key] = dict(risk)
+                seen[key] = risk
             else:
                 existing_rank = _SEVERITY_RANK.get(seen[key].get("severity", "Medium"), 2)
                 incoming_rank = _SEVERITY_RANK.get(risk.get("severity", "Medium"), 2)
                 if incoming_rank > existing_rank:
-                    seen[key] = dict(risk)
-                # Prefer a real clause excerpt over "Not found"
-                if seen[key].get("clause_found", "Not found") in ("Not found", "") and \
-                   risk.get("clause_found", "Not found") not in ("Not found", ""):
+                    seen[key] = risk
+                if seen[key].get("clause_found", "Not found") == "Not found" and \
+                   risk.get("clause_found", "Not found") != "Not found":
                     seen[key]["clause_found"] = risk["clause_found"]
-
-    # Sort High → Medium → Low
-    return sorted(
-        seen.values(),
-        key=lambda r: _SEVERITY_RANK.get(r.get("severity", "Medium"), 2),
-        reverse=True,
-    )
+    return list(seen.values())
 
 
 def _merge_missing_fields(lists: list[list]) -> list[dict]:
     """
     Merges multiple missing_fields lists, deduplicating by field_name.
-    Keeps Critical > Important > Optional when same field appears multiple times.
+    Skips any item that is not a dict (guards against LLM returning strings).
     """
-    _IMPORTANCE_RANK = {"Critical": 3, "Important": 2, "Optional": 1}
     seen: dict[str, dict] = {}
     for field_list in lists:
         if not isinstance(field_list, list):
@@ -422,30 +341,17 @@ def _merge_missing_fields(lists: list[list]) -> list[dict]:
         for field in field_list:
             if not isinstance(field, dict):
                 continue
-            key = _field_key(field.get("field_name", ""))
-            if not key:
-                continue
-            if key not in seen:
-                seen[key] = dict(field)
-            else:
-                existing_rank = _IMPORTANCE_RANK.get(seen[key].get("importance", "Important"), 2)
-                incoming_rank = _IMPORTANCE_RANK.get(field.get("importance", "Important"), 2)
-                if incoming_rank > existing_rank:
-                    seen[key] = dict(field)
-
-    # Sort Critical → Important → Optional
-    return sorted(
-        seen.values(),
-        key=lambda f: _IMPORTANCE_RANK.get(f.get("importance", "Important"), 2),
-        reverse=True,
-    )
+            key = re.sub(r"[^a-z0-9]", "", field.get("field_name", "").lower())
+            if key and key not in seen:
+                seen[key] = field
+    return list(seen.values())
 
 
 # ---------------------------------------------------------------------------
 # Consolidation helpers
 # Run after all chunks are merged:
-#   1. _consolidate_missing_fields — verifies missing fields against full document,
-#      treats placeholder-filled fields as still absent
+#   1. _consolidate_missing_fields — verifies missing fields against full document
+#      (chunks may falsely flag fields as missing when they appear in another chunk)
 #   2. _synthesize_overall_assessment — single LLM pass over the entire merged
 #      risk list to produce an accurate cross-document executive summary
 # ---------------------------------------------------------------------------
@@ -456,9 +362,10 @@ async def _consolidate_missing_fields(
     doc_label: str,
 ) -> list[dict]:
     """
-    Verifies each candidate missing field against the FULL document text.
-    Returns only fields genuinely absent (including those only filled with placeholders).
-    Falls back to the original list on any LLM/parse failure.
+    Takes the merged candidate missing_fields list from chunk analysis and
+    verifies each field against the FULL document text.
+    Returns only fields that are genuinely absent from the entire document.
+    Silently returns the original list on any LLM/parse failure.
     """
     if not candidate_fields:
         return []
@@ -471,7 +378,7 @@ async def _consolidate_missing_fields(
 
     system_prompt = f"""You are a document reviewer checking whether specific fields are present in a "{doc_label}" document.
 
-For each field listed below, determine whether it is present in the document with real content.
+For each field listed below, determine whether it is present anywhere in the document (even partially or implicitly).
 
 Fields to check:
 {fields_list}
@@ -483,30 +390,21 @@ Return ONLY a valid JSON object:
 }}
 
 Rules:
-- A field is "present" ONLY if it contains a real, actual value
-- A field is "absent" if it is completely missing from the document
-- A field is also "absent" if it exists but contains only a placeholder like [Email], [Company Name], [Value] — these are templates, not real data
-- Return field names exactly as they appear in the list above
+- A field is "present" if it appears anywhere in the document — even if incomplete or informal
+- A field is "absent" only if it is completely missing from the entire document
 - Return ONLY the JSON — no explanation, no markdown"""
 
     try:
-        raw    = await run_llm(full_text[:20_000], system_prompt)
+        raw    = await run_llm(full_text[:20000], system_prompt)
         parsed = extract_json_from_text(raw)
-        absent_raw = parsed.get("absent") or []
-        if not absent_raw and not parsed.get("present"):
+        absent = set(parsed.get("absent") or [])
+        if not absent and not parsed.get("present"):
             raise ValueError("empty response")
-
-        # Normalise to handle LLM returning slightly different casing/punctuation
-        absent_keys = {_field_key(a) for a in absent_raw if isinstance(a, str)}
-        result = [
-            f for f in candidate_fields
-            if isinstance(f, dict) and _field_key(f.get("field_name", "")) in absent_keys
-        ]
-        logger.info(
-            f"[risk_detection] Missing field consolidation: "
-            f"{len(candidate_fields)} candidates → {len(result)} confirmed absent"
-        )
-        return result if result else candidate_fields
+        # Keep only fields confirmed absent
+        result = [f for f in candidate_fields
+                  if isinstance(f, dict) and f.get("field_name", "") in absent]
+        logger.info(f"[risk_detection] Missing field consolidation: {len(candidate_fields)} candidates → {len(result)} confirmed absent")
+        return result
     except Exception as e:
         logger.warning(f"[risk_detection] Missing field consolidation failed — keeping original list: {e}")
         return candidate_fields
@@ -526,37 +424,34 @@ async def _synthesize_overall_assessment(
         return f"No significant risks or missing fields were identified in this {doc_label}."
 
     risks_summary = "\n".join(
-        f"  - [{r.get('severity','?')}] {r.get('risk_name','?')}: {r.get('clause_found','')[:100]}"
+        f"  - [{r.get('severity','?')}] {r.get('risk_name','?')}: {r.get('clause_found','')[:80]}"
         for r in merged_risks[:20]
     )
     fields_summary = "\n".join(
         f"  - [{f.get('importance','?')}] {f.get('field_name','?')}"
-        for f in missing_fields[:15]
+        for f in missing_fields[:10]
     )
-
-    high_count   = sum(1 for r in merged_risks if r.get("severity") == "High")
-    medium_count = sum(1 for r in merged_risks if r.get("severity") == "Medium")
 
     system_prompt = f"""You are a senior legal and financial risk analyst writing an executive summary.
 
 You have completed a full risk analysis of a "{doc_label}" document.
 
-Detected Risks ({len(merged_risks)} total — {high_count} High, {medium_count} Medium):
+Detected Risks ({len(merged_risks)} total):
 {risks_summary or "  None"}
 
 Missing Required Fields ({len(missing_fields)} total):
 {fields_summary or "  None"}
 
 Write a concise 3-4 sentence executive summary covering:
-1. Overall risk level (High / Medium / Low) and the primary reason
-2. The most critical risks or red flags found
-3. The most important missing fields and their practical impact
-4. A clear recommendation (e.g., do not sign, fill in placeholders first, negotiate specific clauses)
+1. Overall risk level (High / Medium / Low) and why
+2. The most critical risks found
+3. Key missing fields and their impact
+4. Overall recommendation
 
 Return ONLY the summary text — no JSON, no bullet points, no headers."""
 
     try:
-        raw = await run_llm(full_text[:5_000], system_prompt)
+        raw = await run_llm(full_text[:5000], system_prompt)
         return raw.strip()
     except Exception as e:
         logger.warning(f"[risk_detection] Overall assessment synthesis failed: {e}")
@@ -565,6 +460,7 @@ Return ONLY the summary text — no JSON, no bullet points, no headers."""
 
 # ---------------------------------------------------------------------------
 # Step 1 — Detect document type
+# Improvement #1: classification window 1500 → 4000 chars
 # ---------------------------------------------------------------------------
 
 async def _detect_document_type(text: str) -> tuple[str, str]:
@@ -600,7 +496,7 @@ Label rules:
 Return ONLY this JSON object — no explanation, no markdown:
 {"slug": "<one of 7 slugs>", "label": "<specific document name>"}"""
 
-    raw    = await run_llm(text[:4_000], system_prompt)
+    raw    = await run_llm(text[:4000], system_prompt)
     parsed = extract_json_from_text(raw)
     slug   = (parsed.get("slug")  or "").lower().strip()
     label  = (parsed.get("label") or "").strip()
@@ -629,12 +525,9 @@ Return ONLY this JSON object — no explanation, no markdown:
 
 
 # ---------------------------------------------------------------------------
-# Step 2a — Dynamic risk analysis (slug == "other" OR called from hybrid)
-# _analyze_chunk_dynamic  : single chunk, raw LLM result
-# _raw_analyze_risks_dynamic : chunked merge, NO consolidation/synthesis
-#                              (used by hybrid — hybrid does its own final pass)
-# _analyze_risks_dynamic  : full pipeline including consolidation + synthesis
-#                              (used as standalone for "other" document types)
+# Step 2a — Dynamic risk analysis (slug == "other" OR hybrid second pass)
+# Improvement #3: chunked analysis
+# Improvement #4: severity justification in prompt
 # ---------------------------------------------------------------------------
 
 async def _analyze_chunk_dynamic(chunk: str, doc_label: str, chunk_label: str) -> dict:
@@ -684,7 +577,7 @@ Rules:
 - Risks must be SPECIFIC to "{doc_label}" — not generic boilerplate
 - Only include risks actually present in the document
 - Treat any [bracketed text] (e.g. [Email], [Company Name], [Start Date]) as an unfilled placeholder — flag as missing field
-- A field is absent if it is completely missing OR only contains placeholder text like [value]
+- Only include fields actually missing or containing placeholder text
 - Justify every severity rating in severity_reason
 - If no risks found, return detected_risks as []
 - If no fields missing, return missing_fields as []"""
@@ -722,35 +615,26 @@ Fill in this exact structure:
     return result
 
 
-async def _raw_analyze_risks_dynamic(text: str, doc_label: str) -> dict:
+async def _analyze_risks_dynamic(text: str, doc_label: str) -> dict:
     """
-    Dynamic risk analysis — chunk + merge only, NO consolidation or synthesis.
-    Called from _analyze_risks_hybrid so the hybrid can do its own single final pass.
+    Dynamic risk analysis for unknown document types.
+    Improvement #3: splits long documents into chunks, analyses each in parallel,
+    then merges and deduplicates results.
     """
     chunks = _chunk_text(text)
+
     chunk_results = await asyncio.gather(*[
         _analyze_chunk_dynamic(chunk, doc_label, f"chunk {i+1}/{len(chunks)}")
         for i, chunk in enumerate(chunks)
     ])
-    return {
-        "document_type":      "other",
-        "document_label":     doc_label,
-        "detected_risks":     _merge_risks([r.get("detected_risks", []) for r in chunk_results]),
-        "missing_fields":     _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results]),
-        "overall_assessment": "",
-    }
 
-
-async def _analyze_risks_dynamic(text: str, doc_label: str) -> dict:
-    """
-    Full dynamic pipeline: chunk → merge → consolidate → synthesize.
-    Used as the standalone path for "other" document types.
-    """
-    raw = await _raw_analyze_risks_dynamic(text, doc_label)
-
-    merged_risks  = raw["detected_risks"]
-    merged_fields = await _consolidate_missing_fields(text, raw["missing_fields"], doc_label)
-    overall       = await _synthesize_overall_assessment(merged_risks, merged_fields, doc_label, text)
+    merged_risks  = _merge_risks([r.get("detected_risks", []) for r in chunk_results])
+    merged_fields = await _consolidate_missing_fields(
+        text,
+        _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results]),
+        doc_label,
+    )
+    overall = await _synthesize_overall_assessment(merged_risks, merged_fields, doc_label, text)
 
     return {
         "document_type":      "other",
@@ -763,9 +647,8 @@ async def _analyze_risks_dynamic(text: str, doc_label: str) -> dict:
 
 # ---------------------------------------------------------------------------
 # Step 2b — Fixed-profile risk analysis for the 6 known document types
-# _analyze_chunk_fixed       : single chunk, raw LLM result
-# _analyze_risks_for_type    : chunked merge only (no consolidation/synthesis)
-#                              — always called from hybrid
+# Improvement #3: chunked analysis
+# Improvement #4: severity justification in prompt
 # ---------------------------------------------------------------------------
 
 async def _analyze_chunk_fixed(chunk: str, doc_type: str, doc_label: str,
@@ -779,8 +662,8 @@ Scan the document for the following risk categories and flag any that are presen
 {risks_list}
 
 TASK 2 — MISSING REQUIRED FIELDS:
-Check if the following required fields are present in the document with REAL values.
-Flag any that are missing or only contain placeholder text:
+Check if the following required fields are present in the document.
+Flag any that are missing or unclear:
 {fields_list}
 
 OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
@@ -810,7 +693,7 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
 Rules:
 - Only include risks that are actually present in the document
 - Treat any [bracketed text] (e.g. [Email], [Company Name], [Start Date]) as an unfilled placeholder — flag as missing field
-- A field with only placeholder text like [value] is missing — real content is required
+- Only include fields that are actually missing or contain placeholders
 - Justify every severity rating in severity_reason
 - If no risks found, return detected_risks as []
 - If no fields missing, return missing_fields as []"""
@@ -851,13 +734,13 @@ Fill in this exact structure:
 
 async def _analyze_risks_for_type(text: str, doc_type: str, doc_label: str) -> dict:
     """
-    Fixed-profile chunked analysis — chunk + merge only (no consolidation/synthesis).
-    Always called from _analyze_risks_hybrid which handles the final pass.
+    Fixed-profile risk analysis for known document types.
+    Improvement #3: chunked parallel analysis across full document.
     """
-    profile     = _RISK_PROFILES[doc_type]
-    risks_list  = "\n".join(f"    - {r}" for r in profile["risks"])
+    profile    = _RISK_PROFILES[doc_type]
+    risks_list = "\n".join(f"    - {r}" for r in profile["risks"])
     fields_list = "\n".join(f"    - {f}" for f in profile["required_fields"])
-    chunks      = _chunk_text(text)
+    chunks     = _chunk_text(text)
 
     chunk_results = await asyncio.gather(*[
         _analyze_chunk_fixed(chunk, doc_type, doc_label, risks_list, fields_list,
@@ -865,31 +748,38 @@ async def _analyze_risks_for_type(text: str, doc_type: str, doc_label: str) -> d
         for i, chunk in enumerate(chunks)
     ])
 
+    overall = max(
+        (r.get("overall_assessment", "") for r in chunk_results),
+        key=len,
+        default="",
+    )
+
     return {
         "document_type":      doc_type,
         "document_label":     doc_label,
         "detected_risks":     _merge_risks([r.get("detected_risks", []) for r in chunk_results]),
         "missing_fields":     _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results]),
-        "overall_assessment": "",
+        "overall_assessment": overall,
     }
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — Hybrid analysis for known types
-# Runs fixed-profile + dynamic in parallel, merges, then single consolidation
-# and synthesis pass on the combined result.
+# Step 2 — Hybrid analysis for known types (improvement #2)
+# Runs fixed-profile + dynamic in parallel, merges results.
+# Fixed profile catches standard checklist risks reliably.
+# Dynamic pass catches document-specific unusual clauses the checklist misses.
 # ---------------------------------------------------------------------------
 
 async def _analyze_risks_hybrid(text: str, doc_type: str, doc_label: str) -> dict:
     """
-    Runs fixed-profile and raw dynamic analysis in parallel then merges.
-    A single consolidation + synthesis pass runs on the final merged result.
+    Runs fixed-profile and dynamic analysis in parallel then merges.
+    Used for all known document types.
     """
     logger.info(f"[risk_detection] Hybrid analysis — running fixed + dynamic in parallel for '{doc_label}'")
 
     fixed_result, dynamic_result = await asyncio.gather(
         _analyze_risks_for_type(text, doc_type, doc_label),
-        _raw_analyze_risks_dynamic(text, doc_label),
+        _analyze_risks_dynamic(text, doc_label),
     )
 
     merged_risks  = _merge_risks([
@@ -924,17 +814,12 @@ async def analyze_document_risks(text: str) -> dict:
     Step 1 — detect document type (classification window: 4000 chars)
 
     Step 2 — branch based on slug:
-      - Known type  → _analyze_risks_hybrid  (fixed profile + dynamic in parallel,
-                       single consolidation + synthesis on the merged result)
-      - Other type  → _analyze_risks_dynamic (fully dynamic, chunked, consolidated)
+      - Known type  → _analyze_risks_hybrid  (fixed profile + dynamic in parallel)
+      - Other type  → _analyze_risks_dynamic (fully dynamic, chunked)
 
-    Step 3 — programmatic placeholder scan (always runs, independent of LLM)
-      Catches [bracketed] template values the LLM may have missed because the
-      document structure looked complete.
-
-    All detected_risks are sorted High → Medium → Low.
-    All missing_fields are sorted Critical → Important → Optional.
-    Response is normalized to a guaranteed fixed structure before returning.
+    Both paths chunk the full document so no clause is ever missed due to truncation.
+    All detected_risks include severity_reason for transparent, consistent ratings.
+    Results are normalized to a guaranteed fixed structure before returning.
     """
     doc_type, doc_label = await _detect_document_type(text)
     logger.info(f"[risk_detection] Detected: {doc_type} ('{doc_label}')")
@@ -949,7 +834,7 @@ async def analyze_document_risks(text: str) -> dict:
     analysis = _normalize_result(analysis)
 
     # Programmatic placeholder detection — catches [Email], [Company Name], etc.
-    # that LLMs may overlook because the document structure looks syntactically complete.
+    # that LLMs may overlook because the document structure looks complete.
     ph_risks, ph_fields = _detect_placeholders(text, doc_label)
 
     if ph_risks or ph_fields:
@@ -957,14 +842,17 @@ async def analyze_document_risks(text: str) -> dict:
         if _risk_key("Unfilled Template Placeholders") not in existing_risk_keys:
             analysis["detected_risks"] = ph_risks + analysis["detected_risks"]
 
-        existing_field_keys = {_field_key(f.get("field_name", "")) for f in analysis["missing_fields"]}
+        existing_field_keys = {
+            re.sub(r"[^a-z0-9]", "", f.get("field_name", "").lower())
+            for f in analysis["missing_fields"]
+        }
         new_ph_fields = [
             f for f in ph_fields
-            if _field_key(f.get("field_name", "")) not in existing_field_keys
+            if re.sub(r"[^a-z0-9]", "", f.get("field_name", "").lower()) not in existing_field_keys
         ]
         analysis["missing_fields"] = new_ph_fields + analysis["missing_fields"]
 
-        # Re-synthesize to reflect placeholder findings in the executive summary
+        # Re-synthesize overall_assessment to reflect placeholder findings
         if ph_risks:
             analysis["overall_assessment"] = await _synthesize_overall_assessment(
                 analysis["detected_risks"],
