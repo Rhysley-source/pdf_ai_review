@@ -464,6 +464,22 @@ async def _build_template_context(analysis: dict) -> dict:
     return context
 
 
+def _analysis_summary(analysis: dict) -> dict:
+    """
+    Extracts the safe, user-facing fields from a Step 1 analysis result.
+    Included in every error response that occurs after Step 1 completes,
+    so the client knows exactly what was detected from the query.
+    """
+    return {
+        "detected_doc_type":  analysis.get("doc_type", "unknown"),
+        "detected_doc_label": analysis.get("doc_label", "Unknown Document"),
+        "extracted_fields":   {
+            k: v for k, v in (analysis.get("fields") or {}).items()
+            if not k.startswith("_")   # strip internal keys
+        },
+    }
+
+
 async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
     """Step 3 — final LLM call using the enriched blueprint context."""
     logger.info(f"[doc-gen] Step 3: generating HTML for '{context['doc_label']}'...")
@@ -569,6 +585,8 @@ async def generate_document_html(
                 },
             )
 
+        analysis_info = _analysis_summary(analysis)
+
         # Step 2: blueprint building (LLM)
         try:
             context = await _build_template_context(analysis)
@@ -584,6 +602,7 @@ async def generate_document_html(
                     "message": "Failed to build the document blueprint. Falling back was not possible.",
                     "hint": "Try again — this is usually a transient model error.",
                     "detail": str(e),
+                    **analysis_info,
                 },
             )
 
@@ -600,6 +619,7 @@ async def generate_document_html(
                     "message": "The AI model failed to generate the document HTML.",
                     "hint": "Try again or simplify your prompt.",
                     "detail": str(e),
+                    **analysis_info,
                 },
             )
 
@@ -614,6 +634,7 @@ async def generate_document_html(
                     "message": "The AI model returned an empty document.",
                     "hint": "Try again or add more detail to your prompt.",
                     "raw_preview": raw_html[:300],
+                    **analysis_info,
                 },
             )
 
@@ -628,6 +649,7 @@ async def generate_document_html(
                     "step": "Save Document",
                     "message": "Document was generated but could not be saved to storage.",
                     "detail": str(e),
+                    **analysis_info,
                 },
             )
 
@@ -701,6 +723,8 @@ async def regenerate_document_html(
                 "hint": "Try rephrasing your prompt.", "detail": str(e),
             })
 
+        analysis_info = _analysis_summary(analysis)
+
         try:
             context = await _build_template_context(analysis)
         except HTTPException:
@@ -711,6 +735,7 @@ async def regenerate_document_html(
                 "error": "step2_failed", "step": "Blueprint Building",
                 "message": "Failed to build the document blueprint.",
                 "hint": "Try again.", "detail": str(e),
+                **analysis_info,
             })
 
         try:
@@ -721,6 +746,7 @@ async def regenerate_document_html(
                 "error": "step3_failed", "step": "HTML Generation",
                 "message": "The AI model failed to generate the document HTML.",
                 "hint": "Try again or simplify your prompt.", "detail": str(e),
+                **analysis_info,
             })
 
         cleaned_html = _clean_html(raw_html)
@@ -731,6 +757,7 @@ async def regenerate_document_html(
                 "message": "The AI model returned an empty document.",
                 "hint": "Try again or add more detail to your prompt.",
                 "raw_preview": raw_html[:300],
+                **analysis_info,
             })
 
         doc_id = request.document_id or str(uuid.uuid4())
