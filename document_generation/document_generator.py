@@ -263,10 +263,15 @@ def _err_invalid_prompt(user_prompt: str) -> dict:
     """Returns a structured error for prompts that are too vague, short, or unclear."""
     return {
         "error":   "invalid_prompt",
-        "message": "Your prompt is too short or unclear to generate a document.",
+        "message": (
+            f"Your query \"{user_prompt[:80]}{'...' if len(user_prompt) > 80 else ''}\" is unclear. "
+            "Please provide your request in the correct format."
+        ),
         "what_went_wrong": (
-            f"Received: \"{user_prompt[:120]}{'...' if len(user_prompt) > 120 else ''}\" — "
-            "this does not contain enough information to identify a document type or its key details."
+            "The query does not contain enough information to identify a document type or its key details."
+        ),
+        "correct_format": (
+            "<action> + <document type> + <key details (parties, amounts, dates, etc.)>"
         ),
         "how_to_fix": (
             "Describe the document you want to create. Include: "
@@ -341,10 +346,15 @@ def _err_invalid_modification(modification_query: str) -> dict:
     """Returns a structured error for modification prompts that are unclear."""
     return {
         "error":   "invalid_modification_query",
-        "message": "Your modification request is too vague or unclear.",
+        "message": (
+            f"Your query \"{modification_query[:80]}{'...' if len(modification_query) > 80 else ''}\" is unclear. "
+            "Please provide your modification request in the correct format."
+        ),
         "what_went_wrong": (
-            f"Received: \"{modification_query[:120]}{'...' if len(modification_query) > 120 else ''}\" — "
-            "this does not clearly describe what to change in the document."
+            "The query does not clearly describe what to change in the document."
+        ),
+        "correct_format": (
+            "<action> + <what to change> + <new value>"
         ),
         "how_to_fix": (
             "Describe specifically what you want to change. Include:\n"
