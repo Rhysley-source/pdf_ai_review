@@ -12,6 +12,7 @@ from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from .prompt_templates import (
     QUERY_ANALYSIS_PROMPT,
+    TEMPLATE_BUILD_PROMPT,
     DOCUMENT_GENERATION_V2_PROMPT,
     SECTION_TEMPLATES,
     build_generation_context,
@@ -136,6 +137,36 @@ _FORMAT_HINT = (
 )
 
 
+_MODIFICATION_KEYWORDS = {
+    "change", "update", "replace", "edit", "modify", "fix", "correct",
+    "add", "remove", "delete", "insert", "rename", "set", "adjust",
+    "rewrite", "move", "swap", "convert", "format", "increase", "decrease",
+    "append", "clear", "shift", "put", "make it", "turn",
+}
+
+_NEW_GENERATION_KEYWORDS = {
+    "generate", "create", "draft", "write a", "make a", "build a",
+    "produce", "compose", "prepare a", "give me a", "new document",
+}
+
+
+def _is_modification_query(text: str) -> bool:
+    """
+    Returns True if the text looks like a modification request on an existing document.
+    Returns False if it looks like a new document generation request.
+    """
+    lower = text.lower()
+
+    # Reject if it reads like a new document request
+    for phrase in _NEW_GENERATION_KEYWORDS:
+        if phrase in lower:
+            return False
+
+    # Accept if it contains at least one modification keyword
+    words = set(re.findall(r"[a-z]+", lower))
+    return bool(words & _MODIFICATION_KEYWORDS)
+
+
 def _is_gibberish(text: str) -> bool:
     """
     Returns True when the prompt looks like gibberish or has no meaningful content.
@@ -245,17 +276,91 @@ async def _analyze_query(user_prompt: str) -> dict:
     return analysis
 
 
-def _build_template_context(analysis: dict) -> dict:
-    """Step 2 — pure Python template merge. No LLM involved."""
-    doc_type         = analysis["doc_type"]
+def _parse_blueprint_json(raw: str, analysis: dict) -> dict:
+    """
+    Parses the Step 2 LLM blueprint response.
+    Falls back to the static Python template if the LLM returns malformed JSON.
+    Returns a context dict ready for DOCUMENT_GENERATION_V2_PROMPT.
+    """
+    cleaned = raw.strip()
+    if "```" in cleaned:
+        cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        logger.warning("[doc-gen] Step 2: blueprint parse failed — falling back to static template")
+        return _static_template_context(analysis)
+
+    sections = parsed.get("sections", [])
+    if not isinstance(sections, list) or not sections:
+        logger.warning("[doc-gen] Step 2: empty sections in blueprint — falling back to static template")
+        return _static_template_context(analysis)
+
+    # Build the sections_block string for Step 3
+    lines = []
+    for i, sec in enumerate(sections, 1):
+        title        = sec.get("title", f"Section {i}")
+        content_hint = sec.get("content_hint", "")
+        lines.append(f"{i}. {title}\n   → {content_hint}")
+    sections_block = "\n\n".join(lines)
+
+    return {
+        "doc_type":      analysis.get("doc_type", "other"),
+        "doc_label":     analysis.get("doc_label", "Document"),
+        "tone":          parsed.get("tone", "professional"),
+        "layout_notes":  parsed.get("layout_notes", "Standard document layout."),
+        "sections_block": sections_block,
+    }
+
+
+def _static_template_context(analysis: dict) -> dict:
+    """Fallback: builds context from static SECTION_TEMPLATES (no LLM)."""
+    doc_type         = analysis.get("doc_type", "other")
     section_template = SECTION_TEMPLATES.get(doc_type, SECTION_TEMPLATES["other"])
-    context          = build_generation_context(analysis, section_template)
-    logger.info(f"[doc-gen] Step 2: built template context for doc_type='{doc_type}'")
-    return context
+    base             = build_generation_context(analysis, section_template)
+
+    # Convert required_sections + extracted_fields into the blueprint format
+    sections_block = "\n\n".join(
+        f"{line}"
+        for line in base["required_sections"].splitlines()
+    )
+    return {
+        "doc_type":       base["doc_type"],
+        "doc_label":      base["doc_label"],
+        "tone":           "professional",
+        "layout_notes":   "Standard document layout.",
+        "sections_block": sections_block,
+    }
+
+
+async def _build_template_context(analysis: dict) -> dict:
+    """Step 2 — LLM call to build a tailored document blueprint.
+    Falls back to the static Python template on parse failure.
+    """
+    doc_type  = analysis.get("doc_type", "other")
+    doc_label = analysis.get("doc_label", "Document")
+
+    # Build extracted_fields string to pass into the prompt
+    section_template  = SECTION_TEMPLATES.get(doc_type, SECTION_TEMPLATES["other"])
+    base_context      = build_generation_context(analysis, section_template)
+    extracted_fields  = base_context["extracted_fields"]
+
+    system_prompt = TEMPLATE_BUILD_PROMPT.format(
+        doc_type=doc_type,
+        doc_label=doc_label,
+        extracted_fields=extracted_fields,
+    )
+
+    logger.info(f"[doc-gen] Step 2: building blueprint for '{doc_label}'...")
+    raw = await _call_llm(system_prompt, f"Build the document blueprint for: {doc_label}")
+    logger.info(f"[doc-gen] Step 2 raw output: {raw[:300]}")
+
+    return _parse_blueprint_json(raw, analysis)
 
 
 async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
-    """Step 3 — final LLM call using the enriched type-specific context."""
+    """Step 3 — final LLM call using the enriched blueprint context."""
     logger.info(f"[doc-gen] Step 3: generating HTML for '{context['doc_label']}'...")
     system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
         **context,
@@ -294,8 +399,8 @@ async def generate_document_html(
         # Step 1: query analysis
         analysis = await _analyze_query(request.user_prompt)
 
-        # Step 2: template building (pure Python)
-        context = _build_template_context(analysis)
+        # Step 2: blueprint building (LLM)
+        context = await _build_template_context(analysis)
 
         # Step 3: final HTML generation
         raw_html     = await _generate_html_from_context(context, request.user_prompt)
@@ -331,6 +436,20 @@ async def regenerate_document_html(
             detail=(
                 "Invalid request: your modification query appears to be gibberish or unclear.\n\n"
                 "Please describe what you want to change. Examples:\n"
+                "  • \"Change the vendor name to Acme Corp\"\n"
+                "  • \"Update the due date to 30th April 2025\"\n"
+                "  • \"Add a 10% GST row to the totals table\"\n"
+                "  • \"Replace the client address with 123 Main Street, New York\""
+            ),
+        )
+
+    if not _is_modification_query(request.modification_query):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This endpoint only accepts modification requests for an existing document.\n\n"
+                "To generate a new document use /generate-html.\n\n"
+                "To modify an existing document, describe what to change. Examples:\n"
                 "  • \"Change the vendor name to Acme Corp\"\n"
                 "  • \"Update the due date to 30th April 2025\"\n"
                 "  • \"Add a 10% GST row to the totals table\"\n"

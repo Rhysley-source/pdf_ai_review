@@ -410,6 +410,46 @@ def build_generation_context(analysis: dict, section_template: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# STEP 2 — Template Build Prompt (LLM)
+# Takes the Step 1 analysis and produces a tailored document blueprint:
+#   - sections refined/expanded for this specific document instance
+#   - each section pre-filled with extracted field values
+#   - tone and layout notes for the generator
+# Returns a compact JSON object consumed by Step 3.
+# ---------------------------------------------------------------------------
+
+TEMPLATE_BUILD_PROMPT = SimulatedPromptTemplate(
+    template="""You are a document blueprint specialist. Your job is to produce a precise, filled-in document plan for a "{doc_label}" document.
+
+You are given:
+  Document Type : {doc_label} ({doc_type})
+  Extracted Fields (from user request):
+{extracted_fields}
+
+YOUR TASK — return ONLY a valid JSON object with exactly these keys:
+
+{{
+  "sections": [
+    {{
+      "title": "<section heading>",
+      "content_hint": "<what to write in this section — include actual field values where known, use [Placeholder] for missing ones>"
+    }}
+  ],
+  "tone": "<professional | formal | friendly | technical — choose the most appropriate for this document type>",
+  "layout_notes": "<one sentence about layout specifics, e.g. table for line items, two-column header, centered title>"
+}}
+
+Rules:
+- Include ALL sections required for a complete, professional {doc_label}.
+- In each content_hint, embed the actual extracted field values directly (e.g. "Vendor: Acme Corp", not just "vendor name goes here").
+- For missing fields use visible placeholders like [Client Name], [Invoice Date], etc.
+- Tailor sections specifically to "{doc_label}" — not generic boilerplate.
+- Return ONLY the raw JSON. No markdown, no backticks, no explanation.""",
+    input_variables=["doc_type", "doc_label", "extracted_fields"],
+)
+
+
+# ---------------------------------------------------------------------------
 # STEP 3 — Final Document Generation Prompt
 # Uses the enriched context from Steps 1 & 2 for precise HTML generation.
 # ---------------------------------------------------------------------------
@@ -417,26 +457,23 @@ def build_generation_context(analysis: dict, section_template: dict) -> dict:
 DOCUMENT_GENERATION_V2_PROMPT = SimulatedPromptTemplate(
     template="""You are an expert document generator.
 
-Document Type  : {doc_label} ({doc_type})
+Document Type : {doc_label} ({doc_type})
+Tone          : {tone}
+Layout Notes  : {layout_notes}
 
-Required Sections — include ALL of these in the given order:
-{required_sections}
-
-Extracted Details — use these exact values wherever applicable:
-{extracted_fields}
-
-For any field marked [Not provided], insert a clearly visible placeholder like [Field Name].
+Document Blueprint — generate each section exactly as described:
+{sections_block}
 
 Original User Request:
 {user_request}
 
 Instructions:
-- Generate a complete, well-structured HTML document that matches the document type above.
+- Generate a complete, well-structured HTML document following the blueprint above.
 - The HTML must include <html>, <head> (with embedded <style>), and <body> tags.
 - Add contenteditable="true" to the main content container inside <body>.
-- Include every required section listed above, in the given order.
-- Use the extracted field values exactly as given; do NOT invent alternatives.
-- Use professional formatting, language, and layout appropriate for this document type.
+- Render every section in the given order using its content_hint as the source of truth.
+- Replace any [Placeholder] with a clearly visible bracketed label in the HTML (e.g. <span>[Client Name]</span>).
+- Use professional formatting, language, and layout appropriate for the tone and layout notes above.
 - Do NOT include markdown backticks, explanations, or any text outside the HTML.
 - Return ONLY the complete HTML starting with <html> and ending with </html>.
 
@@ -452,7 +489,7 @@ STRICT DESIGN RULES — follow exactly:
 - Section dividers: use <hr> or border-bottom only — no colored divider blocks.
 - Tables: width:100%, 1px solid border, no background colors on rows.
 - The result must look like a clean printed document — not a web app widget.""",
-    input_variables=["doc_type", "doc_label", "required_sections", "extracted_fields", "user_request"],
+    input_variables=["doc_type", "doc_label", "tone", "layout_notes", "sections_block", "user_request"],
 )
 
 
