@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 from llm_model.ai_model import run_llm
@@ -353,61 +354,97 @@ Do not include fields that are missing — only those that ARE present."""
 
 
 # ---------------------------------------------------------------------------
-# Placeholder detection — regex scan on full document text
+# Placeholder detection — LLM-based, chunked across full document
 # ---------------------------------------------------------------------------
 
-_PLACEHOLDER_PATTERNS = [
-    # [INSERT DATE], [PARTY NAME], [YOUR COMPANY], [TBD], [TO BE FILLED], etc.
-    re.compile(
-        r'\[(?:INSERT|ENTER|YOUR|PARTY|TO BE|TBD|FILL|NAME|DATE|ADDRESS|AMOUNT|'
-        r'NUMBER|TITLE|COMPANY|SIGNATURE|VENDOR|CLIENT|EMPLOYEE|EMPLOYER|LANDLORD|'
-        r'TENANT|LESSEE|LESSOR)[^\]]{0,80}\]',
-        re.IGNORECASE,
-    ),
-    # [___] or [   ] — bracket with blanks
-    re.compile(r'\[\s*_+\s*\]'),
-    # Five or more underscores used as fill-in blanks
-    re.compile(r'_{5,}'),
-    # <INSERT DATE>, <PARTY NAME>, <YOUR NAME>
-    re.compile(
-        r'<(?:INSERT|ENTER|YOUR|DATE|NAME|PARTY|FILL|AMOUNT|COMPANY)[^>]{0,60}>',
-        re.IGNORECASE,
-    ),
-    # {INSERT ...}, {placeholder}
-    re.compile(
-        r'\{(?:INSERT|ENTER|YOUR|DATE|NAME|PARTY|FILL|AMOUNT|COMPANY)[^}]{0,60}\}',
-        re.IGNORECASE,
-    ),
-    # __VARIABLE__ style template tokens
-    re.compile(r'__[A-Za-z][A-Za-z_]{2,}__'),
-    # Standalone TBD / TBA as a value (not inside a word)
-    re.compile(r'(?<![A-Za-z])(?:TBD|TBA)(?![A-Za-z])'),
-]
-
-
-def _detect_placeholders(text: str) -> list[dict]:
+async def _detect_placeholders_chunk(chunk: str, chunk_label: str) -> list[str]:
     """
-    Scans the full document text for unfilled placeholders using regex.
-    Returns a list of detected_risks-format items (one entry per unique
-    placeholder found).  Called on the complete text before normalization
-    so no clause is missed due to chunking.
+    Asks the LLM to identify unfilled placeholders in one chunk.
+    Returns a list of verbatim placeholder strings found in that chunk.
 
-    Severity is always High — an agreement with unfilled fields is legally
-    incomplete and potentially unenforceable.
+    NOTE: the LLM returns a raw JSON array, NOT a dict, so we parse it
+    directly instead of routing through extract_json_raw (which only
+    handles dicts and silently returns {} for arrays).
     """
-    # Collect unique placeholder strings (deduplicated by normalised key)
-    seen_keys: set[str]   = set()
-    unique_placeholders:  list[str] = []
+    system_prompt = """You are reviewing a document for completeness before it is signed.
 
-    for pattern in _PLACEHOLDER_PATTERNS:
-        for match in pattern.finditer(text):
-            raw = match.group(0).strip()
-            key = re.sub(r"[^a-z0-9]", "", raw.lower())
+Your task: find every unfilled placeholder — any spot in the text that should have been replaced with a real value but was not.
+
+Look for ALL of these forms:
+- Square brackets:  [Email], [Phone], [Company Name], [INSERT DATE], [PARTY NAME], [TBD], [___]
+- Underscores used as blanks:  ___________  (a run of underscores left empty)
+- Angle brackets:  <INSERT NAME>, <DATE>, <PARTY>
+- Curly braces:  {COMPANY NAME}, {fill in}
+- Dunder tokens:  __VENDOR_NAME__, __DATE__
+- "TBD" or "TBA" used as a field value (not in running text)
+- Any other text that is clearly a template token rather than real content
+
+Return ONLY a JSON array containing each placeholder exactly as it appears in the text:
+["[Email]", "[Phone]", "[Company Name]", "[INSERT DATE]", "___________"]
+
+Rules:
+- Copy every placeholder verbatim from the text — do not paraphrase or combine
+- List EACH distinct placeholder separately, even if the same token appears multiple times (include it once)
+- If no placeholders are found, return: []
+- No explanation, no markdown, no extra keys — ONLY the JSON array"""
+
+    logger.info(f"[risk_detection] Placeholder scan — {chunk_label}")
+    raw = await run_llm(chunk, system_prompt)
+
+    # extract_json_raw only handles dicts — parse the array directly
+    cleaned = raw.replace("```json", "").replace("```", "").strip()
+
+    # Strategy 1: direct json.loads
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, list):
+            return [str(p).strip() for p in parsed if isinstance(p, str) and p.strip()]
+    except (json.JSONDecodeError, Exception):
+        pass
+
+    # Strategy 2: find the outermost [ ... ] in the response
+    start = cleaned.find("[")
+    end   = cleaned.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            parsed = json.loads(cleaned[start : end + 1])
+            if isinstance(parsed, list):
+                return [str(p).strip() for p in parsed if isinstance(p, str) and p.strip()]
+        except (json.JSONDecodeError, Exception):
+            pass
+
+    logger.warning(f"[risk_detection] Placeholder scan — {chunk_label}: could not parse LLM array response")
+    return []
+
+
+async def _detect_placeholders_llm(text: str) -> list[dict]:
+    """
+    LLM-based placeholder detection across the full document.
+    Chunks the text (same windows as risk analysis) and runs all chunks
+    in parallel, then deduplicates results.
+
+    Returns a detected_risks-format list — one entry if any placeholders
+    are found, empty list if the document is clean.
+    """
+    chunks = _chunk_text(text)
+
+    chunk_results = await asyncio.gather(*[
+        _detect_placeholders_chunk(chunk, f"chunk {i+1}/{len(chunks)}")
+        for i, chunk in enumerate(chunks)
+    ])
+
+    # Deduplicate across chunks by normalised key
+    seen_keys: set[str] = set()
+    unique_placeholders: list[str] = []
+    for placeholders in chunk_results:
+        for p in placeholders:
+            key = re.sub(r"[^a-z0-9]", "", p.lower())
             if key and key not in seen_keys:
                 seen_keys.add(key)
-                unique_placeholders.append(raw)
+                unique_placeholders.append(p)
 
     if not unique_placeholders:
+        logger.info("[risk_detection] Placeholder scan: no placeholders found")
         return []
 
     count        = len(unique_placeholders)
@@ -802,7 +839,7 @@ async def analyze_document_risks(text: str) -> dict:
       - Known type  → _analyze_risks_hybrid  (fixed profile + dynamic in parallel)
       - Other type  → _analyze_risks_dynamic (fully dynamic, chunked)
 
-    Step 3 — placeholder scan: regex over full text, injected before normalization.
+    Step 3 — placeholder scan: LLM over chunked full text, injected before normalization.
       Any unfilled placeholder ([INSERT DATE], _____, <PARTY NAME>, etc.)
       becomes a High-severity detected_risk entry.
 
@@ -820,10 +857,10 @@ async def analyze_document_risks(text: str) -> dict:
     else:
         analysis = await _analyze_risks_dynamic(text, doc_label)
 
-    # Inject placeholder risks from full-document regex scan.
+    # Inject placeholder risks from full-document LLM scan.
     # Runs before normalization so the items pass through _normalize_result.
     # Prepended so High-severity placeholder issues appear first.
-    placeholder_risks = _detect_placeholders(text)
+    placeholder_risks = await _detect_placeholders_llm(text)
     if placeholder_risks:
         analysis["detected_risks"] = placeholder_risks + analysis.get("detected_risks", [])
 
