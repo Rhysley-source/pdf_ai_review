@@ -657,15 +657,26 @@ async def compare_documents_api(
                 detail="One or both documents are too short for comparison.",
             )
  
-        # ── Step 3: Classify + Extract clauses (parallel) ─────────────────
-        (doc_type1, doc_type2), (clauses1, clauses2) = await asyncio.gather(
-            asyncio.gather(classify_document(text1), classify_document(text2)),
-            asyncio.gather(extract_clauses(text1),   extract_clauses(text2)),
+        # ── Step 3a: Classify both documents (parallel) ───────────────────
+        doc_type1, doc_type2 = await asyncio.gather(
+            classify_document(text1),
+            classify_document(text2),
         )
- 
+
+        # ── Step 3b: Extract clauses using doc_type-aware prompts (parallel)
+        (clauses1, in_tok1, out_tok1), \
+        (clauses2, in_tok2, out_tok2) = await asyncio.gather(
+            extract_clauses(text1, doc_type=doc_type1),
+            extract_clauses(text2, doc_type=doc_type2),
+        )
+
+        input_tokens  = in_tok1 + in_tok2
+        output_tokens = out_tok1 + out_tok2
+
         logger.info(
             f"[{request_id}] types=({doc_type1}, {doc_type2}) "
-            f"clauses=({len(clauses1)}, {len(clauses2)})"
+            f"clauses=({len(clauses1)}, {len(clauses2)}) "
+            f"tokens={input_tokens}in/{output_tokens}out"
         )
  
         # ── Step 4: Compare ───────────────────────────────────────────────
@@ -694,7 +705,6 @@ async def compare_documents_api(
         error_msg = str(e)
         logger.exception(f"[{request_id}] comparison error: {e}")
         raise HTTPException(status_code=500, detail="Document comparison failed.")
- 
     # finally:
     #     duration_ms = int((time.perf_counter() - t_start) * 1000)
  
@@ -727,4 +737,14 @@ async def compare_documents_api(
     # if compare_result and log_id:
     #     compare_result["log_id"] = log_id
  
+    finally:
+        # Cleanup temp files regardless of success or failure
+        for p in [path1, path2]:
+            if p and os.path.exists(p):
+                os.remove(p)
+                logger.debug(f"[{request_id}] temp file deleted: {p}")
+
+        duration_ms = int((time.perf_counter() - t_start) * 1000)
+        logger.info(f"[{request_id}] ── COMPLETE — {duration_ms}ms status={status} ──")
+
     return compare_result

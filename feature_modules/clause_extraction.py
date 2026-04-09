@@ -3,175 +3,152 @@ clause_extraction.py
 
 Extracts named legal clauses from document text.
 
-Strategy:
-  1. LLM-first extraction with a rich, fixed schema of clause keys.
-  2. Rule-based fallback ONLY if LLM returns nothing — not the other
-     way around. The old approach ran rule-based first and fell back to
-     LLM only on total failure; this produced raw heading strings as
-     keys (e.g. "1. Payment Terms: The client shall pay...") instead of
-     normalised keys ("payment_terms"), which broke the clause-matching
-     similarity scores and triggered the full_text fallback in
-     compare_documents.
-
-Schema — the LLM is asked for exactly these keys. Absent clauses get "".
-That gives compare_documents stable, matchable keys across both documents.
+Key improvements vs. previous version:
+  - Doc-type-aware: selects the correct prompt from clause_extraction_prompts.py
+    based on the document type (contract, nda, employment, lease, invoice, other)
+  - Role-persona prompts per document type (borrowed from prompts.py pattern)
+  - Required / optional key separation in every prompt
+  - "Not Specified" default — LLM never omits a key
+  - Focus hint injected per doc type (borrowed from obligation_detection.py pattern)
+  - Token tracking returned to caller
+  - Retry with strengthened language if extraction is weak
+  - Rule-based is a last-resort fallback only
 """
 
 import logging
-from typing import Dict
+import re
+from typing import Dict, Tuple
 
 from llm_model.ai_model import run_llm
 from utils.json_utils import extract_json_raw as extract_json
+from feature_modules.clause_extraction_prompts import (
+    build_extraction_prompt,
+    DOC_TYPE_TO_PROMPT_KEY,
+    CLAUSE_EXTRACTION_PROMPTS,
+    CLAUSE_FOCUS_HINTS,
+)
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Target clause schema — fixed keys the LLM must use.
-# Extend this list to add more clause types; the prompt rebuilds itself.
+# Schema: all valid clause keys across all document types
 # ---------------------------------------------------------------------------
-CLAUSE_SCHEMA: list[str] = [
-    "payment_terms",
-    "contract_term",
-    "renewal_conditions",
-    "termination",
-    "liability",
-    "indemnification",
-    "governing_law",
-    "dispute_resolution",
-    "force_majeure",
-    "confidentiality",
-    "intellectual_property",
-    "non_compete",
-    "scope_of_work",
-    "warranties",
-    "penalties",
-    "pricing",
-    "delivery_timeline",
-    "data_protection",
-    "assignment",
-    "entire_agreement",
-]
 
-# Map each key to its display name (used in prompts and UI)
-CLAUSE_LABELS: dict[str, str] = {
-    "payment_terms":      "Payment Terms",
-    "contract_term":      "Contract Term",
-    "renewal_conditions": "Renewal Conditions",
-    "termination":        "Termination",
-    "liability":          "Liability",
-    "indemnification":    "Indemnification",
-    "governing_law":      "Governing Law",
-    "dispute_resolution": "Dispute Resolution",
-    "force_majeure":      "Force Majeure",
-    "confidentiality":    "Confidentiality",
-    "intellectual_property": "Intellectual Property",
-    "non_compete":        "Non-Compete",
-    "scope_of_work":      "Scope of Work",
-    "warranties":         "Warranties",
-    "penalties":          "Penalties",
-    "pricing":            "Pricing",
-    "delivery_timeline":  "Delivery Timeline",
-    "data_protection":    "Data Protection",
-    "assignment":         "Assignment",
-    "entire_agreement":   "Entire Agreement",
+ALL_CLAUSE_KEYS: frozenset = frozenset({
+    "payment_terms", "contract_term", "renewal_conditions", "termination",
+    "liability", "indemnification", "governing_law", "dispute_resolution",
+    "force_majeure", "confidentiality", "intellectual_property", "non_compete",
+    "non_solicitation", "scope_of_work", "warranties", "penalties", "pricing",
+    "delivery_timeline", "data_protection", "assignment", "entire_agreement",
+    "permitted_disclosures", "return_of_materials", "residuals",
+    "probation_period", "notice_period", "benefits", "leave_policy",
+    "security_deposit", "rent_escalation", "maintenance", "subletting",
+    "permitted_use", "entry_by_landlord",
+    "payment_due_date", "late_payment_penalty", "tax",
+})
+
+MIN_CLAUSE_VALUE_LENGTH = 80  # filters sentence fragments from LLM output
+
+# Words that legitimately start a clause value (first word lowercase is OK)
+_OK_CLAUSE_STARTERS = {
+    "the", "a", "an", "all", "any", "each", "either", "no", "in", "on",
+    "upon", "during", "for", "if", "when", "where", "this", "such",
+    "subject", "notwithstanding", "provided", "unless", "except",
 }
 
 
-# ---------------------------------------------------------------------------
-# Prompt builder
-# ---------------------------------------------------------------------------
-
-def _build_extraction_prompt(text: str) -> str:
-    schema_lines = "\n".join(f'    "{k}": ""' for k in CLAUSE_SCHEMA)
-    return f"""You are a legal contract analyst. Extract the verbatim or closely paraphrased text
-of each clause from the document below and return ONLY a JSON object with these exact keys.
-
-Rules:
-- Use ONLY the keys listed. Do not add extra keys.
-- Value = the actual clause text found in the document (quote it or closely paraphrase it).
-- If a clause is absent from the document → return "" for that key.
-- Do NOT summarise or shorten clause text — preserve the original wording faithfully.
-- Values must be plain strings. No nested objects or arrays.
-- Return ONLY valid JSON. No preamble, no explanation.
-
-JSON schema (return all keys):
-{{
-{schema_lines}
-}}
-
-Document:
----
-{text[:6000]}
----"""
-
-
-def _build_retry_prompt(text: str) -> str:
-    """Simpler retry prompt used when first attempt fails."""
-    keys = ", ".join(f'"{k}"' for k in CLAUSE_SCHEMA[:10])
-    return f"""Extract legal clauses. Return ONLY JSON. Keys: {keys} (plus others if present).
-Empty string for absent clauses. No explanation.
-
-Document (first 3000 chars):
-{text[:3000]}"""
+def _is_fragment(v: str) -> bool:
+    """
+    Return True if the value looks like a mid-sentence fragment rather than a
+    complete clause. Fragments typically start with a lowercase word that cannot
+    begin a sentence (e.g. 'connection with this Agreement...',
+    'otherwise communicated...', 'policies, and codes of...').
+    """
+    first_char = v[0] if v else ""
+    if not first_char.islower():
+        return False  # starts with uppercase, digit, or punctuation — looks fine
+    first_word = re.split(r"[\s,;]", v)[0].lower()
+    return first_word not in _OK_CLAUSE_STARTERS
 
 
 # ---------------------------------------------------------------------------
-# LLM extraction (primary)
+# LLM extraction — primary strategy
 # ---------------------------------------------------------------------------
 
-async def _extract_with_llm(text: str, retry: bool = False) -> Dict[str, str]:
-    prompt = _build_retry_prompt(text) if retry else _build_extraction_prompt(text)
-    raw = await run_llm("", prompt)
-    result = extract_json(raw)
-    if not result:
-        return {}
-    # Keep only recognised schema keys with non-empty string values
-    return {
+async def _extract_with_llm(
+    text: str,
+    doc_type: str,
+    retry: bool = False,
+) -> Tuple[Dict[str, str], int, int]:
+    if retry:
+        prompt_key = DOC_TYPE_TO_PROMPT_KEY.get(doc_type.lower(), "other")
+        base  = CLAUSE_EXTRACTION_PROMPTS.get(prompt_key, CLAUSE_EXTRACTION_PROMPTS["other"])
+        focus = CLAUSE_FOCUS_HINTS.get(prompt_key, CLAUSE_FOCUS_HINTS["other"])
+        prompt = (
+            f"{base}\n\n"
+            "IMPORTANT: Be EXTREMELY thorough. Every clause that exists in the document "
+            "MUST be extracted. Do not return 'Not Specified' unless the clause is "
+            "genuinely absent. Re-read the document carefully before responding.\n\n"
+            f"EXTRACTION FOCUS:\n{focus}\n\n"
+            f"DOCUMENT TEXT:\n---\n{text[:6000]}\n---"
+        )
+    else:
+        prompt = build_extraction_prompt(text, doc_type)
+
+    result = await run_llm("", prompt)
+
+    # Handle both (content, in, out) tuple and plain str signatures
+    if isinstance(result, tuple):
+        raw, in_tok, out_tok = result
+    else:
+        raw, in_tok, out_tok = result, 0, 0
+
+    parsed = extract_json(raw)
+    if not parsed:
+        return {}, in_tok, out_tok
+
+    clean = {
         k: v.strip()
-        for k, v in result.items()
-        if k in CLAUSE_SCHEMA and isinstance(v, str) and v.strip()
+        for k, v in parsed.items()
+        if (
+            k in ALL_CLAUSE_KEYS
+            and isinstance(v, str)
+            and v.strip()
+            and v.strip().lower() not in ("not specified", "n/a", "none", "")
+            and len(v.strip()) >= MIN_CLAUSE_VALUE_LENGTH
+            and not _is_fragment(v.strip())
+        )
     }
+    return clean, in_tok, out_tok
 
 
 # ---------------------------------------------------------------------------
-# Rule-based fallback (used ONLY when LLM returns nothing)
+# Rule-based fallback — LAST RESORT only
 # ---------------------------------------------------------------------------
-
-import re
 
 def _is_clause_heading(line: str) -> bool:
-    """Detect numbered headings: '1. Payment Terms' / '1) ...' / ALL CAPS."""
     return bool(
         re.match(r"^\d+[\.\)]\s+.{3,}", line)
-        or (line.isupper() and len(line) > 4)
+        or (line.isupper() and len(line.strip()) > 4)
     )
 
 
-def _normalise_heading_to_key(heading: str) -> str:
-    """
-    Map a raw heading like '1. Payment Terms' to the nearest schema key,
-    e.g. 'payment_terms'. Falls back to a slugified version of the heading.
-    """
-    h = heading.lower()
-    h = re.sub(r"^\d+[\.\)]\s*", "", h)   # strip leading '1. '
+def _normalise_heading(heading: str):
+    h = re.sub(r"^\d+[\.\)]\s*", "", heading).lower()
     h = re.sub(r"[^a-z0-9]+", "_", h).strip("_")
-
-    # Try exact match first
-    if h in CLAUSE_SCHEMA:
+    if h in ALL_CLAUSE_KEYS:
         return h
-
-    # Partial match against schema keys
-    for key in CLAUSE_SCHEMA:
-        if key in h or any(part in h for part in key.split("_") if len(part) > 3):
+    for key in ALL_CLAUSE_KEYS:
+        parts = [p for p in key.split("_") if len(p) > 3]
+        if any(p in h for p in parts):
             return key
-
-    return h  # unknown heading — will be filtered out later
+    return None
 
 
 def _extract_rule_based(text: str) -> Dict[str, str]:
     clauses: Dict[str, str] = {}
     current_key = None
-    buffer: list[str] = []
+    buffer: list = []
 
     for line in text.splitlines():
         line = line.strip()
@@ -179,66 +156,79 @@ def _extract_rule_based(text: str) -> Dict[str, str]:
             continue
         if _is_clause_heading(line):
             if current_key and buffer:
-                clauses[current_key] = " ".join(buffer).strip()
-            current_key = _normalise_heading_to_key(line)
+                value = " ".join(buffer).strip()
+                if len(value) >= MIN_CLAUSE_VALUE_LENGTH:
+                    clauses[current_key] = value
+            current_key = _normalise_heading(line)
             buffer = []
         elif current_key:
             buffer.append(line)
 
     if current_key and buffer:
-        clauses[current_key] = " ".join(buffer).strip()
+        value = " ".join(buffer).strip()
+        if len(value) >= MIN_CLAUSE_VALUE_LENGTH:
+            clauses[current_key] = value
 
-    # Keep only schema keys
-    return {k: v for k, v in clauses.items() if k in CLAUSE_SCHEMA and v}
+    return clauses
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-async def extract_clauses(text: str) -> Dict[str, str]:
+async def extract_clauses(
+    text: str,
+    doc_type: str = "other",
+) -> Tuple[Dict[str, str], int, int]:
     """
-    Extract legal clauses from document text.
+    Extract legal clauses from document text using a doc-type-aware LLM prompt.
 
-    Returns a dict mapping schema keys (e.g. "payment_terms") to the
-    clause text found in the document. Absent clauses are omitted (not
-    returned as empty strings) so callers can detect what's actually present.
+    Parameters
+    ----------
+    text     : raw document text
+    doc_type : from classify_document() — drives prompt selection
 
-    Strategy: LLM-first → retry → rule-based fallback.
-    Rule-based is a last resort because it produces heading-string keys
-    that break the similarity matching in document_comparison.py.
+    Returns
+    -------
+    (clauses_dict, input_tokens, output_tokens)
+
+    Strategy: LLM attempt 1 → LLM retry (stronger) → rule-based fallback
     """
+    total_in = total_out = 0
+
     try:
-        # Attempt 1 — full LLM extraction
-        clauses = await _extract_with_llm(text, retry=False)
-        if clauses:
+        # Attempt 1: doc-type-aware LLM
+        clauses, in1, out1 = await _extract_with_llm(text, doc_type, retry=False)
+        total_in += in1; total_out += out1
+
+        if len(clauses) >= 2:
             logger.info(
-                f"[clause_extraction] LLM extracted {len(clauses)} clause(s): "
+                f"[clause_extraction] LLM ({doc_type}) → {len(clauses)} clauses: "
                 + ", ".join(clauses.keys())
             )
-            return clauses
+            return clauses, total_in, total_out
 
-        # Attempt 2 — simplified retry prompt
-        logger.warning("[clause_extraction] LLM attempt 1 returned nothing — retrying")
-        clauses = await _extract_with_llm(text, retry=True)
+        # Attempt 2: retry with stronger language
+        logger.warning(
+            f"[clause_extraction] Attempt 1 returned {len(clauses)} clause(s) "
+            f"(doc_type='{doc_type}') — retrying"
+        )
+        clauses_r, in2, out2 = await _extract_with_llm(text, doc_type, retry=True)
+        total_in += in2; total_out += out2
+
+        if len(clauses_r) >= len(clauses):
+            clauses = clauses_r
+
         if clauses:
-            logger.info(
-                f"[clause_extraction] LLM retry extracted {len(clauses)} clause(s)"
-            )
-            return clauses
+            logger.info(f"[clause_extraction] Retry → {len(clauses)} clauses")
+            return clauses, total_in, total_out
 
-        # Attempt 3 — rule-based fallback
-        logger.warning("[clause_extraction] Both LLM attempts failed — rule-based fallback")
+        # Attempt 3: rule-based fallback
+        logger.warning("[clause_extraction] LLM failed — rule-based fallback")
         clauses = _extract_rule_based(text)
-        if clauses:
-            logger.info(
-                f"[clause_extraction] Rule-based extracted {len(clauses)} clause(s)"
-            )
-            return clauses
-
-        logger.error("[clause_extraction] All strategies failed — returning empty")
-        return {}
+        logger.info(f"[clause_extraction] Rule-based → {len(clauses)} clauses")
+        return clauses, total_in, total_out
 
     except Exception as e:
-        logger.exception(f"[clause_extraction] Unhandled error: {e}")
-        return {}
+        logger.exception(f"[clause_extraction] Error: {e}")
+        return {}, total_in, total_out
