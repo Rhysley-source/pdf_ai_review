@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import io
 import json
 import os
@@ -92,6 +93,15 @@ class Base64TextRequest(BaseModel):
 # LLM caller — dedicated for HTML generation with higher output token limit
 # ---------------------------------------------------------------------------
 
+def _prompt_seed(system_prompt: str, user_message: str) -> int:
+    """
+    Derives a stable integer seed from the prompt content.
+    Same prompt → same seed → deterministic LLM output (when model supports it).
+    """
+    digest = hashlib.sha256((system_prompt + user_message).encode()).hexdigest()
+    return int(digest[:8], 16)
+
+
 async def _call_llm(system_prompt: str, user_message: str) -> str:
     model = os.environ.get("MODEL_NAME", _MODEL)
 
@@ -101,10 +111,12 @@ async def _call_llm(system_prompt: str, user_message: str) -> str:
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": user_message},
         ],
+        "seed": _prompt_seed(system_prompt, user_message),
     }
 
+    # temperature=0 → greedy decoding, fully deterministic output
     if model not in _FIXED_TEMPERATURE_MODELS:
-        kwargs["temperature"] = 0.3
+        kwargs["temperature"] = 0
 
     try:
         response = await _CLIENT.chat.completions.create(**kwargs)
@@ -415,12 +427,15 @@ def _extract_doc_type_from_html(html: str) -> str:
     return "existing document"
 
 
-async def _check_regeneration_intent(modification_query: str, existing_html: str) -> None:
+async def _check_regeneration_intent(modification_query: str, existing_html: str) -> str:
     """
-    Calls LLM to verify the modification query intends to modify the existing
-    document — not generate a completely different document type.
-    Raises HTTP 422 if the intent is 'new_document'.
-    Silently passes on parse errors (fail open — let the LLM handle it).
+    Calls LLM to determine whether the query wants to modify the existing document
+    or generate a completely new one.
+
+    Returns:
+        "modify"       — user wants changes to the existing document
+        "new_document" — user wants a brand new document of a different type
+    Defaults to "modify" on any parse/LLM failure (fail open).
     """
     current_doc_type = _extract_doc_type_from_html(existing_html)
 
@@ -430,26 +445,15 @@ async def _check_regeneration_intent(modification_query: str, existing_html: str
     )
 
     try:
-        raw = await _call_llm(system_prompt, modification_query)
+        raw     = await _call_llm(system_prompt, modification_query)
         cleaned = raw.strip().replace("```json", "").replace("```", "").strip()
         parsed  = json.loads(cleaned)
         intent  = parsed.get("intent", "modify")
-        reason  = parsed.get("reason", "")
+        logger.info(f"[doc-gen] Regeneration intent: '{intent}' — {parsed.get('reason', '')}")
+        return intent if intent in ("modify", "new_document") else "modify"
     except Exception:
-        # Fail open — if LLM or parse fails, don't block the user
-        logger.warning("[doc-gen] Regeneration intent check failed — skipping")
-        return
-
-    if intent == "new_document":
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error":   "wrong_endpoint",
-                "message": f"Your request appears to be asking for a new type of document, not a modification of the existing one.",
-                "reason":  reason,
-                "hint":    "Use /generate-html to create a new document. Use /regenerate-html only to modify the existing document.",
-            },
-        )
+        logger.warning("[doc-gen] Regeneration intent check failed — defaulting to 'modify'")
+        return "modify"
 
 
 # ---------------------------------------------------------------------------
@@ -597,20 +601,6 @@ async def regenerate_document_html(
             ),
         )
 
-    if not _is_modification_query(request.modification_query):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "This endpoint only accepts modification requests for an existing document.\n\n"
-                "To generate a new document use /generate-html.\n\n"
-                "To modify an existing document, describe what to change. Examples:\n"
-                "  • \"Change the vendor name to Acme Corp\"\n"
-                "  • \"Update the due date to 30th April 2025\"\n"
-                "  • \"Add a 10% GST row to the totals table\"\n"
-                "  • \"Replace the client address with 123 Main Street, New York\""
-            ),
-        )
-
     db            = get_storage()
     existing_html = db.get(request.document_id)
 
@@ -620,12 +610,65 @@ async def regenerate_document_html(
             detail=f"No document found with ID '{request.document_id}'. Generate it first."
         )
 
-    # LLM intent check — reject if user is trying to generate a different document type
-    await _check_regeneration_intent(request.modification_query, existing_html)
+    # LLM intent check — branch based on whether user wants to modify or generate new
+    intent = await _check_regeneration_intent(request.modification_query, existing_html)
 
+    if intent == "new_document":
+        # ── New document generation path (same as /generate-html) ──────────
+        logger.info("[doc-gen] Regeneration intent=new_document — running generation pipeline")
+
+        try:
+            analysis = await _analyze_query(request.modification_query)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("[doc-gen] Step 1 failed during regeneration→generate")
+            raise HTTPException(status_code=502, detail={
+                "error": "step1_failed", "step": "Query Analysis",
+                "message": "Failed to analyse your request.",
+                "hint": "Try rephrasing your prompt.", "detail": str(e),
+            })
+
+        try:
+            context = await _build_template_context(analysis)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("[doc-gen] Step 2 failed during regeneration→generate")
+            raise HTTPException(status_code=502, detail={
+                "error": "step2_failed", "step": "Blueprint Building",
+                "message": "Failed to build the document blueprint.",
+                "hint": "Try again.", "detail": str(e),
+            })
+
+        try:
+            raw_html = await _generate_html_from_context(context, request.modification_query)
+        except Exception as e:
+            logger.exception("[doc-gen] Step 3 failed during regeneration→generate")
+            raise HTTPException(status_code=502, detail={
+                "error": "step3_failed", "step": "HTML Generation",
+                "message": "The AI model failed to generate the document HTML.",
+                "hint": "Try again or simplify your prompt.", "detail": str(e),
+            })
+
+        cleaned_html = _clean_html(raw_html)
+
+        if not cleaned_html.strip():
+            raise HTTPException(status_code=500, detail={
+                "error": "empty_output", "step": "HTML Generation",
+                "message": "The AI model returned an empty document.",
+                "hint": "Try again or add more detail to your prompt.",
+                "raw_preview": raw_html[:300],
+            })
+
+        doc_id = request.document_id or str(uuid.uuid4())
+        update_storage(doc_id, cleaned_html)
+        return HTMLResponse(content=cleaned_html, headers={"X-Document-Id": doc_id})
+
+    # ── Modify existing document path ───────────────────────────────────────
     system_prompt = REGENERATE_PROMPT.format(
         existing_html=existing_html,
-        modification_query=request.modification_query
+        modification_query=request.modification_query,
     )
 
     try:
