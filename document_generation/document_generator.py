@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import io
@@ -6,6 +7,7 @@ import os
 import re
 import uuid
 import logging
+from collections import OrderedDict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
@@ -31,15 +33,45 @@ router = APIRouter()
 # Config
 # ---------------------------------------------------------------------------
 
-_MODEL      = os.environ.get("MODEL_NAME", "gpt-5-nano")
-_API_KEY    = os.environ.get("OPENAI_API_KEY", "")
-_CLIENT     = AsyncOpenAI(api_key=_API_KEY)
+# Step 3 (HTML generation) — full model, best output quality
+_MODEL           = os.environ.get("MODEL_NAME", "gpt-5-nano")
+# Steps 1+2 (JSON classification) — faster/lighter model, no quality impact
+_FAST_MODEL      = os.environ.get("FAST_MODEL_NAME", "gpt-4.1-nano")
+_API_KEY         = os.environ.get("OPENAI_API_KEY", "")
+_CLIENT          = AsyncOpenAI(api_key=_API_KEY)
 
 # Models that do not support the temperature parameter
 _FIXED_TEMPERATURE_MODELS = {
     "gpt-5-nano", "gpt-4.1-nano", "gpt-4o-mini",
     "o1", "o1-mini", "o3-mini", "o3",
 }
+
+# ---------------------------------------------------------------------------
+# LRU Cache for Steps 1+2 — keyed by prompt hash
+# Same query → same seed (temperature=0) → result is deterministic,
+# so caching is safe and has zero quality impact.
+# Max 256 entries; oldest evicted first (OrderedDict-based LRU).
+# ---------------------------------------------------------------------------
+
+_PIPELINE_CACHE_MAX  = 256
+_pipeline_cache: OrderedDict[int, dict] = OrderedDict()
+
+
+def _cache_get(seed: int) -> dict | None:
+    if seed not in _pipeline_cache:
+        return None
+    # Move to end (most-recently-used)
+    _pipeline_cache.move_to_end(seed)
+    return _pipeline_cache[seed]
+
+
+def _cache_set(seed: int, value: dict) -> None:
+    if seed in _pipeline_cache:
+        _pipeline_cache.move_to_end(seed)
+    else:
+        if len(_pipeline_cache) >= _PIPELINE_CACHE_MAX:
+            _pipeline_cache.popitem(last=False)  # evict LRU
+    _pipeline_cache[seed] = value
 
 # ---------------------------------------------------------------------------
 # Storage — absolute path anchored to this file's directory
@@ -102,8 +134,12 @@ def _prompt_seed(system_prompt: str, user_message: str) -> int:
     return int(digest[:8], 16)
 
 
-async def _call_llm(system_prompt: str, user_message: str) -> str:
-    model = os.environ.get("MODEL_NAME", _MODEL)
+async def _call_llm(system_prompt: str, user_message: str, model: str | None = None) -> str:
+    """
+    Core LLM caller. Uses the full generation model by default.
+    Pass model=_FAST_MODEL for lightweight JSON classification steps.
+    """
+    model = model or os.environ.get("MODEL_NAME", _MODEL)
 
     kwargs: dict = {
         "model":    model,
@@ -124,9 +160,8 @@ async def _call_llm(system_prompt: str, user_message: str) -> str:
         content  = choice.message.content or ""
         finish   = choice.finish_reason
         logger.info(
-            f"[html-gen] in={response.usage.prompt_tokens} "
-            f"out={response.usage.completion_tokens} "
-            f"finish={finish} model={model}"
+            f"[html-gen] model={model} in={response.usage.prompt_tokens} "
+            f"out={response.usage.completion_tokens} finish={finish}"
         )
         if finish == "length":
             logger.warning("[html-gen] Response was cut off by the model's context limit (finish_reason=length)")
@@ -134,6 +169,11 @@ async def _call_llm(system_prompt: str, user_message: str) -> str:
     except Exception as e:
         logger.exception(f"[html-gen] OpenAI call failed: {e}")
         raise
+
+
+async def _call_llm_fast(system_prompt: str, user_message: str) -> str:
+    """Lightweight LLM call using the fast model — for JSON classification only."""
+    return await _call_llm(system_prompt, user_message, model=_FAST_MODEL)
 
 
 # ---------------------------------------------------------------------------
@@ -287,14 +327,27 @@ def _parse_analysis_json(raw: str) -> dict:
 
 
 async def _analyze_query(user_prompt: str) -> dict:
-    """Step 1 — LLM call to detect document type and extract field values.
+    """Step 1 — fast LLM call to detect document type and extract field values.
+    Uses the fast model (JSON classification only).
     Raises HTTP 422 immediately if the query is not a document generation request.
+    Caches result by prompt seed — same query skips the LLM call entirely.
     """
-    logger.info("[doc-gen] Step 1: analysing query...")
-    raw = await _call_llm(QUERY_ANALYSIS_PROMPT.template, user_prompt)
-    logger.info(f"[doc-gen] Step 1 raw output: {raw[:300]}")
-
-    analysis = _parse_analysis_json(raw)
+    seed   = _prompt_seed(QUERY_ANALYSIS_PROMPT.template, user_prompt)
+    cached = _cache_get(seed)
+    if cached and "analysis" in cached:
+        logger.info("[doc-gen] Step 1: cache hit — skipping LLM call")
+        analysis = cached["analysis"]
+        analysis["_user_prompt"] = user_prompt
+        analysis["_seed"]        = seed
+    else:
+        logger.info("[doc-gen] Step 1: analysing query (fast model)...")
+        raw      = await _call_llm_fast(QUERY_ANALYSIS_PROMPT.template, user_prompt)
+        logger.info(f"[doc-gen] Step 1 raw output: {raw[:300]}")
+        analysis = _parse_analysis_json(raw)
+        analysis["_user_prompt"] = user_prompt   # used by Step 2 for cache lookup
+        analysis["_seed"]        = seed
+        # Store partial cache entry — Step 2 will add "context" to it
+        _cache_set(seed, {"analysis": analysis, "_seed": seed})
 
     if not analysis.get("is_document_request", True):
         raise HTTPException(
@@ -372,16 +425,24 @@ def _static_template_context(analysis: dict) -> dict:
 
 
 async def _build_template_context(analysis: dict) -> dict:
-    """Step 2 — LLM call to build a tailored document blueprint.
+    """Step 2 — fast LLM call to build a tailored document blueprint.
+    Uses the fast model (JSON output only).
+    Caches result alongside Step 1 — same query skips both LLM calls.
     Falls back to the static Python template on parse failure.
     """
+    seed   = _prompt_seed(QUERY_ANALYSIS_PROMPT.template, analysis.get("_user_prompt", ""))
+    cached = _cache_get(seed)
+    if cached and "context" in cached:
+        logger.info("[doc-gen] Step 2: cache hit — skipping LLM call")
+        return cached["context"]
+
     doc_type  = analysis.get("doc_type", "other")
     doc_label = analysis.get("doc_label", "Document")
 
     # Build extracted_fields string to pass into the prompt
-    section_template  = SECTION_TEMPLATES.get(doc_type, SECTION_TEMPLATES["other"])
-    base_context      = build_generation_context(analysis, section_template)
-    extracted_fields  = base_context["extracted_fields"]
+    section_template = SECTION_TEMPLATES.get(doc_type, SECTION_TEMPLATES["other"])
+    base_context     = build_generation_context(analysis, section_template)
+    extracted_fields = base_context["extracted_fields"]
 
     system_prompt = TEMPLATE_BUILD_PROMPT.format(
         doc_type=doc_type,
@@ -389,11 +450,18 @@ async def _build_template_context(analysis: dict) -> dict:
         extracted_fields=extracted_fields,
     )
 
-    logger.info(f"[doc-gen] Step 2: building blueprint for '{doc_label}'...")
-    raw = await _call_llm(system_prompt, f"Build the document blueprint for: {doc_label}")
+    logger.info(f"[doc-gen] Step 2: building blueprint for '{doc_label}' (fast model)...")
+    raw = await _call_llm_fast(system_prompt, f"Build the document blueprint for: {doc_label}")
     logger.info(f"[doc-gen] Step 2 raw output: {raw[:300]}")
 
-    return _parse_blueprint_json(raw, analysis)
+    context = _parse_blueprint_json(raw, analysis)
+
+    # Update cache entry with the blueprint context
+    if cached:
+        cached["context"] = context
+        _cache_set(seed, cached)
+
+    return context
 
 
 async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
@@ -445,7 +513,7 @@ async def _check_regeneration_intent(modification_query: str, existing_html: str
     )
 
     try:
-        raw     = await _call_llm(system_prompt, modification_query)
+        raw     = await _call_llm_fast(system_prompt, modification_query)
         cleaned = raw.strip().replace("```json", "").replace("```", "").strip()
         parsed  = json.loads(cleaned)
         intent  = parsed.get("intent", "modify")
@@ -601,8 +669,10 @@ async def regenerate_document_html(
             ),
         )
 
-    db            = get_storage()
-    existing_html = db.get(request.document_id)
+    # Fetch existing HTML from storage (sync disk read wrapped in thread)
+    existing_html = await asyncio.to_thread(
+        lambda: get_storage().get(request.document_id)
+    )
 
     if not existing_html:
         raise HTTPException(
@@ -610,6 +680,8 @@ async def regenerate_document_html(
             detail=f"No document found with ID '{request.document_id}'. Generate it first."
         )
 
+    # Intent check runs in parallel with nothing else here, but is isolated
+    # so it uses the fast model and doesn't delay the modify path unnecessarily.
     # LLM intent check — branch based on whether user wants to modify or generate new
     intent = await _check_regeneration_intent(request.modification_query, existing_html)
 
