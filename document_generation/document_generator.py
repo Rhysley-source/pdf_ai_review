@@ -233,6 +233,147 @@ async def _call_llm_fast(system_prompt: str, user_message: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# User-facing error helpers
+# ---------------------------------------------------------------------------
+
+_GENERATE_EXAMPLES = [
+    "Generate a service agreement between Acme Corp and Beta Ltd for consulting services worth $10,000",
+    "Create an invoice for web development services — vendor: Sujit Studio, client: ABC Ltd, amount: $2,500",
+    "Draft an NDA between two tech companies for a 2-year period, governed by California law",
+    "Write an employment offer letter for a Senior Python Developer role at $90,000/year starting Jan 2026",
+    "Make a residential lease agreement — landlord: Mr. Sharma, tenant: Rahul Verma, rent: $1,200/month",
+    "Generate a business proposal for a mobile app project worth $50,000 for XYZ Corp",
+    "Create a purchase order for 50 laptops from Dell at $800 each",
+    "Write a recommendation letter for John Doe, Software Engineer at Google",
+]
+
+_MODIFY_EXAMPLES = [
+    "Change the vendor name to Acme Corp",
+    "Update the due date to 30th April 2026",
+    "Add a 10% GST row to the totals table",
+    "Replace the client address with 123 Main Street, New York",
+    "Make the font size larger and the layout more professional",
+    "Add a confidentiality clause at the end",
+    "Change the payment terms from Net 30 to Net 15",
+    "Remove the arbitration clause",
+]
+
+
+def _err_invalid_prompt(user_prompt: str) -> dict:
+    """Returns a structured error for prompts that are too vague, short, or unclear."""
+    return {
+        "error":   "invalid_prompt",
+        "message": "Your prompt is too short or unclear to generate a document.",
+        "what_went_wrong": (
+            f"Received: \"{user_prompt[:120]}{'...' if len(user_prompt) > 120 else ''}\" — "
+            "this does not contain enough information to identify a document type or its key details."
+        ),
+        "how_to_fix": (
+            "Describe the document you want to create. Include: "
+            "(1) the document type, "
+            "(2) the parties or names involved, "
+            "(3) any key values like amounts, dates, or durations."
+        ),
+        "correct_query_examples": _GENERATE_EXAMPLES[:4],
+    }
+
+
+def _err_not_document_request(user_prompt: str) -> dict:
+    """Returns a structured error when the prompt is not a document generation request."""
+    return {
+        "error":   "not_a_document_request",
+        "message": "Your query does not appear to be a document generation request.",
+        "what_went_wrong": (
+            f"Received: \"{user_prompt[:120]}{'...' if len(user_prompt) > 120 else ''}\" — "
+            "this looks like a question, calculation, or general instruction rather than "
+            "a request to create a document."
+        ),
+        "how_to_fix": (
+            "Use action words like 'generate', 'create', 'draft', 'write', or 'make' "
+            "followed by the document type and the relevant details."
+        ),
+        "correct_query_examples": _GENERATE_EXAMPLES,
+        "supported_document_types": [
+            "Invoice", "Service Agreement / Contract", "Employment Offer Letter",
+            "Non-Disclosure Agreement (NDA)", "Lease / Rental Agreement",
+            "Resume / CV", "Business Proposal", "Purchase Order",
+            "Certificate", "Formal Letter / Recommendation Letter", "Report",
+        ],
+    }
+
+
+def _err_model_failed(step: str, user_prompt: str, detail: str) -> dict:
+    """Returns a structured error for transient AI model failures."""
+    return {
+        "error":   f"{step.lower().replace(' ', '_')}_failed",
+        "message": f"The AI model encountered an error during: {step}.",
+        "what_went_wrong": detail,
+        "how_to_fix": (
+            "This is usually a temporary issue. Try the following:\n"
+            "  1. Retry your request — the model may respond correctly on the next attempt.\n"
+            "  2. Simplify your prompt — remove ambiguous or contradictory requirements.\n"
+            "  3. Be more specific — include document type, party names, and key values."
+        ),
+        "correct_query_examples": _GENERATE_EXAMPLES[:3],
+    }
+
+
+def _err_empty_output(user_prompt: str) -> dict:
+    """Returns a structured error when the model returns empty HTML."""
+    return {
+        "error":   "empty_output",
+        "message": "The AI model returned an empty document. No HTML was generated.",
+        "what_went_wrong": (
+            "The model completed its response but produced no usable HTML content. "
+            "This can happen when the prompt is ambiguous or the model misunderstood the request."
+        ),
+        "how_to_fix": (
+            "Add more specific details to your prompt:\n"
+            "  • Name the exact document type (invoice, contract, NDA, lease, etc.)\n"
+            "  • Mention the parties involved (company names, person names)\n"
+            "  • Include key values (amounts, dates, durations, roles)"
+        ),
+        "correct_query_examples": _GENERATE_EXAMPLES[:4],
+    }
+
+
+def _err_invalid_modification(modification_query: str) -> dict:
+    """Returns a structured error for modification prompts that are unclear."""
+    return {
+        "error":   "invalid_modification_query",
+        "message": "Your modification request is too vague or unclear.",
+        "what_went_wrong": (
+            f"Received: \"{modification_query[:120]}{'...' if len(modification_query) > 120 else ''}\" — "
+            "this does not clearly describe what to change in the document."
+        ),
+        "how_to_fix": (
+            "Describe specifically what you want to change. Include:\n"
+            "  • What field or section to update\n"
+            "  • The new value or instruction\n"
+            "  • Where in the document (if relevant)"
+        ),
+        "correct_query_examples": _MODIFY_EXAMPLES,
+    }
+
+
+def _err_document_not_found(document_id: str) -> dict:
+    """Returns a structured error when the requested document ID does not exist."""
+    return {
+        "error":   "document_not_found",
+        "message": f"No document found with ID '{document_id}'.",
+        "what_went_wrong": (
+            "The document ID you provided does not match any saved document. "
+            "It may have been deleted, never generated, or the ID may be incorrect."
+        ),
+        "how_to_fix": (
+            "First generate a document using POST /generate-html with your query. "
+            "The response header 'X-Document-Id' contains the ID to use for modifications."
+        ),
+        "correct_query_examples": _GENERATE_EXAMPLES[:3],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Input validation — reject gibberish / meaningless prompts
 # ---------------------------------------------------------------------------
 
@@ -624,13 +765,7 @@ async def generate_document_html(
       Step 3 (LLM)    — generate final HTML using the enriched context
     """
     if _is_gibberish(request.user_prompt):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Invalid request: your prompt appears to be gibberish or unclear.\n\n"
-                + _FORMAT_HINT
-            ),
-        )
+        raise HTTPException(status_code=422, detail=_err_invalid_prompt(request.user_prompt))
 
     doc_id = request.document_id or str(uuid.uuid4())
 
@@ -644,13 +779,7 @@ async def generate_document_html(
             logger.exception("[doc-gen] Step 1 failed")
             raise HTTPException(
                 status_code=502,
-                detail={
-                    "error": "step1_failed",
-                    "step": "Query Analysis",
-                    "message": "Failed to analyse your request. The AI model did not respond correctly.",
-                    "hint": "Try rephrasing your prompt.",
-                    "detail": str(e),
-                },
+                detail=_err_model_failed("Query Analysis", request.user_prompt, str(e)),
             )
 
         analysis_info = _analysis_summary(analysis)
@@ -665,11 +794,7 @@ async def generate_document_html(
             raise HTTPException(
                 status_code=502,
                 detail={
-                    "error": "step2_failed",
-                    "step": "Blueprint Building",
-                    "message": "Failed to build the document blueprint. Falling back was not possible.",
-                    "hint": "Try again — this is usually a transient model error.",
-                    "detail": str(e),
+                    **_err_model_failed("Blueprint Building", request.user_prompt, str(e)),
                     **analysis_info,
                 },
             )
@@ -682,11 +807,7 @@ async def generate_document_html(
             raise HTTPException(
                 status_code=502,
                 detail={
-                    "error": "step3_failed",
-                    "step": "HTML Generation",
-                    "message": "The AI model failed to generate the document HTML.",
-                    "hint": "Try again or simplify your prompt.",
-                    "detail": str(e),
+                    **_err_model_failed("HTML Generation", request.user_prompt, str(e)),
                     **analysis_info,
                 },
             )
@@ -696,14 +817,7 @@ async def generate_document_html(
         if not cleaned_html.strip():
             raise HTTPException(
                 status_code=500,
-                detail={
-                    "error": "empty_output",
-                    "step": "HTML Generation",
-                    "message": "The AI model returned an empty document.",
-                    "hint": "Try again or add more detail to your prompt.",
-                    "raw_preview": raw_html[:300],
-                    **analysis_info,
-                },
+                detail={**_err_empty_output(request.user_prompt), **analysis_info},
             )
 
         try:
@@ -713,11 +827,10 @@ async def generate_document_html(
             raise HTTPException(
                 status_code=500,
                 detail={
-                    "error": "storage_failed",
-                    "step": "Save Document",
-                    "message": "Document was generated but could not be saved to storage.",
-                    "detail": str(e),
-                    **analysis_info,
+                    "error":   "storage_failed",
+                    "message": "Your document was generated but could not be saved.",
+                    "what_went_wrong": str(e),
+                    "how_to_fix": "Please try again. If the problem persists, contact support.",
                 },
             )
 
@@ -730,9 +843,15 @@ async def generate_document_html(
         raise HTTPException(
             status_code=500,
             detail={
-                "error": "unexpected_error",
-                "message": "An unexpected error occurred during document generation.",
-                "detail": str(e),
+                "error":   "unexpected_error",
+                "message": "An unexpected error occurred. Please try again.",
+                "what_went_wrong": str(e),
+                "how_to_fix": (
+                    "Try rephrasing your prompt with more specific details. "
+                    "Example: \"Generate a service agreement between Acme Corp and Beta Ltd "
+                    "for software consulting services worth $5,000, governed by New York law.\""
+                ),
+                "correct_query_examples": _GENERATE_EXAMPLES[:3],
             },
         )
 
@@ -749,14 +868,7 @@ async def regenerate_document_html(
     if _is_gibberish(request.modification_query):
         raise HTTPException(
             status_code=422,
-            detail=(
-                "Invalid request: your modification query appears to be gibberish or unclear.\n\n"
-                "Please describe what you want to change. Examples:\n"
-                "  • \"Change the vendor name to Acme Corp\"\n"
-                "  • \"Update the due date to 30th April 2025\"\n"
-                "  • \"Add a 10% GST row to the totals table\"\n"
-                "  • \"Replace the client address with 123 Main Street, New York\""
-            ),
+            detail=_err_invalid_modification(request.modification_query),
         )
 
     # Fetch existing HTML — per-doc file read, wrapped in thread
@@ -765,7 +877,7 @@ async def regenerate_document_html(
     if not existing_html:
         raise HTTPException(
             status_code=404,
-            detail=f"No document found with ID '{request.document_id}'. Generate it first."
+            detail=_err_document_not_found(request.document_id),
         )
 
     # Intent check runs in parallel with nothing else here, but is isolated
@@ -783,11 +895,10 @@ async def regenerate_document_html(
             raise
         except Exception as e:
             logger.exception("[doc-gen] Step 1 failed during regeneration→generate")
-            raise HTTPException(status_code=502, detail={
-                "error": "step1_failed", "step": "Query Analysis",
-                "message": "Failed to analyse your request.",
-                "hint": "Try rephrasing your prompt.", "detail": str(e),
-            })
+            raise HTTPException(
+                status_code=502,
+                detail=_err_model_failed("Query Analysis", request.modification_query, str(e)),
+            )
 
         analysis_info = _analysis_summary(analysis)
 
@@ -797,34 +908,33 @@ async def regenerate_document_html(
             raise
         except Exception as e:
             logger.exception("[doc-gen] Step 2 failed during regeneration→generate")
-            raise HTTPException(status_code=502, detail={
-                "error": "step2_failed", "step": "Blueprint Building",
-                "message": "Failed to build the document blueprint.",
-                "hint": "Try again.", "detail": str(e),
-                **analysis_info,
-            })
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    **_err_model_failed("Blueprint Building", request.modification_query, str(e)),
+                    **analysis_info,
+                },
+            )
 
         try:
             raw_html = await _generate_html_from_context(context, request.modification_query)
         except Exception as e:
             logger.exception("[doc-gen] Step 3 failed during regeneration→generate")
-            raise HTTPException(status_code=502, detail={
-                "error": "step3_failed", "step": "HTML Generation",
-                "message": "The AI model failed to generate the document HTML.",
-                "hint": "Try again or simplify your prompt.", "detail": str(e),
-                **analysis_info,
-            })
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    **_err_model_failed("HTML Generation", request.modification_query, str(e)),
+                    **analysis_info,
+                },
+            )
 
         cleaned_html = _clean_html(raw_html)
 
         if not cleaned_html.strip():
-            raise HTTPException(status_code=500, detail={
-                "error": "empty_output", "step": "HTML Generation",
-                "message": "The AI model returned an empty document.",
-                "hint": "Try again or add more detail to your prompt.",
-                "raw_preview": raw_html[:300],
-                **analysis_info,
-            })
+            raise HTTPException(
+                status_code=500,
+                detail={**_err_empty_output(request.modification_query), **analysis_info},
+            )
 
         doc_id = request.document_id or str(uuid.uuid4())
         await asyncio.to_thread(_save_document, doc_id, cleaned_html)
@@ -842,13 +952,7 @@ async def regenerate_document_html(
         logger.exception("[doc-gen] Regeneration LLM call failed")
         raise HTTPException(
             status_code=502,
-            detail={
-                "error": "llm_failed",
-                "step": "Apply Modification",
-                "message": "The AI model failed to apply your modification.",
-                "hint": "Try again or rephrase what you want to change.",
-                "detail": str(e),
-            },
+            detail=_err_model_failed("Apply Modification", request.modification_query, str(e)),
         )
 
     cleaned_html = _clean_html(raw_html)
@@ -857,11 +961,8 @@ async def regenerate_document_html(
         raise HTTPException(
             status_code=500,
             detail={
-                "error": "empty_output",
-                "step": "Apply Modification",
-                "message": "The AI model returned an empty document after modification.",
-                "hint": "Try again — the original document is still saved.",
-                "raw_preview": raw_html[:300],
+                **_err_empty_output(request.modification_query),
+                "note": "The original document is still saved — your previous version is safe.",
             },
         )
 
@@ -872,10 +973,10 @@ async def regenerate_document_html(
         raise HTTPException(
             status_code=500,
             detail={
-                "error": "storage_failed",
-                "step": "Save Modified Document",
-                "message": "Modification was applied but could not be saved to storage.",
-                "detail": str(e),
+                "error":   "storage_failed",
+                "message": "Modification was applied but could not be saved.",
+                "what_went_wrong": str(e),
+                "how_to_fix": "Please try again. If the problem persists, contact support.",
             },
         )
 
