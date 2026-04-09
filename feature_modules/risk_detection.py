@@ -331,7 +331,7 @@ No explanation, no markdown — only the JSON array."""
 
     async def _check_chunk(chunk: str) -> set[str]:
         try:
-            raw     = await run_llm(chunk, system_prompt)
+            raw     = await run_llm(chunk, system_prompt, max_output_tokens=16384)
             # extract_json_raw only handles dicts — parse the array directly
             cleaned = raw.replace("```json", "").replace("```", "").strip()
             parsed  = None
@@ -404,7 +404,7 @@ Rules:
 - No explanation, no markdown, no extra keys — ONLY the JSON array"""
 
     logger.info(f"[risk_detection] Placeholder scan — {chunk_label}")
-    raw = await run_llm(chunk, system_prompt)
+    raw = await run_llm(chunk, system_prompt, max_output_tokens=16384)
 
     # extract_json_raw only handles dicts — parse the array directly
     cleaned = raw.replace("```json", "").replace("```", "").strip()
@@ -612,7 +612,7 @@ Rules:
 - If no fields missing, return missing_fields as []"""
 
     logger.info(f"[risk_detection] Dynamic analysis — {chunk_label}")
-    raw    = await run_llm(chunk, system_prompt)
+    raw    = await run_llm(chunk, system_prompt, max_output_tokens=16384)
     result = extract_json_from_text(raw)
 
     if not result or (not result.get("detected_risks") and not result.get("overall_assessment")):
@@ -629,7 +629,7 @@ Fill in this exact structure:
   "missing_fields": [],
   "overall_assessment": ""
 }}"""
-        raw    = await run_llm(chunk, retry_system)
+        raw    = await run_llm(chunk, retry_system, max_output_tokens=16384)
         result = extract_json_from_text(raw)
 
     if not result:
@@ -731,7 +731,7 @@ Rules:
 - If no fields missing, return missing_fields as []"""
 
     logger.info(f"[risk_detection] Fixed profile ({doc_type}) — {chunk_label}")
-    raw    = await run_llm(chunk, system_prompt)
+    raw    = await run_llm(chunk, system_prompt, max_output_tokens=16384)
     result = extract_json_from_text(raw)
 
     if not result or (not result.get("detected_risks") and not result.get("overall_assessment")):
@@ -749,7 +749,7 @@ Fill in this exact structure:
   "missing_fields": [],
   "overall_assessment": ""
 }}"""
-        raw    = await run_llm(chunk, retry_system)
+        raw    = await run_llm(chunk, retry_system, max_output_tokens=16384)
         result = extract_json_from_text(raw)
 
     if not result:
