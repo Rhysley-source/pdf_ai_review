@@ -901,7 +901,7 @@ async def analyze_document_risks(text: str) -> dict:
         analysis["detected_risks"] = analysis.get("detected_risks", []) + missing_as_risks
 
     detected_count = len(analysis.get("detected_risks", []))
-    missing_count  = len(analysis.get("missing_fields", []))
+    analysis.pop("missing_fields", None)
 
     return {
         "status":        "success",
@@ -909,8 +909,7 @@ async def analyze_document_risks(text: str) -> dict:
         "document_type": doc_label,
         "risk_count": {
             "detected_risks": detected_count,
-            "missing_fields": missing_count,
-            "total":          detected_count + missing_count,
+            "total":          detected_count,
         },
         "data": analysis,
     }
