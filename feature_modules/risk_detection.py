@@ -288,6 +288,155 @@ def _merge_missing_fields(lists: list[list]) -> list[dict]:
     return list(seen.values())
 
 
+async def _verify_missing_fields(
+    chunks: list[str],
+    candidate_fields: list[dict],
+    doc_label: str,
+) -> list[dict]:
+    """
+    Per-chunk analysis flags fields as missing based on only a slice of the
+    document.  A field reported missing in chunk 1 may actually appear in
+    chunk 3 — leading to false positives in the final output.
+
+    This function confirms which candidate missing fields are truly absent by
+    scanning every chunk.  A field is kept in the missing list only if it is
+    NOT found in ANY chunk.
+    """
+    if not candidate_fields:
+        return []
+
+    field_names = [f["field_name"] for f in candidate_fields]
+    fields_list = "\n".join(f"- {name}" for name in field_names)
+
+    system_prompt = f"""You are reviewing a section of a "{doc_label}" document.
+
+The following fields may be absent from the full document.
+Scan the text below and identify which of these fields ARE present — even if partial, implied, or expressed differently.
+
+Fields to check:
+{fields_list}
+
+Return ONLY a JSON array of the field names that you CAN find in this section (use the exact names from the list above):
+["Field Name 1", "Field Name 2"]
+
+If none are found, return: []
+Do not include fields that are missing — only those that ARE present."""
+
+    async def _check_chunk(chunk: str) -> set[str]:
+        try:
+            raw = await run_llm(chunk, system_prompt)
+            found = extract_json_from_text(raw)
+            if isinstance(found, list):
+                return {str(item).strip() for item in found if isinstance(item, str)}
+        except Exception:
+            pass
+        return set()
+
+    chunk_results = await asyncio.gather(*[_check_chunk(c) for c in chunks])
+
+    # Normalize found set for fuzzy matching
+    found_keys: set[str] = set()
+    for result in chunk_results:
+        for name in result:
+            found_keys.add(re.sub(r"[^a-z0-9]", "", name.lower()))
+
+    confirmed_missing = [
+        f for f in candidate_fields
+        if re.sub(r"[^a-z0-9]", "", f["field_name"].lower()) not in found_keys
+    ]
+
+    logger.info(
+        f"[risk_detection] Missing field verification: "
+        f"{len(candidate_fields)} candidates → {len(confirmed_missing)} confirmed absent"
+    )
+    return confirmed_missing
+
+
+# ---------------------------------------------------------------------------
+# Placeholder detection — regex scan on full document text
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER_PATTERNS = [
+    # [INSERT DATE], [PARTY NAME], [YOUR COMPANY], [TBD], [TO BE FILLED], etc.
+    re.compile(
+        r'\[(?:INSERT|ENTER|YOUR|PARTY|TO BE|TBD|FILL|NAME|DATE|ADDRESS|AMOUNT|'
+        r'NUMBER|TITLE|COMPANY|SIGNATURE|VENDOR|CLIENT|EMPLOYEE|EMPLOYER|LANDLORD|'
+        r'TENANT|LESSEE|LESSOR)[^\]]{0,80}\]',
+        re.IGNORECASE,
+    ),
+    # [___] or [   ] — bracket with blanks
+    re.compile(r'\[\s*_+\s*\]'),
+    # Five or more underscores used as fill-in blanks
+    re.compile(r'_{5,}'),
+    # <INSERT DATE>, <PARTY NAME>, <YOUR NAME>
+    re.compile(
+        r'<(?:INSERT|ENTER|YOUR|DATE|NAME|PARTY|FILL|AMOUNT|COMPANY)[^>]{0,60}>',
+        re.IGNORECASE,
+    ),
+    # {INSERT ...}, {placeholder}
+    re.compile(
+        r'\{(?:INSERT|ENTER|YOUR|DATE|NAME|PARTY|FILL|AMOUNT|COMPANY)[^}]{0,60}\}',
+        re.IGNORECASE,
+    ),
+    # __VARIABLE__ style template tokens
+    re.compile(r'__[A-Za-z][A-Za-z_]{2,}__'),
+    # Standalone TBD / TBA as a value (not inside a word)
+    re.compile(r'(?<![A-Za-z])(?:TBD|TBA)(?![A-Za-z])'),
+]
+
+
+def _detect_placeholders(text: str) -> list[dict]:
+    """
+    Scans the full document text for unfilled placeholders using regex.
+    Returns a list of detected_risks-format items (one entry per unique
+    placeholder found).  Called on the complete text before normalization
+    so no clause is missed due to chunking.
+
+    Severity is always High — an agreement with unfilled fields is legally
+    incomplete and potentially unenforceable.
+    """
+    # Collect unique placeholder strings (deduplicated by normalised key)
+    seen_keys: set[str]   = set()
+    unique_placeholders:  list[str] = []
+
+    for pattern in _PLACEHOLDER_PATTERNS:
+        for match in pattern.finditer(text):
+            raw = match.group(0).strip()
+            key = re.sub(r"[^a-z0-9]", "", raw.lower())
+            if key and key not in seen_keys:
+                seen_keys.add(key)
+                unique_placeholders.append(raw)
+
+    if not unique_placeholders:
+        return []
+
+    count        = len(unique_placeholders)
+    display_list = ", ".join(f'"{p}"' for p in unique_placeholders[:10])
+    if count > 10:
+        display_list += f" … and {count - 10} more"
+
+    logger.info(f"[risk_detection] Placeholder scan: {count} unique placeholder(s) found")
+
+    return [{
+        "risk_name":       "Unfilled Placeholders Detected",
+        "severity":        "High",
+        "severity_reason": (
+            f"{count} unfilled placeholder(s) found in the document, indicating it "
+            "is incomplete and has not been fully executed."
+        ),
+        "clause_found":    display_list,
+        "impact": (
+            "An agreement containing blank or placeholder fields is legally incomplete. "
+            "Undefined terms create ambiguity that can be exploited or render the "
+            "contract void / unenforceable."
+        ),
+        "mitigation": (
+            "Replace every placeholder with the correct value, have all parties "
+            "review the completed document, and re-execute with fresh signatures."
+        ),
+    }]
+
+
 # ---------------------------------------------------------------------------
 # Step 1 — Detect document type
 # Improvement #1: classification window 1500 → 4000 chars
@@ -405,8 +554,9 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
 
 Rules:
 - Risks must be SPECIFIC to "{doc_label}" — not generic boilerplate
-- Only include risks actually present in the document
-- Only include fields actually missing
+- ONLY flag a risk if you can cite specific language from this text that supports it
+- Do NOT flag a risk because protective language is absent — that belongs in missing_fields
+- Only include fields that are genuinely absent from THIS section
 - Justify every severity rating in severity_reason
 - If no risks found, return detected_risks as []
 - If no fields missing, return missing_fields as []"""
@@ -449,6 +599,7 @@ async def _analyze_risks_dynamic(text: str, doc_label: str) -> dict:
     Dynamic risk analysis for unknown document types.
     Improvement #3: splits long documents into chunks, analyses each in parallel,
     then merges and deduplicates results.
+    Missing fields are verified across all chunks before being confirmed absent.
     """
     chunks = _chunk_text(text)
 
@@ -464,11 +615,14 @@ async def _analyze_risks_dynamic(text: str, doc_label: str) -> dict:
         default="",
     )
 
+    candidate_missing = _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results])
+    confirmed_missing = await _verify_missing_fields(chunks, candidate_missing, doc_label)
+
     return {
         "document_type":      "other",
         "document_label":     doc_label,
         "detected_risks":     _merge_risks([r.get("detected_risks", []) for r in chunk_results]),
-        "missing_fields":     _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results]),
+        "missing_fields":     confirmed_missing,
         "overall_assessment": overall,
     }
 
@@ -519,8 +673,9 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
 }}
 
 Rules:
-- Only include risks that are actually present in the document
-- Only include fields that are actually missing
+- ONLY include a risk if you can point to specific language in the document that triggers it
+- Do NOT flag a risk based on the absence of protective language — that is a missing field, not a risk
+- Only include fields that are actually missing from THIS section of the document
 - Justify every severity rating in severity_reason
 - If no risks found, return detected_risks as []
 - If no fields missing, return missing_fields as []"""
@@ -563,6 +718,7 @@ async def _analyze_risks_for_type(text: str, doc_type: str, doc_label: str) -> d
     """
     Fixed-profile risk analysis for known document types.
     Improvement #3: chunked parallel analysis across full document.
+    Missing fields are verified across all chunks before being confirmed absent.
     """
     profile    = _RISK_PROFILES[doc_type]
     risks_list = "\n".join(f"    - {r}" for r in profile["risks"])
@@ -581,11 +737,14 @@ async def _analyze_risks_for_type(text: str, doc_type: str, doc_label: str) -> d
         default="",
     )
 
+    candidate_missing = _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results])
+    confirmed_missing = await _verify_missing_fields(chunks, candidate_missing, doc_label)
+
     return {
         "document_type":      doc_type,
         "document_label":     doc_label,
         "detected_risks":     _merge_risks([r.get("detected_risks", []) for r in chunk_results]),
-        "missing_fields":     _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results]),
+        "missing_fields":     confirmed_missing,
         "overall_assessment": overall,
     }
 
@@ -643,6 +802,10 @@ async def analyze_document_risks(text: str) -> dict:
       - Known type  → _analyze_risks_hybrid  (fixed profile + dynamic in parallel)
       - Other type  → _analyze_risks_dynamic (fully dynamic, chunked)
 
+    Step 3 — placeholder scan: regex over full text, injected before normalization.
+      Any unfilled placeholder ([INSERT DATE], _____, <PARTY NAME>, etc.)
+      becomes a High-severity detected_risk entry.
+
     Both paths chunk the full document so no clause is ever missed due to truncation.
     All detected_risks include severity_reason for transparent, consistent ratings.
     Results are normalized to a guaranteed fixed structure before returning.
@@ -656,6 +819,13 @@ async def analyze_document_risks(text: str) -> dict:
         analysis = await _analyze_risks_hybrid(text, doc_type, doc_label)
     else:
         analysis = await _analyze_risks_dynamic(text, doc_label)
+
+    # Inject placeholder risks from full-document regex scan.
+    # Runs before normalization so the items pass through _normalize_result.
+    # Prepended so High-severity placeholder issues appear first.
+    placeholder_risks = _detect_placeholders(text)
+    if placeholder_risks:
+        analysis["detected_risks"] = placeholder_risks + analysis.get("detected_risks", [])
 
     analysis = _normalize_result(analysis)
 
