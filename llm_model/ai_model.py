@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import time
 import logging
@@ -164,6 +165,16 @@ def _merge_highlights(results: list[dict]) -> list[str]:
 # _build_api_kwargs — shared helper to build model-aware API kwargs
 # ---------------------------------------------------------------------------
 
+def _messages_seed(messages: list[dict]) -> int:
+    """
+    Derives a stable integer seed from the full message content.
+    Same document + same prompt → same seed → deterministic LLM output.
+    """
+    content = "".join(m.get("content", "") for m in messages)
+    digest  = hashlib.sha256(content.encode()).hexdigest()
+    return int(digest[:8], 16)
+
+
 def _build_api_kwargs(
     messages:   list[dict],
     use_json:   bool = False,
@@ -191,8 +202,8 @@ def _build_api_kwargs(
     if model not in _FIXED_TEMPERATURE_MODELS:
         kwargs["temperature"] = 0.0
 
-    # seed: makes output deterministic across repeated calls with the same input
-    kwargs["seed"] = 42
+    # seed derived from message content — same input always produces same output
+    kwargs["seed"] = _messages_seed(messages)
 
     # token limit parameter name differs by model
     if model in _MAX_COMPLETION_TOKENS_MODELS:

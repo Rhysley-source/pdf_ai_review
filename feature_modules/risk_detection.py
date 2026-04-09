@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import re
 from llm_model.ai_model import run_llm
 from utils.json_utils import extract_json_raw as extract_json_from_text
 
@@ -6,10 +8,6 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Document-type risk profiles
-# Each entry defines:
-#   risks        — specific risk categories to look for
-#   required_fields — data that MUST be present in the document; missing ones
-#                     are flagged as a risk themselves
 # ---------------------------------------------------------------------------
 
 _RISK_PROFILES = {
@@ -138,10 +136,153 @@ _RISK_PROFILES = {
 
 
 # ---------------------------------------------------------------------------
+# Chunking — improvement #3
+# Splits long documents into overlapping windows so no clause is missed.
+# ---------------------------------------------------------------------------
+
+_CHUNK_SIZE    = 10_000   # chars per chunk
+_CHUNK_OVERLAP = 500      # overlap between consecutive chunks
+
+
+def _chunk_text(text: str) -> list[str]:
+    """
+    Splits text into overlapping chunks of _CHUNK_SIZE chars.
+    Returns a single-element list when the text fits in one chunk.
+    """
+    if len(text) <= _CHUNK_SIZE:
+        return [text]
+    chunks = []
+    start  = 0
+    while start < len(text):
+        end = min(start + _CHUNK_SIZE, len(text))
+        chunks.append(text[start:end])
+        if end == len(text):
+            break
+        start += _CHUNK_SIZE - _CHUNK_OVERLAP
+    logger.info(f"[risk_detection] Document split into {len(chunks)} chunk(s)")
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# Response normalizer
+# Enforces exact, fixed field names on the LLM output regardless of any
+# variation the model introduces.
+# ---------------------------------------------------------------------------
+
+def _normalize_result(result: dict) -> dict:
+    """
+    Guarantees that every detected_risk and missing_field item always has
+    exactly these keys:
+
+    detected_risks items:
+        risk_name       (str)
+        severity        (str) — "High" | "Medium" | "Low"
+        severity_reason (str) — why this severity was assigned
+        clause_found    (str)
+        impact          (str)
+        mitigation      (str)
+
+    missing_fields items:
+        field_name  (str)
+        importance  (str) — "Critical" | "Important" | "Optional"
+        reason      (str)
+    """
+    _VALID_SEVERITY   = {"High", "Medium", "Low"}
+    _VALID_IMPORTANCE = {"Critical", "Important", "Optional"}
+
+    normalized_risks: list[dict] = []
+    for item in result.get("detected_risks") or []:
+        if not isinstance(item, dict):
+            continue
+        severity = item.get("severity") or item.get("risk_level") or item.get("level") or "Medium"
+        if severity not in _VALID_SEVERITY:
+            severity = "Medium"
+        normalized_risks.append({
+            "risk_name":       str(item.get("risk_name")       or item.get("name")           or item.get("risk")            or "Unknown Risk"),
+            "severity":        severity,
+            "severity_reason": str(item.get("severity_reason") or item.get("severity_justification") or item.get("reason_for_severity") or ""),
+            "clause_found":    str(item.get("clause_found")    or item.get("clause")          or item.get("quote")           or "Not found"),
+            "impact":          str(item.get("impact")          or item.get("danger")          or item.get("effect")          or ""),
+            "mitigation":      str(item.get("mitigation")      or item.get("fix")             or item.get("recommendation")  or ""),
+        })
+
+    normalized_fields: list[dict] = []
+    for item in result.get("missing_fields") or []:
+        if not isinstance(item, dict):
+            continue
+        importance = item.get("importance") or item.get("priority") or item.get("criticality") or "Important"
+        if importance not in _VALID_IMPORTANCE:
+            importance = "Important"
+        normalized_fields.append({
+            "field_name": str(item.get("field_name") or item.get("field") or item.get("name")   or "Unknown Field"),
+            "importance": importance,
+            "reason":     str(item.get("reason")     or item.get("why")   or item.get("detail") or ""),
+        })
+
+    return {
+        "document_type":      str(result.get("document_type")      or "other"),
+        "document_label":     str(result.get("document_label")     or ""),
+        "detected_risks":     normalized_risks,
+        "missing_fields":     normalized_fields,
+        "overall_assessment": str(result.get("overall_assessment") or ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Deduplication helpers — improvement #2 + #3
+# ---------------------------------------------------------------------------
+
+def _risk_key(risk_name: str) -> str:
+    """Normalised key for deduplication — lowercase, alphanumeric only."""
+    return re.sub(r"[^a-z0-9]", "", risk_name.lower())
+
+
+_SEVERITY_RANK = {"High": 3, "Medium": 2, "Low": 1}
+
+
+def _merge_risks(lists: list[list[dict]]) -> list[dict]:
+    """
+    Merges multiple detected_risks lists.
+    Deduplicates by normalised risk_name.
+    When the same risk appears in multiple sources, keeps the highest severity.
+    """
+    seen:   dict[str, dict] = {}
+    for risk_list in lists:
+        for risk in risk_list:
+            key = _risk_key(risk.get("risk_name", ""))
+            if not key:
+                continue
+            if key not in seen:
+                seen[key] = risk
+            else:
+                # Keep highest severity entry
+                existing_rank = _SEVERITY_RANK.get(seen[key].get("severity", "Medium"), 2)
+                incoming_rank = _SEVERITY_RANK.get(risk.get("severity", "Medium"), 2)
+                if incoming_rank > existing_rank:
+                    seen[key] = risk
+                # Enrich clause_found if the existing one is "Not found"
+                if seen[key].get("clause_found", "Not found") == "Not found" and \
+                   risk.get("clause_found", "Not found") != "Not found":
+                    seen[key]["clause_found"] = risk["clause_found"]
+    return list(seen.values())
+
+
+def _merge_missing_fields(lists: list[list[dict]]) -> list[dict]:
+    """
+    Merges multiple missing_fields lists, deduplicating by field_name.
+    """
+    seen: dict[str, dict] = {}
+    for field_list in lists:
+        for field in field_list:
+            key = re.sub(r"[^a-z0-9]", "", field.get("field_name", "").lower())
+            if key and key not in seen:
+                seen[key] = field
+    return list(seen.values())
+
+
+# ---------------------------------------------------------------------------
 # Step 1 — Detect document type
-# Returns (slug, human_label)
-#   slug       — one of the 7 known profile keys, used to select risk profile
-#   human_label — specific document name the LLM identified (e.g. "Partnership Deed")
+# Improvement #1: classification window 1500 → 4000 chars
 # ---------------------------------------------------------------------------
 
 async def _detect_document_type(text: str) -> tuple[str, str]:
@@ -177,17 +318,14 @@ Label rules:
 Return ONLY this JSON object — no explanation, no markdown:
 {{"slug": "<one of 7 slugs>", "label": "<specific document name>"}}
 
-Document (first 1500 chars):
-\"\"\"{text[:1500]}\"\"\""""
+Document (first 4000 chars):
+\"\"\"{text[:4000]}\"\"\""""
 
-    raw = await run_llm("", prompt)
-
-    # Try to parse JSON response
+    raw    = await run_llm("", prompt)
     parsed = extract_json_from_text(raw)
-    slug  = (parsed.get("slug")  or "").lower().strip()
-    label = (parsed.get("label") or "").strip()
+    slug   = (parsed.get("slug")  or "").lower().strip()
+    label  = (parsed.get("label") or "").strip()
 
-    # Validate slug — fall back to word-match then "other"
     if slug not in _RISK_PROFILES:
         for known in _RISK_PROFILES:
             if known in raw.lower():
@@ -196,7 +334,6 @@ Document (first 1500 chars):
         else:
             slug = "other"
 
-    # If LLM did not give a specific label, derive a readable fallback
     if not label or label.lower() in ("other document", "unknown document", "unknown", "other"):
         _SLUG_LABELS = {
             "contract":   "Contract / Legal Agreement",
@@ -213,27 +350,21 @@ Document (first 1500 chars):
 
 
 # ---------------------------------------------------------------------------
-# Step 2a — Dynamic risk analysis for unknown document types (slug == "other")
-#
-# Instead of a fixed checklist, the LLM:
-#   1. Identifies what risk categories are relevant to THIS specific document type
-#   2. Scans the document against those categories in the same pass
-#   3. Identifies required fields that should be present but are missing
-#
-# This means ANY document — Power of Attorney, Insurance Policy, Loan Agreement,
-# Will, Affidavit, Medical Report, etc. — gets a fully relevant risk analysis.
+# Step 2a — Dynamic risk analysis (slug == "other" OR hybrid second pass)
+# Improvement #3: chunked analysis
+# Improvement #4: severity justification in prompt
 # ---------------------------------------------------------------------------
 
-async def _analyze_risks_dynamic(text: str, doc_label: str) -> dict:
+async def _analyze_chunk_dynamic(chunk: str, doc_label: str, chunk_label: str) -> dict:
+    """Runs dynamic risk analysis on a single text chunk."""
     prompt = f"""You are a senior legal and financial risk analyst.
 
 A document identified as "{doc_label}" has been uploaded for risk analysis.
 
-YOUR TASK — perform a complete risk analysis in a single pass:
+YOUR TASK — perform a complete risk analysis:
 
 PART 1 — RISK DETECTION:
-Based on your expert knowledge of "{doc_label}" documents, identify and flag any risks
-present in this document. Think about:
+Identify and flag any risks present in this document excerpt. Think about:
 - Clauses that are dangerous or unfair to one party
 - Unusual or non-standard language
 - Excessive liability, penalties, or obligations
@@ -241,8 +372,7 @@ present in this document. Think about:
 - Ambiguous language that could be exploited
 
 PART 2 — MISSING REQUIRED FIELDS:
-Identify fields or sections that are typically required in a "{doc_label}" but are
-missing or unclear in this document.
+Identify fields or sections typically required in a "{doc_label}" that are missing or unclear.
 
 OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
 {{
@@ -250,8 +380,9 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
   "document_label": "{doc_label}",
   "detected_risks": [
     {{
-      "risk_name": "<specific risk name relevant to {doc_label}>",
+      "risk_name": "<specific risk name>",
       "severity": "High | Medium | Low",
+      "severity_reason": "<one sentence explaining why this severity level was assigned>",
       "clause_found": "<exact quote or short description from the document, or 'Not found'>",
       "impact": "<why this is dangerous or problematic>",
       "mitigation": "<how to fix, negotiate, or protect against this>"
@@ -259,9 +390,9 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
   ],
   "missing_fields": [
     {{
-      "field_name": "<field or section missing from this {doc_label}>",
+      "field_name": "<field or section missing>",
       "importance": "Critical | Important | Optional",
-      "reason": "<why this field is needed in a {doc_label}>"
+      "reason": "<why this field is needed>"
     }}
   ],
   "overall_assessment": "<2-3 sentence executive summary of the overall risk profile>"
@@ -269,30 +400,26 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
 
 Rules:
 - Risks must be SPECIFIC to "{doc_label}" — not generic boilerplate
-- Only include risks actually present in the document
+- Only include risks actually present in this excerpt
 - Only include fields actually missing
+- Justify every severity rating in severity_reason
 - If no risks found, return detected_risks as []
 - If no fields missing, return missing_fields as []
 
-Document:
+Document excerpt:
 ---
-{text[:12000]}
+{chunk}
 ---"""
 
-    logger.info(f"[risk_detection] Running dynamic risk analysis for '{doc_label}'...")
+    logger.info(f"[risk_detection] Dynamic analysis — {chunk_label}")
+    raw    = await run_llm("", prompt)
+    result = extract_json_from_text(raw)
 
-    raw_output = await run_llm("", prompt)
-    logger.info(f"[risk_detection] Dynamic raw output length: {len(raw_output)} chars")
-
-    result = extract_json_from_text(raw_output)
-
-    # Retry with shorter document if parse failed
     if not result or (not result.get("detected_risks") and not result.get("overall_assessment")):
-        logger.warning("[risk_detection] Dynamic: empty parse — retrying")
+        logger.warning(f"[risk_detection] Dynamic {chunk_label}: empty parse — retrying")
         retry_prompt = f"""Return ONLY a raw JSON object. No markdown, no backticks.
 
-Analyse the following "{doc_label}" document for risks and missing fields.
-Return this exact structure filled in:
+Analyse the following "{doc_label}" document excerpt for risks and missing fields.
 
 {{
   "document_type": "other",
@@ -302,45 +429,73 @@ Return this exact structure filled in:
   "overall_assessment": ""
 }}
 
-Document:
+Document excerpt:
 ---
-{text[:8000]}
+{chunk[:8000]}
 ---"""
-        raw_output = await run_llm("", retry_prompt)
-        result = extract_json_from_text(raw_output)
+        raw    = await run_llm("", retry_prompt)
+        result = extract_json_from_text(raw)
 
     if not result:
-        logger.error(f"[risk_detection] Dynamic: both attempts failed for '{doc_label}'")
         result = {
             "document_type": "other",
             "document_label": doc_label,
             "detected_risks": [],
             "missing_fields": [],
-            "overall_assessment": "Risk analysis could not be completed for this document.",
+            "overall_assessment": "",
         }
 
     return result
 
 
+async def _analyze_risks_dynamic(text: str, doc_label: str) -> dict:
+    """
+    Dynamic risk analysis for unknown document types.
+    Improvement #3: splits long documents into chunks, analyses each in parallel,
+    then merges and deduplicates results.
+    """
+    chunks = _chunk_text(text)
+
+    chunk_results = await asyncio.gather(*[
+        _analyze_chunk_dynamic(chunk, doc_label, f"chunk {i+1}/{len(chunks)}")
+        for i, chunk in enumerate(chunks)
+    ])
+
+    # Pick the most informative overall_assessment (longest non-empty)
+    overall = max(
+        (r.get("overall_assessment", "") for r in chunk_results),
+        key=len,
+        default="",
+    )
+
+    return {
+        "document_type":      "other",
+        "document_label":     doc_label,
+        "detected_risks":     _merge_risks([r.get("detected_risks", []) for r in chunk_results]),
+        "missing_fields":     _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results]),
+        "overall_assessment": overall,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Step 2b — Fixed-profile risk analysis for the 6 known document types
+# Improvement #3: chunked analysis
+# Improvement #4: severity justification in prompt
 # ---------------------------------------------------------------------------
 
-async def _analyze_risks_for_type(text: str, doc_type: str, doc_label: str) -> dict:
-    profile = _RISK_PROFILES[doc_type]
-    risks_list = "\n".join(f"    - {r}" for r in profile["risks"])
-    fields_list = "\n".join(f"    - {f}" for f in profile["required_fields"])
-
-    prompt = f"""
-You are a legal and financial risk analyst specializing in {doc_label} documents.
+async def _analyze_chunk_fixed(chunk: str, doc_type: str, doc_label: str,
+                                risks_list: str, fields_list: str,
+                                chunk_label: str) -> dict:
+    """Runs fixed-profile risk analysis on a single text chunk."""
+    prompt = f"""You are a legal and financial risk analyst specializing in {doc_label} documents.
 
 TASK 1 — RISK DETECTION:
-Scan the document for the following risk categories and flag any that are present:
+Scan the document excerpt for the following risk categories and flag any that are present:
 {risks_list}
 
 TASK 2 — MISSING REQUIRED FIELDS:
-Check if the following required fields are present in the document.
-Flag any that are missing or unclear as an additional risk:
+Check if the following required fields are present in the excerpt.
+Flag any that are missing or unclear:
 {fields_list}
 
 OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
@@ -351,6 +506,7 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
     {{
       "risk_name": "<risk category name>",
       "severity": "High | Medium | Low",
+      "severity_reason": "<one sentence explaining why this severity level was assigned>",
       "clause_found": "<exact quote or short description of the clause, or 'Not found'>",
       "impact": "<why this is dangerous to the signer>",
       "mitigation": "<how to negotiate or fix this>"
@@ -367,30 +523,23 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
 }}
 
 Rules:
-- Only include risks that are actually present in the document
+- Only include risks that are actually present in this excerpt
 - Only include fields that are actually missing
+- Justify every severity rating in severity_reason
 - If no risks found, return detected_risks as []
 - If no fields missing, return missing_fields as []
 
-Document Text:
+Document excerpt:
 ---
-{text[:12000]}
----
-"""
+{chunk}
+---"""
 
-    logger.info(f"[risk_detection] Running {doc_type} risk analysis...")
+    logger.info(f"[risk_detection] Fixed profile ({doc_type}) — {chunk_label}")
+    raw    = await run_llm("", prompt)
+    result = extract_json_from_text(raw)
 
-    # Pass empty string as text — document is already embedded in the prompt
-    # to avoid sending the document twice and hitting token limits
-    raw_output = await run_llm("", prompt)
-    logger.info(f"[risk_detection] Raw output length: {len(raw_output)} chars")
-    logger.debug(f"[risk_detection] Raw LLM output: {raw_output[:500]}")
-
-    result = extract_json_from_text(raw_output)
-
-    # Retry once if we got blank/empty data
-    if not result or not result.get("detected_risks") and not result.get("overall_assessment"):
-        logger.warning("[risk_detection] Empty parse on attempt 1 — retrying with stricter prompt")
+    if not result or (not result.get("detected_risks") and not result.get("overall_assessment")):
+        logger.warning(f"[risk_detection] Fixed {chunk_label}: empty parse — retrying")
         retry_prompt = f"""Return ONLY a raw JSON object. No markdown, no backticks, no explanation.
 
 {{
@@ -401,28 +550,98 @@ Document Text:
   "overall_assessment": ""
 }}
 
-Now fill in the above JSON by analysing this document for risks:
+Now fill in the above JSON by analysing this excerpt for these risks:
 {risks_list}
 
-Document:
+Document excerpt:
 ---
-{text[:8000]}
+{chunk[:8000]}
 ---"""
-        raw_output = await run_llm("", retry_prompt)
-        logger.info(f"[risk_detection] Retry raw output length: {len(raw_output)} chars")
-        result = extract_json_from_text(raw_output)
+        raw    = await run_llm("", retry_prompt)
+        result = extract_json_from_text(raw)
 
     if not result:
-        logger.error("[risk_detection] Both attempts returned empty — returning safe default")
         result = {
             "document_type": doc_type,
             "document_label": doc_label,
             "detected_risks": [],
             "missing_fields": [],
-            "overall_assessment": "Risk analysis could not be completed for this document.",
+            "overall_assessment": "",
         }
 
     return result
+
+
+async def _analyze_risks_for_type(text: str, doc_type: str, doc_label: str) -> dict:
+    """
+    Fixed-profile risk analysis for known document types.
+    Improvement #3: chunked parallel analysis across full document.
+    """
+    profile    = _RISK_PROFILES[doc_type]
+    risks_list = "\n".join(f"    - {r}" for r in profile["risks"])
+    fields_list = "\n".join(f"    - {f}" for f in profile["required_fields"])
+    chunks     = _chunk_text(text)
+
+    chunk_results = await asyncio.gather(*[
+        _analyze_chunk_fixed(chunk, doc_type, doc_label, risks_list, fields_list,
+                             f"chunk {i+1}/{len(chunks)}")
+        for i, chunk in enumerate(chunks)
+    ])
+
+    overall = max(
+        (r.get("overall_assessment", "") for r in chunk_results),
+        key=len,
+        default="",
+    )
+
+    return {
+        "document_type":      doc_type,
+        "document_label":     doc_label,
+        "detected_risks":     _merge_risks([r.get("detected_risks", []) for r in chunk_results]),
+        "missing_fields":     _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results]),
+        "overall_assessment": overall,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Step 2 — Hybrid analysis for known types (improvement #2)
+# Runs fixed-profile + dynamic in parallel, merges results.
+# Fixed profile catches standard checklist risks reliably.
+# Dynamic pass catches document-specific unusual clauses the checklist misses.
+# ---------------------------------------------------------------------------
+
+async def _analyze_risks_hybrid(text: str, doc_type: str, doc_label: str) -> dict:
+    """
+    Runs fixed-profile and dynamic analysis in parallel then merges.
+    Used for all known document types.
+    """
+    logger.info(f"[risk_detection] Hybrid analysis — running fixed + dynamic in parallel for '{doc_label}'")
+
+    fixed_result, dynamic_result = await asyncio.gather(
+        _analyze_risks_for_type(text, doc_type, doc_label),
+        _analyze_risks_dynamic(text, doc_label),
+    )
+
+    merged_risks  = _merge_risks([
+        fixed_result.get("detected_risks", []),
+        dynamic_result.get("detected_risks", []),
+    ])
+    merged_fields = _merge_missing_fields([
+        fixed_result.get("missing_fields", []),
+        dynamic_result.get("missing_fields", []),
+    ])
+
+    # Prefer the fixed-profile overall_assessment (more structured);
+    # fall back to dynamic if fixed is empty
+    overall = fixed_result.get("overall_assessment") or dynamic_result.get("overall_assessment", "")
+
+    return {
+        "document_type":      doc_type,
+        "document_label":     doc_label,
+        "detected_risks":     merged_risks,
+        "missing_fields":     merged_fields,
+        "overall_assessment": overall,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -431,37 +650,39 @@ Document:
 
 async def analyze_document_risks(text: str) -> dict:
     """
-    Step 1: detect document type slug + specific human-readable label
+    Step 1 — detect document type (classification window: 4000 chars)
 
-    Step 2: branch based on slug
-      - Known type (contract / employment / nda / lease / invoice / resume)
-        → _analyze_risks_for_type  — fixed profile checklist, deterministic
-      - Unknown type (slug == "other", e.g. Power of Attorney, Loan Agreement)
-        → _analyze_risks_dynamic   — LLM generates relevant risks for that specific doc
+    Step 2 — branch based on slug:
+      - Known type  → _analyze_risks_hybrid  (fixed profile + dynamic in parallel)
+      - Other type  → _analyze_risks_dynamic (fully dynamic, chunked)
+
+    Both paths chunk the full document so no clause is ever missed due to truncation.
+    All detected_risks include severity_reason for transparent, consistent ratings.
+    Results are normalized to a guaranteed fixed structure before returning.
     """
     doc_type, doc_label = await _detect_document_type(text)
-    logger.info(f"[risk_detection] Detected document type: {doc_type} ('{doc_label}')")
+    logger.info(f"[risk_detection] Detected: {doc_type} ('{doc_label}')")
 
     _KNOWN_TYPES = {"contract", "employment", "nda", "lease", "invoice", "resume"}
 
     if doc_type in _KNOWN_TYPES:
-        logger.info(f"[risk_detection] Using fixed profile for '{doc_type}'")
-        analysis = await _analyze_risks_for_type(text, doc_type, doc_label)
+        analysis = await _analyze_risks_hybrid(text, doc_type, doc_label)
     else:
-        logger.info(f"[risk_detection] Using dynamic analysis for '{doc_label}'")
         analysis = await _analyze_risks_dynamic(text, doc_label)
+
+    analysis = _normalize_result(analysis)
 
     detected_count = len(analysis.get("detected_risks", []))
     missing_count  = len(analysis.get("missing_fields", []))
 
     return {
-        "status":               "success",
-        "analysis_type":        "risk_detection",
-        "document_type":        doc_label,
+        "status":        "success",
+        "analysis_type": "risk_detection",
+        "document_type": doc_label,
         "risk_count": {
-            "detected_risks":   detected_count,
-            "missing_fields":   missing_count,
-            "total":            detected_count + missing_count,
+            "detected_risks": detected_count,
+            "missing_fields": missing_count,
+            "total":          detected_count + missing_count,
         },
         "data": analysis,
     }
