@@ -1004,19 +1004,46 @@ async def html_to_pdf(
             display: block !important;
         }
 
-        /* WeasyPrint ignores position:fixed/sticky; make them static so
-           they don't overlap page content */
+        /* WeasyPrint ignores position:fixed/sticky/absolute; make them static
+           so they don't overlap page content */
         [style*="position: fixed"],
         [style*="position:fixed"],
         [style*="position: sticky"],
-        [style*="position:sticky"] {
+        [style*="position:sticky"],
+        [style*="position: absolute"],
+        [style*="position:absolute"] {
             position: static !important;
+        }
+
+        /* Fixed heights cause content to overflow and overlap the next block.
+           Force all block containers to size themselves to their content. */
+        div, section, article, aside, header, footer, main, li {
+            height: auto !important;
+            min-height: 0 !important;
+            overflow: visible !important;
+        }
+
+        /* Negative margins pull elements into the previous block — zero them. */
+        [style*="margin-top: -"],
+        [style*="margin-top:-"] {
+            margin-top: 0 !important;
+        }
+        [style*="margin-bottom: -"],
+        [style*="margin-bottom:-"] {
+            margin-bottom: 0 !important;
         }
 
         /* Keep headings attached to their following paragraph across page breaks */
         h1, h2, h3, h4, h5, h6 {
             break-after: avoid;
             page-break-after: avoid;
+        }
+
+        /* Float clearfix — ensures floated children don't collapse their parent */
+        div::after {
+            content: "";
+            display: table;
+            clear: both;
         }
     """
 
