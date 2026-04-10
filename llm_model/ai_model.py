@@ -352,12 +352,21 @@ async def _run_inference_stream(messages: list[dict], label: str = ""):
 #   - setting json_object without "json" in messages → 400 error from OpenAI
 # ---------------------------------------------------------------------------
 
-async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
+async def transcribe_audio(audio_bytes: bytes, filename: str) -> tuple[str, str]:
     """
     Transcribe audio using OpenAI Whisper.
     Accepts any format supported by the Whisper API
     (flac, m4a, mp3, mp4, mpeg, mpga, oga, ogg, wav, webm).
-    Returns the transcribed text string.
+
+    Uses the transcriptions endpoint (NOT translations) so Whisper transcribes
+    in the same language it detects — audio in Hindi returns Hindi text,
+    audio in Spanish returns Spanish text, etc.
+
+    response_format="verbose_json" is used to get the detected language back
+    alongside the transcript text.
+
+    Returns: (transcribed_text, detected_language_code)
+    e.g. ("Hola mundo", "spanish")
     """
     import io
     t0 = time.perf_counter()
@@ -366,10 +375,15 @@ async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
         response = await _client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
+            response_format="verbose_json",
         )
         elapsed = time.perf_counter() - t0
-        logger.info(f"[transcribe_audio] done in {elapsed:.2f}s — {len(response.text)} chars")
-        return response.text
+        detected_language = getattr(response, "language", "unknown")
+        logger.info(
+            f"[transcribe_audio] done in {elapsed:.2f}s — "
+            f"{len(response.text)} chars — language={detected_language}"
+        )
+        return response.text, detected_language
     except Exception as e:
         logger.exception(f"[transcribe_audio] Whisper API call failed: {e}")
         raise

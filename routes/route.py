@@ -577,12 +577,12 @@ async def speech_to_text(
 
     try:
         audio_bytes = await file.read()
-        transcript = await transcribe_audio(audio_bytes, file.filename)
+        transcript, detected_language = await transcribe_audio(audio_bytes, file.filename)
     except Exception as e:
         logger.exception(f"[speech-to-text] transcription failed: {e}")
         raise HTTPException(status_code=500, detail="Audio transcription failed.")
 
-    return {"text": transcript}
+    return {"text": transcript, "detected_language": detected_language}
 
 
 # ---------------------------------------------------------------------------
