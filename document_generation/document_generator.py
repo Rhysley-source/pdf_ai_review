@@ -1033,17 +1033,12 @@ async def html_to_pdf(
             margin-bottom: 0 !important;
         }
 
-        /* Keep headings attached to their following paragraph across page breaks */
-        h1, h2, h3, h4, h5, h6 {
+        /* Keep major headings attached to their following paragraph across page breaks.
+           Only h1/h2 — applying to h3-h6 forces too many blocks to stay together
+           and leaves large whitespace gaps at the bottom of pages. */
+        h1, h2 {
             break-after: avoid;
             page-break-after: avoid;
-        }
-
-        /* Float clearfix — ensures floated children don't collapse their parent */
-        div::after {
-            content: "";
-            display: table;
-            clear: both;
         }
     """
 
