@@ -954,60 +954,41 @@ async def html_to_pdf(
             detail="Provide either 'document_id' or 'html' in the request body."
         )
 
+    # Only @page (for paper size and margins) plus WeasyPrint compatibility
+    # shims are injected here. Everything else — body padding, heading styles,
+    # fonts, colors — is intentionally left to the HTML's own <style> block.
+    #
+    # Why: WeasyPrint applies passed stylesheets AFTER the document's own
+    # <style> block in the CSS cascade. Rules with the same specificity that
+    # appear later win. Any body/heading reset added here therefore silently
+    # overrides the generated HTML's own layout styles, which is what caused
+    # headings to appear shifted left relative to the surrounding content.
     a4_css = """
         @page {
             size: A4 portrait;
             margin: 15mm 15mm 15mm 15mm;
         }
-        html, body {
-            margin: 0;
-            padding: 0;
-            color: #000;
-            background: #fff;
-            -weasy-print-color-adjust: exact;
-        }
 
-        /* ── Heading alignment fix ──────────────────────────────────────────
-           WeasyPrint's UA stylesheet uses margin-block-start / margin-block-end
-           (CSS logical properties) for h1-h6. Their physical translations differ
-           from Chrome's defaults and cause headings to appear shifted/indented.
-           Resetting only the physical left/right margin+padding corrects this
-           without touching text-align, font-size, or color set in the HTML.
-           break-after:avoid keeps a heading attached to its following content
-           so it never strands alone at the bottom of a page.
-        ─────────────────────────────────────────────────────────────────── */
-        h1, h2, h3, h4, h5, h6 {
-            display: block;
-            margin-left: 0;
-            margin-right: 0;
-            padding-left: 0;
-            padding-right: 0;
-            break-after: avoid;
-            page-break-after: avoid;
-        }
-
-        table {
-            border-collapse: collapse;
-            word-wrap: break-word;
-        }
-        td, th {
-            overflow: hidden;
-        }
-        img {
-            max-width: 100%;
-            height: auto;
-        }
-        /* WeasyPrint does not support CSS Grid — fall back to block */
+        /* WeasyPrint does not support CSS Grid — fall back to block so
+           content flows rather than disappearing entirely */
         [style*="display: grid"],
         [style*="display:grid"] {
             display: block !important;
         }
-        /* WeasyPrint ignores fixed/sticky — make them static to avoid overlap */
+
+        /* WeasyPrint ignores position:fixed/sticky; make them static so
+           they don't overlap page content */
         [style*="position: fixed"],
         [style*="position:fixed"],
         [style*="position: sticky"],
         [style*="position:sticky"] {
             position: static !important;
+        }
+
+        /* Keep headings attached to their following paragraph across page breaks */
+        h1, h2, h3, h4, h5, h6 {
+            break-after: avoid;
+            page-break-after: avoid;
         }
     """
 
