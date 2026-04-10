@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import time
 import logging
@@ -164,10 +165,21 @@ def _merge_highlights(results: list[dict]) -> list[str]:
 # _build_api_kwargs — shared helper to build model-aware API kwargs
 # ---------------------------------------------------------------------------
 
+def _messages_seed(messages: list[dict]) -> int:
+    """
+    Derives a stable integer seed from the full message content.
+    Same document + same prompt → same seed → deterministic LLM output.
+    """
+    content = "".join(m.get("content", "") for m in messages)
+    digest  = hashlib.sha256(content.encode()).hexdigest()
+    return int(digest[:8], 16)
+
+
 def _build_api_kwargs(
-    messages:   list[dict],
-    use_json:   bool = False,
-    streaming:  bool = False,
+    messages:         list[dict],
+    use_json:         bool = False,
+    streaming:        bool = False,
+    max_output_tokens: int = MAX_OUTPUT_TOKENS,
 ) -> dict:
     """
     Build OpenAI API kwargs handling model differences.
@@ -191,14 +203,14 @@ def _build_api_kwargs(
     if model not in _FIXED_TEMPERATURE_MODELS:
         kwargs["temperature"] = 0.0
 
-    # seed: makes output deterministic across repeated calls with the same input
-    kwargs["seed"] = 42
+    # seed derived from message content — same input always produces same output
+    kwargs["seed"] = _messages_seed(messages)
 
     # token limit parameter name differs by model
     if model in _MAX_COMPLETION_TOKENS_MODELS:
-        kwargs["max_completion_tokens"] = MAX_OUTPUT_TOKENS
+        kwargs["max_completion_tokens"] = max_output_tokens
     else:
-        kwargs["max_tokens"] = MAX_OUTPUT_TOKENS
+        kwargs["max_tokens"] = max_output_tokens
 
     # JSON mode — ONLY when prompt contains word "json"
     if use_json:
@@ -260,8 +272,9 @@ async def _run_inference_json(
 # ---------------------------------------------------------------------------
 
 async def _run_inference_text(
-    messages: list[dict],
-    label:    str = "",
+    messages:          list[dict],
+    label:             str = "",
+    max_output_tokens: int = MAX_OUTPUT_TOKENS,
 ) -> tuple[str, int, int]:
     """
     OpenAI call WITHOUT response_format — plain text output.
@@ -271,7 +284,8 @@ async def _run_inference_text(
     """
     tag    = f"[{label}] " if label else ""
     t0     = time.perf_counter()
-    kwargs = _build_api_kwargs(messages, use_json=False, streaming=False)
+    kwargs = _build_api_kwargs(messages, use_json=False, streaming=False,
+                               max_output_tokens=max_output_tokens)
 
     try:
         response      = await _client.chat.completions.create(**kwargs)
@@ -338,12 +352,21 @@ async def _run_inference_stream(messages: list[dict], label: str = ""):
 #   - setting json_object without "json" in messages → 400 error from OpenAI
 # ---------------------------------------------------------------------------
 
-async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
+async def transcribe_audio(audio_bytes: bytes, filename: str) -> tuple[str, str]:
     """
     Transcribe audio using OpenAI Whisper.
     Accepts any format supported by the Whisper API
     (flac, m4a, mp3, mp4, mpeg, mpga, oga, ogg, wav, webm).
-    Returns the transcribed text string.
+
+    Uses the transcriptions endpoint (NOT translations) so Whisper transcribes
+    in the same language it detects — audio in Hindi returns Hindi text,
+    audio in Spanish returns Spanish text, etc.
+
+    response_format="verbose_json" is used to get the detected language back
+    alongside the transcript text.
+
+    Returns: (transcribed_text, detected_language_code)
+    e.g. ("Hola mundo", "spanish")
     """
     import io
     t0 = time.perf_counter()
@@ -352,30 +375,39 @@ async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
         response = await _client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
+            response_format="verbose_json",
         )
         elapsed = time.perf_counter() - t0
-        logger.info(f"[transcribe_audio] done in {elapsed:.2f}s — {len(response.text)} chars")
-        return response.text
+        detected_language = getattr(response, "language", "unknown")
+        logger.info(
+            f"[transcribe_audio] done in {elapsed:.2f}s — "
+            f"{len(response.text)} chars — language={detected_language}"
+        )
+        return response.text, detected_language
     except Exception as e:
         logger.exception(f"[transcribe_audio] Whisper API call failed: {e}")
         raise
 
 
 async def run_llm(
-    text: str,
-    system_prompt: str,
-    max_input_tokens: int = 50000,
+    text:              str,
+    system_prompt:     str,
+    max_input_tokens:  int = 50000,
+    max_output_tokens: int = MAX_OUTPUT_TOKENS,
 ) -> str:
     """
     Generic plain-text LLM runner.
     Used by /key-clause-extraction and /detect-risks.
     Does NOT set response_format — plain text output only.
+    Pass max_output_tokens to override the default limit for calls that
+    produce large structured JSON (e.g. risk detection analysis).
     """
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": f"Document:\n----------------\n{text}\n----------------"},
     ]
-    content, _, _ = await _run_inference_text(messages, "run_llm")
+    content, _, _ = await _run_inference_text(messages, "run_llm",
+                                              max_output_tokens=max_output_tokens)
     return content
 
 

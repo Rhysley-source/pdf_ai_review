@@ -1,14 +1,26 @@
+import asyncio
 import base64
+import hashlib
 import io
 import json
 import os
+import re
+import uuid
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-from .prompt_templates import DOCUMENT_GENERATION_PROMPT, REGENERATE_PROMPT
+from .prompt_templates import (
+    QUERY_ANALYSIS_PROMPT,
+    TEMPLATE_BUILD_PROMPT,
+    DOCUMENT_GENERATION_V2_PROMPT,
+    REGENERATION_INTENT_PROMPT,
+    SECTION_TEMPLATES,
+    build_generation_context,
+    REGENERATE_PROMPT,
+)
 from auth import verify_api_key
 
 load_dotenv()
@@ -20,9 +32,12 @@ router = APIRouter()
 # Config
 # ---------------------------------------------------------------------------
 
-_MODEL      = os.environ.get("MODEL_NAME", "gpt-5-nano")
-_API_KEY    = os.environ.get("OPENAI_API_KEY", "")
-_CLIENT     = AsyncOpenAI(api_key=_API_KEY)
+# Step 3 (HTML generation) — full model, best output quality
+_MODEL           = os.environ.get("MODEL_NAME", "gpt-5-nano")
+# Steps 1+2 (JSON classification) — faster/lighter model, no quality impact
+_FAST_MODEL      = os.environ.get("FAST_MODEL_NAME", "gpt-4.1-nano")
+_API_KEY         = os.environ.get("OPENAI_API_KEY", "")
+_CLIENT          = AsyncOpenAI(api_key=_API_KEY)
 
 # Models that do not support the temperature parameter
 _FIXED_TEMPERATURE_MODELS = {
@@ -31,12 +46,46 @@ _FIXED_TEMPERATURE_MODELS = {
 }
 
 # ---------------------------------------------------------------------------
-# Storage — absolute path anchored to this file's directory
+# Storage — per-document files (fast O(1) read/write per doc)
+#
+# New writes go to  html_docs/<doc_id>.html  — one file per document.
+# This avoids reading+writing the entire html_db.json on every request.
+# Legacy html_db.json is kept as a read-only fallback for old documents.
 # ---------------------------------------------------------------------------
 
-_DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "html_db.json")
+_DOCS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "html_docs")
+_DB_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "html_db.json")
+os.makedirs(_DOCS_DIR, exist_ok=True)
 
 
+def _doc_path(doc_id: str) -> str:
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", doc_id)
+    return os.path.join(_DOCS_DIR, f"{safe_id}.html")
+
+
+def _save_document(doc_id: str, html: str) -> None:
+    """Write a single document file — no JSON serialization, no full-file rewrite."""
+    with open(_doc_path(doc_id), "w", encoding="utf-8") as f:
+        f.write(html)
+
+
+def _load_document(doc_id: str) -> str | None:
+    """Read a single document file. Falls back to legacy html_db.json if not found."""
+    path = _doc_path(doc_id)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    # Legacy fallback
+    if os.path.exists(_DB_FILE):
+        try:
+            with open(_DB_FILE, "r", encoding="utf-8") as f:
+                return json.load(f).get(doc_id)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return None
+
+
+# Kept for backward compatibility — reads legacy store only
 def get_storage() -> dict:
     if not os.path.exists(_DB_FILE):
         return {}
@@ -48,10 +97,8 @@ def get_storage() -> dict:
 
 
 def update_storage(doc_id: str, html_content: str) -> None:
-    db = get_storage()
-    db[doc_id] = html_content
-    with open(_DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(db, f, indent=4)
+    """Legacy writer — new code should call _save_document instead."""
+    _save_document(doc_id, html_content)
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +106,7 @@ def update_storage(doc_id: str, html_content: str) -> None:
 # ---------------------------------------------------------------------------
 
 class DocumentGenerationRequest(BaseModel):
-    document_id: str
+    document_id: str | None = None
     user_prompt: str
 
 
@@ -82,8 +129,44 @@ class Base64TextRequest(BaseModel):
 # LLM caller — dedicated for HTML generation with higher output token limit
 # ---------------------------------------------------------------------------
 
-async def _call_llm(system_prompt: str, user_message: str) -> str:
-    model = os.environ.get("MODEL_NAME", _MODEL)
+def _prompt_seed(system_prompt: str, user_message: str) -> int:
+    """
+    Derives a stable integer seed from the prompt content.
+    Same prompt → same seed → deterministic LLM output (when model supports it).
+    """
+    digest = hashlib.sha256((system_prompt + user_message).encode()).hexdigest()
+    return int(digest[:8], 16)
+
+
+# Models that use max_completion_tokens instead of max_tokens
+_MAX_COMPLETION_TOKENS_MODELS = {
+    "gpt-5-nano", "gpt-4.1-nano", "gpt-4o-mini",
+    "o1", "o1-mini", "o3-mini", "o3",
+}
+
+# Token budgets per step
+_MAX_TOKENS_HTML      = None  # Step 3: no cap — documents can be any size; model uses its own maximum
+_MAX_TOKENS_BLUEPRINT = 4096  # Step 2: detailed pre-filled section plan — needs more room than plain JSON
+_MAX_TOKENS_JSON      = 2048  # Step 1: small JSON classification response
+_HTML_GEN_RETRIES     = 3     # Step 3 retry attempts on empty/null response
+
+
+async def _call_llm(
+    system_prompt: str,
+    user_message:  str,
+    model:         str | None = None,
+    max_tokens:    int | None = _MAX_TOKENS_HTML,
+    temperature:   float | None = None,
+    use_seed:      bool = True,
+) -> tuple[str, str]:
+    """
+    Core LLM caller. Uses the full generation model by default.
+    Pass model=_FAST_MODEL for lightweight JSON classification steps.
+    Pass max_tokens to cap output length per call.
+    Pass temperature to control randomness (None = model default / steps 1+2 use 0).
+    Pass use_seed=False to skip the deterministic seed (all steps now use True).
+    """
+    model = model or os.environ.get("MODEL_NAME", _MODEL)
 
     kwargs: dict = {
         "model":    model,
@@ -93,8 +176,21 @@ async def _call_llm(system_prompt: str, user_message: str) -> str:
         ],
     }
 
+    # Seed — used by all steps; pass use_seed=False to skip for non-deterministic calls
+    if use_seed:
+        kwargs["seed"] = _prompt_seed(system_prompt, user_message)
+
+    # Temperature — models in _FIXED_TEMPERATURE_MODELS don't accept this param
     if model not in _FIXED_TEMPERATURE_MODELS:
-        kwargs["temperature"] = 0.3
+        kwargs["temperature"] = temperature if temperature is not None else 0
+
+    # Token limit — omitted when None so the model uses its own built-in maximum.
+    # Steps 1+2 always pass an explicit limit; Step 3 (HTML generation) passes None.
+    if max_tokens is not None:
+        if model in _MAX_COMPLETION_TOKENS_MODELS:
+            kwargs["max_completion_tokens"] = max_tokens
+        else:
+            kwargs["max_tokens"] = max_tokens
 
     try:
         response = await _CLIENT.chat.completions.create(**kwargs)
@@ -102,35 +198,555 @@ async def _call_llm(system_prompt: str, user_message: str) -> str:
         content  = choice.message.content or ""
         finish   = choice.finish_reason
         logger.info(
-            f"[html-gen] in={response.usage.prompt_tokens} "
-            f"out={response.usage.completion_tokens} "
-            f"finish={finish} model={model}"
+            f"[html-gen] model={model} in={response.usage.prompt_tokens} "
+            f"out={response.usage.completion_tokens} finish={finish}"
         )
         if finish == "length":
-            logger.warning("[html-gen] Response was cut off by the model's context limit (finish_reason=length)")
-        return content
+            logger.warning("[html-gen] finish=length — response was cut off mid-output")
+        return content, finish
     except Exception as e:
         logger.exception(f"[html-gen] OpenAI call failed: {e}")
         raise
 
 
+async def _call_llm_fast(system_prompt: str, user_message: str) -> str:
+    """Lightweight LLM call using the fast model — for JSON classification only."""
+    content, _ = await _call_llm(system_prompt, user_message,
+                                 model=_FAST_MODEL, max_tokens=_MAX_TOKENS_JSON)
+    return content
+
+
 # ---------------------------------------------------------------------------
-# Output cleaning
+# User-facing error helpers
+# ---------------------------------------------------------------------------
+
+_GENERATE_EXAMPLES = [
+    "Generate a service agreement between Acme Corp and Beta Ltd for consulting services worth $10,000",
+    "Create an invoice for web development services — vendor: Sujit Studio, client: ABC Ltd, amount: $2,500",
+    "Draft an NDA between two tech companies for a 2-year period, governed by California law",
+    "Write an employment offer letter for a Senior Python Developer role at $90,000/year starting Jan 2026",
+    "Make a residential lease agreement — landlord: Mr. Sharma, tenant: Rahul Verma, rent: $1,200/month",
+    "Generate a business proposal for a mobile app project worth $50,000 for XYZ Corp",
+    "Create a purchase order for 50 laptops from Dell at $800 each",
+    "Write a recommendation letter for John Doe, Software Engineer at Google",
+]
+
+_MODIFY_EXAMPLES = [
+    "Change the vendor name to Acme Corp",
+    "Update the due date to 30th April 2026",
+    "Add a 10% GST row to the totals table",
+    "Replace the client address with 123 Main Street, New York",
+    "Make the font size larger and the layout more professional",
+    "Add a confidentiality clause at the end",
+    "Change the payment terms from Net 30 to Net 15",
+    "Remove the arbitration clause",
+]
+
+
+def _err_invalid_prompt(user_prompt: str) -> dict:
+    """Returns a structured error for prompts that are too vague, short, or unclear."""
+    return {
+        "error":   "invalid_prompt",
+        "message": (
+            f"Your query \"{user_prompt[:80]}{'...' if len(user_prompt) > 80 else ''}\" is unclear. "
+            "Please provide your request in the correct format."
+        ),
+    }
+
+
+def _err_not_document_request(user_prompt: str) -> dict:
+    """Returns a structured error when the prompt is not a document generation request."""
+    return {
+        "error":   "not_a_document_request",
+        "message": (
+            f"Your query \"{user_prompt[:80]}{'...' if len(user_prompt) > 80 else ''}\" is not a document generation request. "
+            "Please provide your request in the correct format."
+        ),
+    }
+
+
+def _err_model_failed(step: str, user_prompt: str, detail: str) -> dict:
+    """Returns a structured error for transient AI model failures."""
+    return {
+        "error":   f"{step.lower().replace(' ', '_')}_failed",
+        "message": f"An error occurred during {step}. Please try again.",
+    }
+
+
+def _err_empty_output(user_prompt: str) -> dict:
+    """Returns a structured error when the model returns empty HTML."""
+    return {
+        "error":   "empty_output",
+        "message": "The AI model returned an empty response. Please try again with more specific details.",
+    }
+
+
+def _err_invalid_modification(modification_query: str) -> dict:
+    """Returns a structured error for modification prompts that are unclear."""
+    return {
+        "error":   "invalid_modification_query",
+        "message": (
+            f"Your query \"{modification_query[:80]}{'...' if len(modification_query) > 80 else ''}\" is unclear. "
+            "Please provide your modification request in the correct format."
+        ),
+    }
+
+
+def _err_document_not_found(document_id: str) -> dict:
+    """Returns a structured error when the requested document ID does not exist."""
+    return {
+        "error":   "document_not_found",
+        "message": f"No document found with ID '{document_id}'. Please generate a document first using /generate-html.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Input validation — reject gibberish / meaningless prompts
+# ---------------------------------------------------------------------------
+
+_FORMAT_HINT = (
+    "Please provide a clear document generation request. Examples:\n"
+    "  • \"Generate a service agreement between Company A and Company B\"\n"
+    "  • \"Create an employment offer letter for a software engineer role\"\n"
+    "  • \"Draft a non-disclosure agreement between two parties\"\n"
+    "  • \"Make an invoice for web development services worth $2,000\"\n"
+    "  • \"Write a residential lease agreement for a 1-year term\""
+)
+
+
+_MODIFICATION_KEYWORDS = {
+    # direct action words
+    "change", "update", "replace", "edit", "modify", "fix", "correct",
+    "add", "remove", "delete", "insert", "rename", "set", "adjust",
+    "rewrite", "move", "swap", "convert", "format", "increase", "decrease",
+    "append", "clear", "shift", "put", "turn",
+    # improvement / style words
+    "improve", "better", "enhance", "refine", "redesign", "beautify",
+    "nicer", "cleaner", "professional", "prettier", "modernize", "upgrade",
+    "simplify", "bold", "resize", "align", "restyle", "revamp",
+    # phrase fragments (checked as substrings)
+    "make it", "make the", "use a", "use different", "look better",
+    "look more", "more professional", "more formal", "more clean",
+}
+
+# Only phrases that clearly mean "create a brand new document"
+_NEW_GENERATION_PHRASES = {
+    "generate a", "generate an", "generate new",
+    "create a", "create an", "create new",
+    "draft a", "draft an",
+    "write a new", "write an new",
+    "build a", "build an",
+    "produce a", "produce an",
+    "give me a new", "give me an new",
+    "new document", "new invoice", "new contract", "new resume",
+}
+
+
+def _is_modification_query(text: str) -> bool:
+    """
+    Returns True if the text looks like a modification/improvement request
+    on an existing document.
+    Returns False only if it clearly asks for a brand new document.
+    """
+    lower = text.lower()
+
+    # Reject only if it explicitly asks for a brand new document
+    for phrase in _NEW_GENERATION_PHRASES:
+        if phrase in lower:
+            return False
+
+    # Accept if any modification/improvement keyword is present
+    words = set(re.findall(r"[a-z]+", lower))
+    if words & _MODIFICATION_KEYWORDS:
+        return True
+
+    # Also check multi-word phrases as substrings
+    for phrase in _MODIFICATION_KEYWORDS:
+        if " " in phrase and phrase in lower:
+            return True
+
+    return False
+
+
+def _is_gibberish(text: str) -> bool:
+    """
+    Returns True when the prompt looks like gibberish or has no meaningful content.
+
+    Checks:
+    1. Too short after stripping whitespace.
+    2. Alphabetic characters make up less than 50 % of the text
+       (catches strings like "123 @@@ !!!" or random symbols).
+    3. Fewer than 2 words that are at least 3 alphabetic characters long
+       (catches single-char spam like "a b c d e" or keyboard mashing).
+    """
+    stripped = text.strip()
+
+    # Too short to mean anything
+    if len(stripped) < 5:
+        return True
+
+    # Low alphabetic ratio — mostly numbers / symbols / spaces
+    alpha_count = sum(1 for c in stripped if c.isalpha())
+    if len(stripped) > 0 and (alpha_count / len(stripped)) < 0.50:
+        return True
+
+    # Not enough real words (3+ consecutive alpha chars)
+    real_words = re.findall(r"[A-Za-z]{3,}", stripped)
+    if len(real_words) < 2:
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Output cleaning + structural validation
 # ---------------------------------------------------------------------------
 
 def _clean_html(raw: str) -> str:
+    """Strip markdown fences and extract the HTML block from raw LLM output."""
     cleaned = raw.strip()
     if "```" in cleaned:
         cleaned = cleaned.replace("```html", "").replace("```", "").strip()
-    start = cleaned.find("<html")
-    end   = cleaned.rfind("</html>")
+    lower   = cleaned.lower()
+    start   = lower.find("<html")
+    end     = lower.rfind("</html>")
     if start != -1 and end != -1:
-        # Full, well-formed response
         cleaned = cleaned[start : end + 7]
     elif start != -1:
-        # Truncated — model stopped before </html>; keep everything from <html
+        # Truncated — keep everything from <html onward
         cleaned = cleaned[start:]
     return cleaned
+
+
+def _validate_html(html: str) -> tuple[bool, str]:
+    """
+    Returns (is_valid, reason).
+
+    Checks that the HTML has all the structural pieces needed to render as a
+    complete, styled document.  Any missing piece triggers a retry so the model
+    gets another chance to produce a properly structured response.
+
+    Checks (in order):
+      1. Non-empty after cleaning
+      2. Has <html> opening tag
+      3. Has <head> section
+      4. Has embedded <style> block  — external <link> stylesheets are not
+         acceptable because they won't resolve at PDF conversion time
+      5. Has <body> section
+      6. Has </html> closing tag     — missing = response was truncated
+      7. Has meaningful text content — guards against a shell of empty tags
+    """
+    if not html.strip():
+        return False, "empty response"
+
+    low = html.lower()
+
+    if "<html" not in low:
+        return False, "missing <html> tag"
+    if "<head" not in low:
+        return False, "missing <head> section"
+    if "<style" not in low:
+        return False, "missing embedded <style> block — no CSS"
+    if "<body" not in low:
+        return False, "missing <body> section"
+    if "</html>" not in low:
+        return False, "response truncated — </html> not found"
+
+    # Strip all tags and check for at least 100 chars of real text content
+    text = re.sub(r"<[^>]+>", "", html)
+    if len(text.strip()) < 100:
+        return False, "insufficient text content"
+
+    return True, "ok"
+
+
+# ---------------------------------------------------------------------------
+# Pipeline helpers — Step 1, Step 2, Step 3
+# ---------------------------------------------------------------------------
+
+def _parse_analysis_json(raw: str) -> dict:
+    """
+    Robustly parses the Step 1 LLM response into a dict.
+    Strips markdown fences if present, validates required keys,
+    and clamps doc_type to known SECTION_TEMPLATES keys.
+    """
+    cleaned = raw.strip()
+    if "```" in cleaned:
+        cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Step 1 returned non-JSON: {raw[:200]}") from exc
+
+    if not isinstance(parsed, dict) or "doc_type" not in parsed:
+        raise ValueError(f"Step 1 JSON missing 'doc_type': {raw[:200]}")
+
+    # Clamp doc_type to known types
+    if parsed["doc_type"] not in SECTION_TEMPLATES:
+        parsed["doc_type"] = "other"
+
+    # Ensure fields is always a dict
+    if not isinstance(parsed.get("fields"), dict):
+        parsed["fields"] = {}
+
+    return parsed
+
+
+async def _analyze_query(user_prompt: str) -> dict:
+    """Step 1 — fast LLM call to detect document type and extract field values.
+    Uses the fast model (JSON classification only).
+    Raises HTTP 422 immediately if the query is not a document generation request.
+    Always calls the LLM — no caching.
+    """
+    logger.info("[doc-gen] Step 1: analysing query (fast model)...")
+    raw      = await _call_llm_fast(QUERY_ANALYSIS_PROMPT.template, user_prompt)
+    logger.info(f"[doc-gen] Step 1 raw output: {raw[:300]}")
+    analysis = _parse_analysis_json(raw)
+    analysis["_user_prompt"] = user_prompt
+
+    if not analysis.get("is_document_request", False):
+        raise HTTPException(
+            status_code=422,
+            detail=_err_not_document_request(analysis.get("_user_prompt", "")),
+        )
+
+    return analysis
+
+
+def _parse_blueprint_json(raw: str, analysis: dict) -> dict:
+    """
+    Parses the Step 2 LLM blueprint response.
+    Falls back to the static Python template if the LLM returns malformed JSON.
+    Returns a context dict ready for DOCUMENT_GENERATION_V2_PROMPT.
+    """
+    cleaned = raw.strip()
+    if "```" in cleaned:
+        cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        logger.warning("[doc-gen] Step 2: blueprint parse failed — falling back to static template")
+        return _static_template_context(analysis)
+
+    sections = parsed.get("sections", [])
+    if not isinstance(sections, list) or not sections:
+        logger.warning("[doc-gen] Step 2: empty sections in blueprint — falling back to static template")
+        return _static_template_context(analysis)
+
+    # Build the sections_block string for Step 3 — include missing_fields so
+    # Step 3 knows exactly which placeholders to render visibly in the document.
+    lines = []
+    for i, sec in enumerate(sections, 1):
+        title          = sec.get("title", f"Section {i}")
+        content_hint   = sec.get("content_hint", "")
+        missing        = sec.get("missing_fields", [])
+        entry          = f"{i}. {title}\n   → {content_hint}"
+        if missing:
+            entry += f"\n   ⚠ Missing fields (use visible placeholders): {', '.join(missing)}"
+        lines.append(entry)
+    sections_block = "\n\n".join(lines)
+
+    # document_title from blueprint overrides the generic doc_label for the
+    # actual heading shown in the document (e.g. "RENT AGREEMENT" vs "Lease Agreement")
+    doc_label      = analysis.get("doc_label", "Document")
+    document_title = (parsed.get("document_title") or "").strip() or doc_label
+
+    return {
+        "doc_type":       analysis.get("doc_type", "other"),
+        "doc_label":      document_title,
+        "tone":           parsed.get("tone", "professional"),
+        "layout_notes":   parsed.get("layout_notes", "Standard document layout."),
+        "sections_block": sections_block,
+    }
+
+
+def _static_template_context(analysis: dict) -> dict:
+    """Fallback: builds context from static SECTION_TEMPLATES (no LLM)."""
+    doc_type         = analysis.get("doc_type", "other")
+    section_template = SECTION_TEMPLATES.get(doc_type, SECTION_TEMPLATES["other"])
+    base             = build_generation_context(analysis, section_template)
+
+    # Convert required_sections + extracted_fields into the blueprint format
+    sections_block = "\n\n".join(
+        f"{line}"
+        for line in base["required_sections"].splitlines()
+    )
+    return {
+        "doc_type":       base["doc_type"],
+        "doc_label":      base["doc_label"],
+        "tone":           "professional",
+        "layout_notes":   "Standard document layout.",
+        "sections_block": sections_block,
+    }
+
+
+async def _build_template_context(analysis: dict, user_prompt: str = "") -> dict:
+    """Step 2 — builds a detailed, pre-filled document blueprint.
+
+    Uses the fast model but with a higher token budget (_MAX_TOKENS_BLUEPRINT)
+    so every section gets a complete content_hint with all field values embedded.
+
+    Passes three inputs to the blueprint prompt:
+      - extracted_fields  : structured key→value pairs from Step 1
+      - required_sections : standard sections for this document type
+      - user_request      : the original full user prompt, so any extra details,
+                            clauses, or requirements the user mentioned are captured
+    Falls back to the static Python template on parse failure.
+    """
+    doc_type  = analysis.get("doc_type", "other")
+    doc_label = analysis.get("doc_label", "Document")
+
+    section_template  = SECTION_TEMPLATES.get(doc_type, SECTION_TEMPLATES["other"])
+    base_context      = build_generation_context(analysis, section_template)
+    extracted_fields  = base_context["extracted_fields"]
+    required_sections = base_context["required_sections"]
+
+    system_prompt = TEMPLATE_BUILD_PROMPT.format(
+        doc_type=doc_type,
+        doc_label=doc_label,
+        extracted_fields=extracted_fields,
+        required_sections=required_sections,
+        user_request=user_prompt,
+    )
+
+    logger.info(f"[doc-gen] Step 2: building blueprint for '{doc_label}'...")
+    raw, _ = await _call_llm(
+        system_prompt,
+        f"Build the complete, pre-filled document blueprint for: {doc_label}",
+        model=_FAST_MODEL,
+        max_tokens=_MAX_TOKENS_BLUEPRINT,
+        temperature=0,
+        use_seed=True,
+    )
+    logger.info(f"[doc-gen] Step 2 raw output: {raw[:300]}")
+
+    return _parse_blueprint_json(raw, analysis)
+
+
+def _analysis_summary(analysis: dict) -> dict:
+    """
+    Extracts the safe, user-facing fields from a Step 1 analysis result.
+    Included in every error response that occurs after Step 1 completes,
+    so the client knows exactly what was detected from the query.
+    """
+    return {
+        "detected_doc_type":  analysis.get("doc_type", "unknown"),
+        "detected_doc_label": analysis.get("doc_label", "Unknown Document"),
+        "extracted_fields":   {
+            k: v for k, v in (analysis.get("fields") or {}).items()
+            if not k.startswith("_")   # strip internal keys
+        },
+    }
+
+
+async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
+    """
+    Step 3 — final LLM call using the enriched blueprint context.
+    Retries up to _HTML_GEN_RETRIES times on truncated or invalid response.
+
+    Deterministic by design:
+      - temperature=0.2 + use_seed=True → consistent output with minimal variation
+      - seed derived from SHA-256(system_prompt + user_prompt)
+    Same query → same blueprint (Step 2 temperature=0) → same seed → stable HTML.
+    """
+    system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
+        **context,
+        user_request=user_prompt,
+    )
+
+    for attempt in range(1, _HTML_GEN_RETRIES + 1):
+        if attempt == 1:
+            logger.info(f"[doc-gen] Step 3: generating HTML for '{context['doc_label']}'...")
+        else:
+            logger.warning(f"[doc-gen] Step 3: retry {attempt}/{_HTML_GEN_RETRIES}")
+
+        try:
+            raw, finish = await _call_llm(
+                system_prompt,
+                user_prompt,
+                temperature=0.2,
+                use_seed=True,
+            )
+        except Exception:
+            if attempt == _HTML_GEN_RETRIES:
+                raise
+            logger.warning(f"[doc-gen] Step 3: LLM call failed on attempt {attempt} — retrying")
+            continue
+
+        # Truncated response — model ran out of output tokens mid-generation.
+        # Must retry regardless of whether the HTML structure looks valid,
+        # because the document content itself is incomplete.
+        if finish == "length":
+            logger.warning(
+                f"[doc-gen] Step 3: response truncated (finish=length) on attempt "
+                f"{attempt}/{_HTML_GEN_RETRIES} — retrying"
+            )
+            continue
+
+        cleaned         = _clean_html(raw)
+        valid, reason   = _validate_html(cleaned)
+
+        if valid:
+            return cleaned
+
+        logger.warning(
+            f"[doc-gen] Step 3: invalid HTML on attempt {attempt}/{_HTML_GEN_RETRIES} "
+            f"— {reason} (finish={finish})"
+        )
+
+    return ""  # all attempts exhausted — caller raises HTTPException
+
+
+# ---------------------------------------------------------------------------
+# Regeneration intent checker
+# ---------------------------------------------------------------------------
+
+def _extract_doc_type_from_html(html: str) -> str:
+    """
+    Best-effort extraction of the document type from stored HTML.
+    Looks for a <title> or the first <h1>/<h2> tag as a readable label.
+    Falls back to 'existing document' if nothing is found.
+    """
+    import re as _re
+    title_match = _re.search(r"<title[^>]*>(.*?)</title>", html, _re.IGNORECASE | _re.DOTALL)
+    if title_match:
+        return title_match.group(1).strip()
+    h_match = _re.search(r"<h[12][^>]*>(.*?)</h[12]>", html, _re.IGNORECASE | _re.DOTALL)
+    if h_match:
+        # Strip inner HTML tags
+        return _re.sub(r"<[^>]+>", "", h_match.group(1)).strip()
+    return "existing document"
+
+
+async def _check_regeneration_intent(modification_query: str, existing_html: str) -> str:
+    """
+    Calls LLM to determine whether the query wants to modify the existing document
+    or generate a completely new one.
+
+    Returns:
+        "modify"       — user wants changes to the existing document
+        "new_document" — user wants a brand new document of a different type
+    Defaults to "modify" on any parse/LLM failure (fail open).
+    """
+    current_doc_type = _extract_doc_type_from_html(existing_html)
+
+    system_prompt = REGENERATION_INTENT_PROMPT.format(
+        current_doc_type=current_doc_type,
+        modification_query=modification_query,
+    )
+
+    try:
+        raw     = await _call_llm_fast(system_prompt, modification_query)
+        cleaned = raw.strip().replace("```json", "").replace("```", "").strip()
+        parsed  = json.loads(cleaned)
+        intent  = parsed.get("intent", "modify")
+        logger.info(f"[doc-gen] Regeneration intent: '{intent}' — {parsed.get('reason', '')}")
+        return intent if intent in ("modify", "new_document") else "modify"
+    except Exception:
+        logger.warning("[doc-gen] Regeneration intent check failed — defaulting to 'modify'")
+        return "modify"
 
 
 # ---------------------------------------------------------------------------
@@ -143,29 +759,84 @@ async def generate_document_html(
     _: None = Depends(verify_api_key),
 ):
     """
-    Generates an HTML document of any type based on user_prompt.
-    The LLM infers the document type automatically from the prompt.
-    Saves to html_db.json and returns raw HTML.
+    3-step pipeline:
+      Step 1 (LLM)    — detect document type + extract field values from user_prompt
+      Step 2 (Python) — select type-specific section template, merge extracted fields
+      Step 3 (LLM)    — generate final HTML using the enriched context
     """
-    system_prompt = DOCUMENT_GENERATION_PROMPT.format(user_request=request.user_prompt)
+    if _is_gibberish(request.user_prompt):
+        raise HTTPException(status_code=422, detail=_err_invalid_prompt(request.user_prompt))
+
+    doc_id = request.document_id or str(uuid.uuid4())
 
     try:
-        raw_html     = await _call_llm(system_prompt, request.user_prompt)
-        cleaned_html = _clean_html(raw_html)
-
-        if not cleaned_html.strip():
+        # Step 1: query analysis
+        try:
+            analysis = await _analyze_query(request.user_prompt)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("[doc-gen] Step 1 failed")
             raise HTTPException(
-                status_code=500,
-                detail=f"AI generated empty HTML. Raw output: {raw_html[:500]}"
+                status_code=502,
+                detail=_err_model_failed("Query Analysis", request.user_prompt, str(e)),
             )
 
-        update_storage(request.document_id, cleaned_html)
-        return HTMLResponse(content=cleaned_html)
+        # Step 2: blueprint building (LLM)
+        try:
+            context = await _build_template_context(analysis, user_prompt=request.user_prompt)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("[doc-gen] Step 2 failed")
+            raise HTTPException(
+                status_code=502,
+                detail=_err_model_failed("Blueprint Building", request.user_prompt, str(e)),
+            )
+
+        # Step 3: final HTML generation
+        try:
+            cleaned_html = await _generate_html_from_context(context, request.user_prompt)
+        except Exception as e:
+            logger.exception("[doc-gen] Step 3 failed")
+            raise HTTPException(
+                status_code=502,
+                detail=_err_model_failed("HTML Generation", request.user_prompt, str(e)),
+            )
+
+        valid, reason = _validate_html(cleaned_html)
+        if not valid:
+            logger.error(f"[doc-gen] All retries exhausted — final HTML invalid: {reason}")
+            raise HTTPException(
+                status_code=500,
+                detail=_err_empty_output(request.user_prompt),
+            )
+
+        try:
+            await asyncio.to_thread(_save_document, doc_id, cleaned_html)
+        except Exception as e:
+            logger.exception("[doc-gen] Storage write failed")
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error":   "storage_failed",
+                    "message": "Your document was generated but could not be saved. Please try again.",
+                },
+            )
+
+        return HTMLResponse(content=cleaned_html, headers={"X-Document-Id": doc_id})
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+        logger.exception("[doc-gen] Unexpected error in /generate-html")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error":   "unexpected_error",
+                "message": "An unexpected error occurred. Please try again.",
+            },
+        )
 
 
 @router.post("/regenerate-html", response_class=HTMLResponse)
@@ -177,31 +848,109 @@ async def regenerate_document_html(
     Looks up HTML by document_id, applies user modifications,
     updates storage, and returns the modified HTML.
     """
-    db            = get_storage()
-    existing_html = db.get(request.document_id)
+    if _is_gibberish(request.modification_query):
+        raise HTTPException(
+            status_code=422,
+            detail=_err_invalid_modification(request.modification_query),
+        )
+
+    # Fetch existing HTML — per-doc file read, wrapped in thread
+    existing_html = await asyncio.to_thread(_load_document, request.document_id)
 
     if not existing_html:
         raise HTTPException(
             status_code=404,
-            detail=f"No document found with ID '{request.document_id}'. Generate it first."
+            detail=_err_document_not_found(request.document_id),
         )
 
+    # Intent check runs in parallel with nothing else here, but is isolated
+    # so it uses the fast model and doesn't delay the modify path unnecessarily.
+    # LLM intent check — branch based on whether user wants to modify or generate new
+    intent = await _check_regeneration_intent(request.modification_query, existing_html)
+
+    if intent == "new_document":
+        # ── New document generation path (same as /generate-html) ──────────
+        logger.info("[doc-gen] Regeneration intent=new_document — running generation pipeline")
+
+        try:
+            analysis = await _analyze_query(request.modification_query)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("[doc-gen] Step 1 failed during regeneration→generate")
+            raise HTTPException(
+                status_code=502,
+                detail=_err_model_failed("Query Analysis", request.modification_query, str(e)),
+            )
+
+        try:
+            context = await _build_template_context(analysis, user_prompt=request.modification_query)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("[doc-gen] Step 2 failed during regeneration→generate")
+            raise HTTPException(
+                status_code=502,
+                detail=_err_model_failed("Blueprint Building", request.modification_query, str(e)),
+            )
+
+        try:
+            raw_html = await _generate_html_from_context(context, request.modification_query)
+        except Exception as e:
+            logger.exception("[doc-gen] Step 3 failed during regeneration→generate")
+            raise HTTPException(
+                status_code=502,
+                detail=_err_model_failed("HTML Generation", request.modification_query, str(e)),
+            )
+
+        cleaned_html = _clean_html(raw_html)
+
+        if not cleaned_html.strip():
+            raise HTTPException(
+                status_code=500,
+                detail=_err_empty_output(request.modification_query),
+            )
+
+        doc_id = request.document_id or str(uuid.uuid4())
+        await asyncio.to_thread(_save_document, doc_id, cleaned_html)
+        return HTMLResponse(content=cleaned_html, headers={"X-Document-Id": doc_id})
+
+    # ── Modify existing document path ───────────────────────────────────────
     system_prompt = REGENERATE_PROMPT.format(
         existing_html=existing_html,
-        modification_query=request.modification_query
+        modification_query=request.modification_query,
     )
 
     try:
-        raw_html     = await _call_llm(system_prompt, request.modification_query)
-        cleaned_html = _clean_html(raw_html)
-
-        update_storage(request.document_id, cleaned_html)
-        return HTMLResponse(content=cleaned_html)
-
-    except HTTPException:
-        raise
+        raw_html, _ = await _call_llm(system_prompt, request.modification_query)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Regeneration failed: {str(e)}")
+        logger.exception("[doc-gen] Regeneration LLM call failed")
+        raise HTTPException(
+            status_code=502,
+            detail=_err_model_failed("Apply Modification", request.modification_query, str(e)),
+        )
+
+    cleaned_html = _clean_html(raw_html)
+
+    if not cleaned_html.strip():
+        raise HTTPException(
+            status_code=500,
+            detail=_err_empty_output(request.modification_query),
+        )
+
+    try:
+        await asyncio.to_thread(_save_document, request.document_id, cleaned_html)
+    except Exception as e:
+        logger.exception("[doc-gen] Storage write failed on regeneration")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error":   "storage_failed",
+                "message": "Modification was applied but could not be saved. Please try again.",
+            },
+        )
+
+    return HTMLResponse(content=cleaned_html)
 
 
 @router.get("/get-html/{document_id}", response_class=HTMLResponse)
@@ -210,10 +959,9 @@ async def get_document_html(
     _: None = Depends(verify_api_key),
 ):
     """
-    Fetches previously generated HTML from html_db.json by document_id.
+    Fetches previously generated HTML by document_id.
     """
-    db = get_storage()
-    html = db.get(document_id)
+    html = await asyncio.to_thread(_load_document, document_id)
     if not html:
         raise HTTPException(
             status_code=404,
@@ -243,8 +991,7 @@ async def html_to_pdf(
         )
 
     if request.document_id:
-        db = get_storage()
-        html_content = db.get(request.document_id)
+        html_content = await asyncio.to_thread(_load_document, request.document_id)
         if not html_content:
             raise HTTPException(
                 status_code=404,
@@ -260,42 +1007,78 @@ async def html_to_pdf(
             detail="Provide either 'document_id' or 'html' in the request body."
         )
 
+    # Only @page (for paper size and margins) plus WeasyPrint compatibility
+    # shims are injected here. Everything else — body padding, heading styles,
+    # fonts, colors — is intentionally left to the HTML's own <style> block.
+    #
+    # Why: WeasyPrint applies passed stylesheets AFTER the document's own
+    # <style> block in the CSS cascade. Rules with the same specificity that
+    # appear later win. Any body/heading reset added here therefore silently
+    # overrides the generated HTML's own layout styles, which is what caused
+    # headings to appear shifted left relative to the surrounding content.
     a4_css = """
         @page {
             size: A4 portrait;
             margin: 15mm 15mm 15mm 15mm;
         }
-        html, body {
-            width: 100%;
-            margin: 0;
-            padding: 0;
-            font-size: 11pt;
-            font-family: Arial, sans-serif;
-            color: #000;
-            background: #fff;
-            -webkit-print-color-adjust: exact;
+
+        /* WeasyPrint does not support CSS Grid — fall back to block so
+           content flows rather than disappearing entirely */
+        [style*="display: grid"],
+        [style*="display:grid"] {
+            display: block !important;
         }
-        * {
-            box-sizing: border-box;
-            max-width: 100%;
+
+        /* WeasyPrint ignores position:fixed/sticky/absolute; make them static
+           so they don't overlap page content */
+        [style*="position: fixed"],
+        [style*="position:fixed"],
+        [style*="position: sticky"],
+        [style*="position:sticky"],
+        [style*="position: absolute"],
+        [style*="position:absolute"] {
+            position: static !important;
         }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            table-layout: fixed;
-            word-wrap: break-word;
+
+        /* Fixed heights cause content to overflow and overlap the next block.
+           Force all block containers to size themselves to their content.
+           min-height is intentionally NOT reset — it is used for legitimate spacing
+           (e.g. signature areas) and does not cause overflow in PDF. */
+        div, section, article, aside, header, footer, main, li {
+            height: auto !important;
+            overflow: visible !important;
         }
-        img {
-            max-width: 100%;
-            height: auto;
+
+        /* Negative margins pull elements into the previous block — zero them. */
+        [style*="margin-top: -"],
+        [style*="margin-top:-"] {
+            margin-top: 0 !important;
+        }
+        [style*="margin-bottom: -"],
+        [style*="margin-bottom:-"] {
+            margin-bottom: 0 !important;
+        }
+
+        /* Keep major headings attached to their following paragraph across page breaks.
+           Only h1/h2 — applying to h3-h6 forces too many blocks to stay together
+           and leaves large whitespace gaps at the bottom of pages. */
+        h1, h2 {
+            break-after: avoid;
+            page-break-after: avoid;
         }
     """
 
-    try:
+    def _render_pdf() -> bytes:
         from weasyprint import CSS
-        pdf_bytes = WeasyprintHTML(string=html_content).write_pdf(
+        return WeasyprintHTML(
+            string=html_content,
+            base_url=".",
+        ).write_pdf(
             stylesheets=[CSS(string=a4_css)]
         )
+
+    try:
+        pdf_bytes = await asyncio.to_thread(_render_pdf)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF conversion failed: {str(e)}")
 
@@ -323,7 +1106,7 @@ async def base64_to_text(
             detail="Invalid base64_data — could not decode to UTF-8 text."
         )
 
-    update_storage(request.doc_id, text_content)
+    await asyncio.to_thread(_save_document, request.doc_id, text_content)
     logger.info(f"[base64-text] updated doc_id='{request.doc_id}' ({len(text_content)} chars)")
 
     return {"doc_id": request.doc_id, "char_count": len(text_content)}

@@ -100,4 +100,4 @@ weasyprint
 
 
 # Install LibreOffice (used for conversion)
-sudo apt install libreoffice -y
+#sudo apt install libreoffice -y
