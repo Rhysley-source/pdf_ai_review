@@ -451,7 +451,7 @@ Rules:
 1. Include EVERY section needed for a complete, legally sound {doc_label} — do not omit any standard section.
 2. Also include any EXTRA sections the user specifically requested (e.g. penalty clauses, witness sections, special terms).
 3. content_hint must be fully pre-filled with actual values — e.g. write "Monthly Rent: ₹18,000 (Rupees Eighteen Thousand)" not "monthly rent goes here".
-4. For every field that is missing from the request, add it to missing_fields and use a clear [Placeholder] in content_hint.
+4. For every field that is missing from the request, add it to missing_fields and use a placeholder whose text is the ACTUAL field label in brackets — e.g. [Email Address], [Phone Number], [Job Title], [Company Name]. NEVER use [Client Name], [Field Name], or any other generic label for a field that has its own name.
 5. layout_notes must describe the exact table/structure needed (not just "standard layout").
 6. Return ONLY raw JSON. No markdown, no backticks, no explanation.""",
     input_variables=["doc_type", "doc_label", "extracted_fields", "required_sections", "user_request"],
@@ -481,7 +481,7 @@ Original User Request:
 - Include <html>, <head> with ONE embedded <style> block, and <body>.
 - Add contenteditable="true" to the outermost content div inside <body>.
 - Render every blueprint section in order using its content_hint as the source.
-- Replace any [Placeholder] with a visible label: <span>[Client Name]</span>.
+- Wherever the blueprint shows a [Placeholder], render it as a styled span using the EXACT placeholder text from the blueprint — e.g. if the blueprint says [Email Address] write <span style="color:#cc0000;">[Email Address]</span>, if it says [Phone Number] write <span style="color:#cc0000;">[Phone Number]</span>. NEVER replace every placeholder with [Client Name] — each placeholder must show its own specific field name.
 - Do NOT include markdown backticks, explanations, or any text outside the HTML.
 
 ━━━ DESIGN RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
