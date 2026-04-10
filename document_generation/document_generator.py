@@ -505,15 +505,7 @@ async def _analyze_query(user_prompt: str) -> dict:
     if not analysis.get("is_document_request", True):
         raise HTTPException(
             status_code=422,
-            detail=(
-                "Your query is not related to document generation.\n\n"
-                "Please provide a request to create a specific document. Examples:\n"
-                "  • \"Generate a service agreement between Company A and Company B\"\n"
-                "  • \"Create an invoice for web development services worth $2,000\"\n"
-                "  • \"Draft an employment offer letter for a software engineer\"\n"
-                "  • \"Make a non-disclosure agreement between two parties\"\n"
-                "  • \"Write a residential lease agreement for a 1-year term\""
-            ),
+            detail=_err_not_document_request(analysis.get("_user_prompt", "")),
         )
 
     return analysis
