@@ -157,7 +157,7 @@ async def _call_llm(
     max_tokens:    int = _MAX_TOKENS_HTML,
     temperature:   float | None = None,
     use_seed:      bool = True,
-) -> str:
+) -> tuple[str, str]:
     """
     Core LLM caller. Uses the full generation model by default.
     Pass model=_FAST_MODEL for lightweight JSON classification steps.
@@ -753,8 +753,6 @@ async def generate_document_html(
                 detail=_err_model_failed("Query Analysis", request.user_prompt, str(e)),
             )
 
-        analysis_info = _analysis_summary(analysis)
-
         # Step 2: blueprint building (LLM)
         try:
             context = await _build_template_context(analysis)
@@ -856,8 +854,6 @@ async def regenerate_document_html(
                 detail=_err_model_failed("Query Analysis", request.modification_query, str(e)),
             )
 
-        analysis_info = _analysis_summary(analysis)
-
         try:
             context = await _build_template_context(analysis)
         except HTTPException:
@@ -897,7 +893,7 @@ async def regenerate_document_html(
     )
 
     try:
-        raw_html = await _call_llm(system_prompt, request.modification_query)
+        raw_html, _ = await _call_llm(system_prompt, request.modification_query)
     except Exception as e:
         logger.exception("[doc-gen] Regeneration LLM call failed")
         raise HTTPException(
@@ -1016,10 +1012,11 @@ async def html_to_pdf(
         }
 
         /* Fixed heights cause content to overflow and overlap the next block.
-           Force all block containers to size themselves to their content. */
+           Force all block containers to size themselves to their content.
+           min-height is intentionally NOT reset — it is used for legitimate spacing
+           (e.g. signature areas) and does not cause overflow in PDF. */
         div, section, article, aside, header, footer, main, li {
             height: auto !important;
-            min-height: 0 !important;
             overflow: visible !important;
         }
 
@@ -1042,14 +1039,17 @@ async def html_to_pdf(
         }
     """
 
-    try:
+    def _render_pdf() -> bytes:
         from weasyprint import CSS
-        pdf_bytes = WeasyprintHTML(
+        return WeasyprintHTML(
             string=html_content,
             base_url=".",
         ).write_pdf(
             stylesheets=[CSS(string=a4_css)]
         )
+
+    try:
+        pdf_bytes = await asyncio.to_thread(_render_pdf)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF conversion failed: {str(e)}")
 

@@ -455,52 +455,87 @@ Rules:
 # ---------------------------------------------------------------------------
 
 DOCUMENT_GENERATION_V2_PROMPT = SimulatedPromptTemplate(
-    template="""You are an expert document generator.
+    template="""You are an expert document generator. Produce a single complete HTML document that looks identical when viewed in a browser and when converted to PDF.
 
 Document Type : {doc_label} ({doc_type})
 Tone          : {tone}
 Layout Notes  : {layout_notes}
 
-Document Blueprint — generate each section exactly as described:
+Document Blueprint — generate each section in this exact order:
 {sections_block}
 
 Original User Request:
 {user_request}
 
-Instructions:
-- Generate a complete, well-structured HTML document following the blueprint above.
-- The HTML must include <html>, <head> (with embedded <style>), and <body> tags.
-- Add contenteditable="true" to the main content container inside <body>.
-- Render every section in the given order using its content_hint as the source of truth.
-- Replace any [Placeholder] with a clearly visible bracketed label in the HTML (e.g. <span>[Client Name]</span>).
-- Use professional formatting, language, and layout appropriate for the tone and layout notes above.
+━━━ INSTRUCTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Return ONLY the complete HTML, starting with <html> and ending with </html>.
+- Include <html>, <head> with ONE embedded <style> block, and <body>.
+- Add contenteditable="true" to the outermost content div inside <body>.
+- Render every blueprint section in order using its content_hint as the source.
+- Replace any [Placeholder] with a visible label: <span>[Client Name]</span>.
 - Do NOT include markdown backticks, explanations, or any text outside the HTML.
-- Return ONLY the complete HTML starting with <html> and ending with </html>.
 
-STRICT DESIGN RULES — follow exactly:
-- Flat layout only. No box-shadow, no text-shadow, no drop-shadow, no 3D effects.
-- No gradients (no linear-gradient, no radial-gradient, no background-image).
-- No rounded corners (border-radius must be 0 or omitted entirely).
-- No floating card or panel wrappers with background color + padding.
-- Body background must be plain white (#ffffff). No colored backgrounds on any section.
-- Content must fill the full page width. No narrow centered containers with large side margins.
-- Allowed CSS only: width, padding, margin, border, font, color, text-align, display, table properties.
-- Font: Arial or sans-serif, 11pt–12pt for body text.
-- Section dividers: use <hr> or border-bottom only — no colored divider blocks.
-- Tables: width:100%, 1px solid border, no background colors on rows.
-- The result must look like a clean printed document — not a web app widget.
+━━━ DESIGN RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Flat design only — no box-shadow, text-shadow, drop-shadow, or 3D effects.
+- No gradients, no background-image, no border-radius.
+- Body background: plain white (#ffffff). No colored section backgrounds.
+- Font: Arial, sans-serif. Body text 11pt. Section headings 12pt–14pt.
+- Content must fill the full page width — no narrow centered containers.
+- Section dividers: <hr style="border:none; border-top:1px solid #cccccc; margin:10px 0;"> only.
+- The result must look like a clean printed document, not a web widget.
 
-PDF-SAFE RULES — the HTML will be converted to PDF. Follow these exactly to prevent layout shifts and text overlap:
-- NEVER use display:flex or display:grid anywhere — use block elements, tables, and floats only.
-- NEVER rely on inheritance for heading styles. Every h1/h2/h3/h4/h5/h6 element MUST have all of these set explicitly as inline style attributes (not in <style>): font-size, font-weight, text-align, margin-top, margin-bottom, color.
-  Example: <h2 style="font-size:14pt; font-weight:bold; text-align:left; margin-top:12px; margin-bottom:6px; color:#000;">Section Title</h2>
+━━━ PDF-SAFE RULES (WeasyPrint — every rule is mandatory) ━━━━━━━━
+LAYOUT
+- NEVER use display:flex or display:grid.
+- For ALL side-by-side or multi-column content use <table> — never floats.
+  Two-column pattern:
+  <table width="100%" style="border-collapse:collapse; margin-bottom:10px;"><tr>
+    <td style="width:50%; vertical-align:top; padding:0;">LEFT CONTENT</td>
+    <td style="width:50%; vertical-align:top; padding:0; text-align:right;">RIGHT CONTENT</td>
+  </tr></table>
 - NEVER use position:fixed, position:sticky, or position:absolute.
-- NEVER use margin:auto for centering — use text-align:center on the element itself.
-- Use only pt or px units for font-size — never em or rem.
-- NEVER set a fixed height (height:Xpx or height:Xpt) on any div, section, or container — use padding-top and padding-bottom instead. Fixed heights cause text to overflow and overlap the next block in PDF.
-- NEVER use overflow:hidden or overflow:scroll — these are ignored in PDF and cause content to bleed into adjacent elements.
-- NEVER use negative margin values (e.g. margin-top:-10px) — they cause elements to overlap in PDF.
-- If you use float:left or float:right, always add a clearing div immediately after: <div style="clear:both;"></div>""",
+- NEVER use margin:auto — center text with text-align:center on the element itself.
+- NEVER use negative margin values.
+
+HEADINGS
+- Every h1–h6 MUST have ALL of these as inline style attributes (not in <style>):
+  font-size, font-weight, text-align, margin-top, margin-bottom, color.
+  Example: <h2 style="font-size:13pt; font-weight:bold; text-align:left; margin-top:14px; margin-bottom:6px; color:#000000;">
+
+SIZING & SPACING
+- font-size: use pt or px only — never em, rem, %, or vw.
+- Set line-height:1.5 on the body style and on every <p> element.
+- NEVER set a fixed height on any element — use padding-top and padding-bottom for spacing.
+- NEVER use min-height — use padding instead.
+- NEVER use overflow:hidden or overflow:scroll.
+
+TABLES
+- Every data table MUST have: style="width:100%; border-collapse:collapse; table-layout:fixed;"
+- Every <th> and <td> MUST have: explicit padding (e.g. padding:6px 8px) and border (e.g. border:1px solid #cccccc).
+- Add style="word-wrap:break-word; overflow-wrap:break-word;" to <td> cells that may contain long text, URLs, or amounts.
+- Add style="page-break-inside:avoid;" to any table that must not be split across PDF pages.
+
+PAGE BREAKS
+- Add style="page-break-inside:avoid;" to signature blocks and sections that must stay together.
+- Do NOT add page-break rules to normal paragraph sections — let content flow naturally.
+
+━━━ REQUIRED HTML SKELETON ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Start every document from this base — fill in <style> and body content:
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.5; color: #000000; background: #ffffff; margin: 0; padding: 24px; }
+    p    { margin: 0 0 8px 0; line-height: 1.5; }
+    /* Add document-specific class styles here */
+  </style>
+</head>
+<body>
+  <div contenteditable="true">
+    <!-- ALL document content here -->
+  </div>
+</body>
+</html>""",
     input_variables=["doc_type", "doc_label", "tone", "layout_notes", "sections_block", "user_request"],
 )
 
@@ -511,24 +546,21 @@ PDF-SAFE RULES — the HTML will be converted to PDF. Follow these exactly to pr
 # ---------------------------------------------------------------------------
 
 REGENERATE_PROMPT = SimulatedPromptTemplate(
-    template="""You are an expert HTML editor.
-You will be provided with an existing HTML document and a user's request for modification.
+    template="""You are an expert HTML editor. Apply the user's modification to the existing HTML document while keeping the design and layout identical everywhere that was not changed.
 
-GOAL:
-Update the existing HTML content based on the user's instructions while maintaining the exact same CSS styles, design, and layout.
-
-STRICT RULES:
-1. Return ONLY the complete, updated HTML document starting with <html> and ending with </html>.
-2. Ensure the main content container inside <body> remains contenteditable='true'.
-3. Do NOT include markdown backticks (```html), explanations, or notes.
-4. Preserve all original <style> blocks and CSS logic.
-5. Apply the changes requested by the user accurately.
-6. Do NOT introduce box-shadow, text-shadow, gradients, border-radius, or colored background panels — keep the design flat and print-ready.
-7. Do NOT use display:flex or display:grid — block elements and tables only.
-8. Every h1/h2/h3/h4/h5/h6 MUST keep all inline style attributes (font-size, font-weight, text-align, margin-top, margin-bottom, color) explicitly set — do not remove or move them to a <style> block.
-9. Do NOT set a fixed height on any div or container — use padding only.
-10. Do NOT use overflow:hidden or negative margin values — they cause text overlap in PDF.
-11. If float is used, always follow with <div style="clear:both;"></div>.
+RULES:
+1. Return ONLY the complete updated HTML — starting with <html>, ending with </html>.
+2. Keep contenteditable="true" on the outermost content div inside <body>.
+3. No markdown backticks, explanations, or text outside the HTML.
+4. Preserve all original <style> blocks and CSS — only change what the user requested.
+5. Keep the design flat and print-ready: no box-shadow, text-shadow, gradients, border-radius, or colored section backgrounds.
+6. Do NOT use display:flex or display:grid. For any side-by-side layout use <table> only.
+7. Every h1–h6 must keep all inline style attributes (font-size, font-weight, text-align, margin-top, margin-bottom, color) set directly on the element — do not move them to <style>.
+8. Do NOT set fixed height or min-height on any container — use padding only.
+9. Do NOT use overflow:hidden, overflow:scroll, negative margins, or position:fixed/absolute/sticky.
+10. Every data table must have style="width:100%; border-collapse:collapse; table-layout:fixed;" and all <td>/<th> must have explicit padding and border.
+11. Add style="word-wrap:break-word; overflow-wrap:break-word;" to <td> cells containing long text, URLs, or amounts.
+12. Add style="page-break-inside:avoid;" to signature blocks and any section that must not split across PDF pages.
 
 Existing HTML:
 {existing_html}
