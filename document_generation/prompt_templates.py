@@ -419,33 +419,42 @@ def build_generation_context(analysis: dict, section_template: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 TEMPLATE_BUILD_PROMPT = SimulatedPromptTemplate(
-    template="""You are a document blueprint specialist. Your job is to produce a precise, filled-in document plan for a "{doc_label}" document.
+    template="""You are a document blueprint specialist. Your job is to produce a detailed, fully pre-filled section plan for a "{doc_label}" document so that a document generator can produce the complete document without any guesswork.
 
-You are given:
-  Document Type : {doc_label} ({doc_type})
-  Extracted Fields (from user request):
+Document Type  : {doc_label} ({doc_type})
+
+Fields extracted from the request:
 {extracted_fields}
+
+Standard sections for this document type:
+{required_sections}
+
+Full user request (use this to extract every detail, clause, or requirement the user mentioned):
+{user_request}
 
 YOUR TASK — return ONLY a valid JSON object with exactly these keys:
 
 {{
+  "document_title": "<exact title to display at the top of the document, e.g. 'RENT AGREEMENT', 'TAX INVOICE', 'SERVICE AGREEMENT'>",
   "sections": [
     {{
       "title": "<section heading>",
-      "content_hint": "<what to write in this section — include actual field values where known, use [Placeholder] for missing ones>"
+      "content_hint": "<complete, detailed description of exactly what to write in this section. Embed ALL known values directly — names, amounts, dates, addresses, durations. Mark every missing required value as [Field Name]. Be specific enough that no further instructions are needed.>",
+      "missing_fields": ["<name of each required field not found in the request>"]
     }}
   ],
-  "tone": "<professional | formal | friendly | technical — choose the most appropriate for this document type>",
-  "layout_notes": "<one sentence about layout specifics, e.g. table for line items, two-column header, centered title>"
+  "tone": "<formal | professional | friendly | technical — pick the best fit for this document type>",
+  "layout_notes": "<specific layout instruction — e.g. 'Two-column header table with landlord left, tenant right. Numbered clauses for all terms. Signature table at the bottom with two columns.'>"
 }}
 
 Rules:
-- Include ALL sections required for a complete, professional {doc_label}.
-- In each content_hint, embed the actual extracted field values directly (e.g. "Vendor: Acme Corp", not just "vendor name goes here").
-- For missing fields use visible placeholders like [Client Name], [Invoice Date], etc.
-- Tailor sections specifically to "{doc_label}" — not generic boilerplate.
-- Return ONLY the raw JSON. No markdown, no backticks, no explanation.""",
-    input_variables=["doc_type", "doc_label", "extracted_fields"],
+1. Include EVERY section needed for a complete, legally sound {doc_label} — do not omit any standard section.
+2. Also include any EXTRA sections the user specifically requested (e.g. penalty clauses, witness sections, special terms).
+3. content_hint must be fully pre-filled with actual values — e.g. write "Monthly Rent: ₹18,000 (Rupees Eighteen Thousand)" not "monthly rent goes here".
+4. For every field that is missing from the request, add it to missing_fields and use a clear [Placeholder] in content_hint.
+5. layout_notes must describe the exact table/structure needed (not just "standard layout").
+6. Return ONLY raw JSON. No markdown, no backticks, no explanation.""",
+    input_variables=["doc_type", "doc_label", "extracted_fields", "required_sections", "user_request"],
 )
 
 

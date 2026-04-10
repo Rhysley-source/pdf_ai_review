@@ -145,16 +145,17 @@ _MAX_COMPLETION_TOKENS_MODELS = {
 }
 
 # Token budgets per step
-_MAX_TOKENS_HTML  = 16384  # Step 3: full HTML document (raised — verbose inline styles need more room)
-_MAX_TOKENS_JSON  = 2048   # Steps 1+2: small JSON responses
-_HTML_GEN_RETRIES = 3      # Step 3 retry attempts on empty/null response
+_MAX_TOKENS_HTML      = None  # Step 3: no cap — documents can be any size; model uses its own maximum
+_MAX_TOKENS_BLUEPRINT = 4096  # Step 2: detailed pre-filled section plan — needs more room than plain JSON
+_MAX_TOKENS_JSON      = 2048  # Step 1: small JSON classification response
+_HTML_GEN_RETRIES     = 3     # Step 3 retry attempts on empty/null response
 
 
 async def _call_llm(
     system_prompt: str,
     user_message:  str,
     model:         str | None = None,
-    max_tokens:    int = _MAX_TOKENS_HTML,
+    max_tokens:    int | None = _MAX_TOKENS_HTML,
     temperature:   float | None = None,
     use_seed:      bool = True,
 ) -> tuple[str, str]:
@@ -163,7 +164,7 @@ async def _call_llm(
     Pass model=_FAST_MODEL for lightweight JSON classification steps.
     Pass max_tokens to cap output length per call.
     Pass temperature to control randomness (None = model default / steps 1+2 use 0).
-    Pass use_seed=False to skip the deterministic seed (step 3 HTML generation).
+    Pass use_seed=False to skip the deterministic seed (all steps now use True).
     """
     model = model or os.environ.get("MODEL_NAME", _MODEL)
 
@@ -183,11 +184,13 @@ async def _call_llm(
     if model not in _FIXED_TEMPERATURE_MODELS:
         kwargs["temperature"] = temperature if temperature is not None else 0
 
-    # Token limit — parameter name differs by model family
-    if model in _MAX_COMPLETION_TOKENS_MODELS:
-        kwargs["max_completion_tokens"] = max_tokens
-    else:
-        kwargs["max_tokens"] = max_tokens
+    # Token limit — omitted when None so the model uses its own built-in maximum.
+    # Steps 1+2 always pass an explicit limit; Step 3 (HTML generation) passes None.
+    if max_tokens is not None:
+        if model in _MAX_COMPLETION_TOKENS_MODELS:
+            kwargs["max_completion_tokens"] = max_tokens
+        else:
+            kwargs["max_tokens"] = max_tokens
 
     try:
         response = await _CLIENT.chat.completions.create(**kwargs)
@@ -532,19 +535,29 @@ def _parse_blueprint_json(raw: str, analysis: dict) -> dict:
         logger.warning("[doc-gen] Step 2: empty sections in blueprint — falling back to static template")
         return _static_template_context(analysis)
 
-    # Build the sections_block string for Step 3
+    # Build the sections_block string for Step 3 — include missing_fields so
+    # Step 3 knows exactly which placeholders to render visibly in the document.
     lines = []
     for i, sec in enumerate(sections, 1):
-        title        = sec.get("title", f"Section {i}")
-        content_hint = sec.get("content_hint", "")
-        lines.append(f"{i}. {title}\n   → {content_hint}")
+        title          = sec.get("title", f"Section {i}")
+        content_hint   = sec.get("content_hint", "")
+        missing        = sec.get("missing_fields", [])
+        entry          = f"{i}. {title}\n   → {content_hint}"
+        if missing:
+            entry += f"\n   ⚠ Missing fields (use visible placeholders): {', '.join(missing)}"
+        lines.append(entry)
     sections_block = "\n\n".join(lines)
 
+    # document_title from blueprint overrides the generic doc_label for the
+    # actual heading shown in the document (e.g. "RENT AGREEMENT" vs "Lease Agreement")
+    doc_label      = analysis.get("doc_label", "Document")
+    document_title = (parsed.get("document_title") or "").strip() or doc_label
+
     return {
-        "doc_type":      analysis.get("doc_type", "other"),
-        "doc_label":     analysis.get("doc_label", "Document"),
-        "tone":          parsed.get("tone", "professional"),
-        "layout_notes":  parsed.get("layout_notes", "Standard document layout."),
+        "doc_type":       analysis.get("doc_type", "other"),
+        "doc_label":      document_title,
+        "tone":           parsed.get("tone", "professional"),
+        "layout_notes":   parsed.get("layout_notes", "Standard document layout."),
         "sections_block": sections_block,
     }
 
@@ -569,28 +582,44 @@ def _static_template_context(analysis: dict) -> dict:
     }
 
 
-async def _build_template_context(analysis: dict) -> dict:
-    """Step 2 — fast LLM call to build a tailored document blueprint.
-    Uses the fast model (JSON output only).
+async def _build_template_context(analysis: dict, user_prompt: str = "") -> dict:
+    """Step 2 — builds a detailed, pre-filled document blueprint.
+
+    Uses the fast model but with a higher token budget (_MAX_TOKENS_BLUEPRINT)
+    so every section gets a complete content_hint with all field values embedded.
+
+    Passes three inputs to the blueprint prompt:
+      - extracted_fields  : structured key→value pairs from Step 1
+      - required_sections : standard sections for this document type
+      - user_request      : the original full user prompt, so any extra details,
+                            clauses, or requirements the user mentioned are captured
     Falls back to the static Python template on parse failure.
-    Always calls the LLM — no caching.
     """
     doc_type  = analysis.get("doc_type", "other")
     doc_label = analysis.get("doc_label", "Document")
 
-    # Build extracted_fields string to pass into the prompt
-    section_template = SECTION_TEMPLATES.get(doc_type, SECTION_TEMPLATES["other"])
-    base_context     = build_generation_context(analysis, section_template)
-    extracted_fields = base_context["extracted_fields"]
+    section_template  = SECTION_TEMPLATES.get(doc_type, SECTION_TEMPLATES["other"])
+    base_context      = build_generation_context(analysis, section_template)
+    extracted_fields  = base_context["extracted_fields"]
+    required_sections = base_context["required_sections"]
 
     system_prompt = TEMPLATE_BUILD_PROMPT.format(
         doc_type=doc_type,
         doc_label=doc_label,
         extracted_fields=extracted_fields,
+        required_sections=required_sections,
+        user_request=user_prompt,
     )
 
-    logger.info(f"[doc-gen] Step 2: building blueprint for '{doc_label}' (fast model)...")
-    raw = await _call_llm_fast(system_prompt, f"Build the document blueprint for: {doc_label}")
+    logger.info(f"[doc-gen] Step 2: building blueprint for '{doc_label}'...")
+    raw, _ = await _call_llm(
+        system_prompt,
+        f"Build the complete, pre-filled document blueprint for: {doc_label}",
+        model=_FAST_MODEL,
+        max_tokens=_MAX_TOKENS_BLUEPRINT,
+        temperature=0,
+        use_seed=True,
+    )
     logger.info(f"[doc-gen] Step 2 raw output: {raw[:300]}")
 
     return _parse_blueprint_json(raw, analysis)
@@ -615,11 +644,12 @@ def _analysis_summary(analysis: dict) -> dict:
 async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
     """
     Step 3 — final LLM call using the enriched blueprint context.
-    Retries up to _HTML_GEN_RETRIES times on empty/null response.
+    Retries up to _HTML_GEN_RETRIES times on truncated or invalid response.
 
-    Why retry works: temperature=0.4 + use_seed=False means every call is
-    non-deterministic. Each retry is a genuinely fresh attempt, not a repeat
-    of the same empty output.
+    Deterministic by design:
+      - temperature=0.2 + use_seed=True → consistent output with minimal variation
+      - seed derived from SHA-256(system_prompt + user_prompt)
+    Same query → same blueprint (Step 2 temperature=0) → same seed → stable HTML.
     """
     system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
         **context,
@@ -633,19 +663,26 @@ async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
             logger.warning(f"[doc-gen] Step 3: retry {attempt}/{_HTML_GEN_RETRIES}")
 
         try:
-            # temperature=0.4 — slight variation each call so same prompt gives
-            # fresh output on every request and every retry.
-            # use_seed=False — no deterministic seed.
             raw, finish = await _call_llm(
                 system_prompt,
                 user_prompt,
-                temperature=0.4,
-                use_seed=False,
+                temperature=0.2,
+                use_seed=True,
             )
         except Exception:
             if attempt == _HTML_GEN_RETRIES:
                 raise
             logger.warning(f"[doc-gen] Step 3: LLM call failed on attempt {attempt} — retrying")
+            continue
+
+        # Truncated response — model ran out of output tokens mid-generation.
+        # Must retry regardless of whether the HTML structure looks valid,
+        # because the document content itself is incomplete.
+        if finish == "length":
+            logger.warning(
+                f"[doc-gen] Step 3: response truncated (finish=length) on attempt "
+                f"{attempt}/{_HTML_GEN_RETRIES} — retrying"
+            )
             continue
 
         cleaned         = _clean_html(raw)
@@ -747,7 +784,7 @@ async def generate_document_html(
 
         # Step 2: blueprint building (LLM)
         try:
-            context = await _build_template_context(analysis)
+            context = await _build_template_context(analysis, user_prompt=request.user_prompt)
         except HTTPException:
             raise
         except Exception as e:
@@ -847,7 +884,7 @@ async def regenerate_document_html(
             )
 
         try:
-            context = await _build_template_context(analysis)
+            context = await _build_template_context(analysis, user_prompt=request.modification_query)
         except HTTPException:
             raise
         except Exception as e:
