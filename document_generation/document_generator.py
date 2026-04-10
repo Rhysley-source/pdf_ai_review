@@ -960,34 +960,44 @@ async def html_to_pdf(
             margin: 15mm 15mm 15mm 15mm;
         }
         html, body {
-            width: 100%;
             margin: 0;
             padding: 0;
-            font-size: 11pt;
-            font-family: Arial, sans-serif;
             color: #000;
             background: #fff;
-            -webkit-print-color-adjust: exact;
-        }
-        * {
-            box-sizing: border-box;
-            max-width: 100%;
+            -weasy-print-color-adjust: exact;
         }
         table {
-            width: 100%;
             border-collapse: collapse;
-            table-layout: fixed;
             word-wrap: break-word;
+        }
+        td, th {
+            overflow: hidden;
         }
         img {
             max-width: 100%;
             height: auto;
         }
+        /* WeasyPrint does not support CSS Grid — convert to block so content
+           at least flows top-to-bottom rather than disappearing */
+        [style*="display: grid"],
+        [style*="display:grid"] {
+            display: block !important;
+        }
+        /* Prevent fixed/sticky elements from overflowing the page */
+        [style*="position: fixed"],
+        [style*="position:fixed"],
+        [style*="position: sticky"],
+        [style*="position:sticky"] {
+            position: static !important;
+        }
     """
 
     try:
         from weasyprint import CSS
-        pdf_bytes = WeasyprintHTML(string=html_content).write_pdf(
+        pdf_bytes = WeasyprintHTML(
+            string=html_content,
+            base_url=".",          # resolves relative font/image paths
+        ).write_pdf(
             stylesheets=[CSS(string=a4_css)]
         )
     except Exception as e:
