@@ -960,34 +960,63 @@ async def html_to_pdf(
             margin: 15mm 15mm 15mm 15mm;
         }
         html, body {
-            width: 100%;
             margin: 0;
             padding: 0;
-            font-size: 11pt;
-            font-family: Arial, sans-serif;
             color: #000;
             background: #fff;
-            -webkit-print-color-adjust: exact;
+            -weasy-print-color-adjust: exact;
         }
-        * {
-            box-sizing: border-box;
-            max-width: 100%;
+
+        /* ── Heading alignment fix ──────────────────────────────────────────
+           WeasyPrint's UA stylesheet uses margin-block-start / margin-block-end
+           (CSS logical properties) for h1-h6. Their physical translations differ
+           from Chrome's defaults and cause headings to appear shifted/indented.
+           Resetting only the physical left/right margin+padding corrects this
+           without touching text-align, font-size, or color set in the HTML.
+           break-after:avoid keeps a heading attached to its following content
+           so it never strands alone at the bottom of a page.
+        ─────────────────────────────────────────────────────────────────── */
+        h1, h2, h3, h4, h5, h6 {
+            display: block;
+            margin-left: 0;
+            margin-right: 0;
+            padding-left: 0;
+            padding-right: 0;
+            break-after: avoid;
+            page-break-after: avoid;
         }
+
         table {
-            width: 100%;
             border-collapse: collapse;
-            table-layout: fixed;
             word-wrap: break-word;
+        }
+        td, th {
+            overflow: hidden;
         }
         img {
             max-width: 100%;
             height: auto;
         }
+        /* WeasyPrint does not support CSS Grid — fall back to block */
+        [style*="display: grid"],
+        [style*="display:grid"] {
+            display: block !important;
+        }
+        /* WeasyPrint ignores fixed/sticky — make them static to avoid overlap */
+        [style*="position: fixed"],
+        [style*="position:fixed"],
+        [style*="position: sticky"],
+        [style*="position:sticky"] {
+            position: static !important;
+        }
     """
 
     try:
         from weasyprint import CSS
-        pdf_bytes = WeasyprintHTML(string=html_content).write_pdf(
+        pdf_bytes = WeasyprintHTML(
+            string=html_content,
+            base_url=".",
+        ).write_pdf(
             stylesheets=[CSS(string=a4_css)]
         )
     except Exception as e:
