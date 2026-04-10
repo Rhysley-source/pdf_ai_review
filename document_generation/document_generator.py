@@ -176,7 +176,7 @@ async def _call_llm(
         ],
     }
 
-    # Seed — skipped for Step 3 so each HTML generation call is fresh
+    # Seed — used by all steps; pass use_seed=False to skip for non-deterministic calls
     if use_seed:
         kwargs["seed"] = _prompt_seed(system_prompt, user_message)
 
@@ -505,7 +505,7 @@ async def _analyze_query(user_prompt: str) -> dict:
     analysis = _parse_analysis_json(raw)
     analysis["_user_prompt"] = user_prompt
 
-    if not analysis.get("is_document_request", True):
+    if not analysis.get("is_document_request", False):
         raise HTTPException(
             status_code=422,
             detail=_err_not_document_request(analysis.get("_user_prompt", "")),

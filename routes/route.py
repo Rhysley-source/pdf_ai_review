@@ -483,7 +483,7 @@ async def analyze_pdf_stream(
                 elif event_type == "synthesis_done":
                     # Fired for both single- and multi-chunk paths
                     final_overview = payload.get("overview", final_overview)
-                    final_summary  = payload.get("summary", "")
+                    final_summary  = payload.get("summary", final_summary)
                     if analysis_type in (0, 1):
                         yield _sse("overview", {"text": final_overview})
                         overview_sent = True

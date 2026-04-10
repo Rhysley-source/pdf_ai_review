@@ -2,10 +2,9 @@ import logging
 import logging.config
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from routes.route import router
 from routes.convert_route import router as convert_router
@@ -167,13 +166,35 @@ app.include_router(document_generate_router)
 # Global exception handlers
 # ---------------------------------------------------------------------------
 
-@app.exception_handler(StarletteHTTPException)
-async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    """Pass through HTTPExceptions unchanged — they are already formatted."""
-    detail = exc.detail
+def _build_error_response(detail) -> dict:
+    """
+    Converts an HTTPException detail (any type) into a flat, clean dict
+    suitable for JSONResponse. Never raises — always returns a valid dict.
+    """
+    if isinstance(detail, dict):
+        # Already structured — ensure required keys exist
+        return {
+            "status":  "error",
+            "error":   str(detail.get("error", "request_error")),
+            "message": str(detail.get("message", "An error occurred.")),
+        }
     if isinstance(detail, str):
-        detail = {"error": "request_error", "message": detail}
-    return JSONResponse(status_code=exc.status_code, content={"status": "error", **detail})
+        return {"status": "error", "error": "request_error", "message": detail}
+    # Fallback for any other type (None, list, etc.)
+    return {"status": "error", "error": "request_error", "message": str(detail) if detail else "An error occurred."}
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """
+    Handles all FastAPI / Starlette HTTPExceptions.
+    Converts any detail format into a consistent flat JSON response:
+      { "status": "error", "error": "...", "message": "..." }
+    """
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_build_error_response(exc.detail),
+    )
 
 
 @app.exception_handler(RequestValidationError)
@@ -197,9 +218,13 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def global_exception_handler(request: Request, exc: Exception):
     """
     Catch-all for any unhandled exception.
-    Classifies the error and returns a clean, user-friendly JSON response.
-    Raw error details are logged server-side but never exposed to the client.
+    HTTPExceptions are delegated to http_exception_handler so they are never
+    double-wrapped. All other exceptions are classified and returned as a clean
+    user-friendly JSON response. Raw details are logged but never exposed.
     """
+    if isinstance(exc, HTTPException):
+        return await http_exception_handler(request, exc)
+
     status_code, error_code, message = _classify_error(exc)
     logger.exception(
         f"[{error_code}] Unhandled exception on {request.method} {request.url.path}: {exc}"
