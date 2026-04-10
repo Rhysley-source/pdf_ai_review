@@ -168,20 +168,20 @@ app.include_router(document_generate_router)
 
 def _build_error_response(detail) -> dict:
     """
-    Converts an HTTPException detail (any type) into a flat, clean dict
+    Converts an HTTPException detail (any type) into a structured dict
     suitable for JSONResponse. Never raises — always returns a valid dict.
     """
     if isinstance(detail, dict):
-        # Already structured — ensure required keys exist
         return {
-            "status":  "error",
-            "error":   str(detail.get("error", "request_error")),
-            "message": str(detail.get("message", "An error occurred.")),
+            "detail": {
+                "error":   str(detail.get("error", "request_error")),
+                "message": str(detail.get("message", "An error occurred.")),
+            }
         }
     if isinstance(detail, str):
-        return {"status": "error", "error": "request_error", "message": detail}
+        return {"detail": {"error": "request_error", "message": detail}}
     # Fallback for any other type (None, list, etc.)
-    return {"status": "error", "error": "request_error", "message": str(detail) if detail else "An error occurred."}
+    return {"detail": {"error": "request_error", "message": str(detail) if detail else "An error occurred."}}
 
 
 @app.exception_handler(HTTPException)
@@ -207,9 +207,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(
         status_code=422,
         content={
-            "status":  "error",
-            "error":   "validation_error",
-            "message": f"{field}: {msg}" if field else msg,
+            "detail": {
+                "error":   "validation_error",
+                "message": f"{field}: {msg}" if field else msg,
+            }
         },
     )
 
@@ -232,8 +233,9 @@ async def global_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=status_code,
         content={
-            "status":  "error",
-            "error":   error_code,
-            "message": message,
+            "detail": {
+                "error":   error_code,
+                "message": message,
+            }
         },
     )
