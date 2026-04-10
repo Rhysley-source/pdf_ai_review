@@ -145,8 +145,9 @@ _MAX_COMPLETION_TOKENS_MODELS = {
 }
 
 # Token budgets per step
-_MAX_TOKENS_HTML  = 8192   # Step 3: full HTML document
+_MAX_TOKENS_HTML  = 16384  # Step 3: full HTML document (raised — verbose inline styles need more room)
 _MAX_TOKENS_JSON  = 2048   # Steps 1+2: small JSON responses
+_HTML_GEN_RETRIES = 3      # Step 3 retry attempts on empty/null response
 
 
 async def _call_llm(
@@ -154,11 +155,15 @@ async def _call_llm(
     user_message:  str,
     model:         str | None = None,
     max_tokens:    int = _MAX_TOKENS_HTML,
+    temperature:   float | None = None,
+    use_seed:      bool = True,
 ) -> str:
     """
     Core LLM caller. Uses the full generation model by default.
     Pass model=_FAST_MODEL for lightweight JSON classification steps.
     Pass max_tokens to cap output length per call.
+    Pass temperature to control randomness (None = model default / steps 1+2 use 0).
+    Pass use_seed=False to skip the deterministic seed (step 3 HTML generation).
     """
     model = model or os.environ.get("MODEL_NAME", _MODEL)
 
@@ -168,12 +173,15 @@ async def _call_llm(
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": user_message},
         ],
-        "seed": _prompt_seed(system_prompt, user_message),
     }
 
-    # temperature=0 → greedy decoding, fully deterministic output
+    # Seed — skipped for Step 3 so each HTML generation call is fresh
+    if use_seed:
+        kwargs["seed"] = _prompt_seed(system_prompt, user_message)
+
+    # Temperature — models in _FIXED_TEMPERATURE_MODELS don't accept this param
     if model not in _FIXED_TEMPERATURE_MODELS:
-        kwargs["temperature"] = 0
+        kwargs["temperature"] = temperature if temperature is not None else 0
 
     # Token limit — parameter name differs by model family
     if model in _MAX_COMPLETION_TOKENS_MODELS:
@@ -191,8 +199,8 @@ async def _call_llm(
             f"out={response.usage.completion_tokens} finish={finish}"
         )
         if finish == "length":
-            logger.warning("[html-gen] Response was cut off — increase max_tokens if HTML is incomplete")
-        return content
+            logger.warning("[html-gen] finish=length — response was cut off mid-output")
+        return content, finish
     except Exception as e:
         logger.exception(f"[html-gen] OpenAI call failed: {e}")
         raise
@@ -200,8 +208,9 @@ async def _call_llm(
 
 async def _call_llm_fast(system_prompt: str, user_message: str) -> str:
     """Lightweight LLM call using the fast model — for JSON classification only."""
-    return await _call_llm(system_prompt, user_message,
-                           model=_FAST_MODEL, max_tokens=_MAX_TOKENS_JSON)
+    content, _ = await _call_llm(system_prompt, user_message,
+                                 model=_FAST_MODEL, max_tokens=_MAX_TOKENS_JSON)
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -387,22 +396,65 @@ def _is_gibberish(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Output cleaning
+# Output cleaning + structural validation
 # ---------------------------------------------------------------------------
 
 def _clean_html(raw: str) -> str:
+    """Strip markdown fences and extract the HTML block from raw LLM output."""
     cleaned = raw.strip()
     if "```" in cleaned:
         cleaned = cleaned.replace("```html", "").replace("```", "").strip()
-    start = cleaned.find("<html")
-    end   = cleaned.rfind("</html>")
+    lower   = cleaned.lower()
+    start   = lower.find("<html")
+    end     = lower.rfind("</html>")
     if start != -1 and end != -1:
-        # Full, well-formed response
         cleaned = cleaned[start : end + 7]
     elif start != -1:
-        # Truncated — model stopped before </html>; keep everything from <html
+        # Truncated — keep everything from <html onward
         cleaned = cleaned[start:]
     return cleaned
+
+
+def _validate_html(html: str) -> tuple[bool, str]:
+    """
+    Returns (is_valid, reason).
+
+    Checks that the HTML has all the structural pieces needed to render as a
+    complete, styled document.  Any missing piece triggers a retry so the model
+    gets another chance to produce a properly structured response.
+
+    Checks (in order):
+      1. Non-empty after cleaning
+      2. Has <html> opening tag
+      3. Has <head> section
+      4. Has embedded <style> block  — external <link> stylesheets are not
+         acceptable because they won't resolve at PDF conversion time
+      5. Has <body> section
+      6. Has </html> closing tag     — missing = response was truncated
+      7. Has meaningful text content — guards against a shell of empty tags
+    """
+    if not html.strip():
+        return False, "empty response"
+
+    low = html.lower()
+
+    if "<html" not in low:
+        return False, "missing <html> tag"
+    if "<head" not in low:
+        return False, "missing <head> section"
+    if "<style" not in low:
+        return False, "missing embedded <style> block — no CSS"
+    if "<body" not in low:
+        return False, "missing <body> section"
+    if "</html>" not in low:
+        return False, "response truncated — </html> not found"
+
+    # Strip all tags and check for at least 100 chars of real text content
+    text = re.sub(r"<[^>]+>", "", html)
+    if len(text.strip()) < 100:
+        return False, "insufficient text content"
+
+    return True, "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -571,14 +623,51 @@ def _analysis_summary(analysis: dict) -> dict:
 async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
     """
     Step 3 — final LLM call using the enriched blueprint context.
-    Always calls the LLM — no caching.
+    Retries up to _HTML_GEN_RETRIES times on empty/null response.
+
+    Why retry works: temperature=0.4 + use_seed=False means every call is
+    non-deterministic. Each retry is a genuinely fresh attempt, not a repeat
+    of the same empty output.
     """
     system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
         **context,
         user_request=user_prompt,
     )
-    logger.info(f"[doc-gen] Step 3: generating HTML for '{context['doc_label']}'...")
-    return await _call_llm(system_prompt, user_prompt)
+
+    for attempt in range(1, _HTML_GEN_RETRIES + 1):
+        if attempt == 1:
+            logger.info(f"[doc-gen] Step 3: generating HTML for '{context['doc_label']}'...")
+        else:
+            logger.warning(f"[doc-gen] Step 3: retry {attempt}/{_HTML_GEN_RETRIES}")
+
+        try:
+            # temperature=0.4 — slight variation each call so same prompt gives
+            # fresh output on every request and every retry.
+            # use_seed=False — no deterministic seed.
+            raw, finish = await _call_llm(
+                system_prompt,
+                user_prompt,
+                temperature=0.4,
+                use_seed=False,
+            )
+        except Exception:
+            if attempt == _HTML_GEN_RETRIES:
+                raise
+            logger.warning(f"[doc-gen] Step 3: LLM call failed on attempt {attempt} — retrying")
+            continue
+
+        cleaned         = _clean_html(raw)
+        valid, reason   = _validate_html(cleaned)
+
+        if valid:
+            return cleaned
+
+        logger.warning(
+            f"[doc-gen] Step 3: invalid HTML on attempt {attempt}/{_HTML_GEN_RETRIES} "
+            f"— {reason} (finish={finish})"
+        )
+
+    return ""  # all attempts exhausted — caller raises HTTPException
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +769,7 @@ async def generate_document_html(
 
         # Step 3: final HTML generation
         try:
-            raw_html = await _generate_html_from_context(context, request.user_prompt)
+            cleaned_html = await _generate_html_from_context(context, request.user_prompt)
         except Exception as e:
             logger.exception("[doc-gen] Step 3 failed")
             raise HTTPException(
@@ -688,9 +777,9 @@ async def generate_document_html(
                 detail=_err_model_failed("HTML Generation", request.user_prompt, str(e)),
             )
 
-        cleaned_html = _clean_html(raw_html)
-
-        if not cleaned_html.strip():
+        valid, reason = _validate_html(cleaned_html)
+        if not valid:
+            logger.error(f"[doc-gen] All retries exhausted — final HTML invalid: {reason}")
             raise HTTPException(
                 status_code=500,
                 detail=_err_empty_output(request.user_prompt),
