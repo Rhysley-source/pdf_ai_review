@@ -7,7 +7,6 @@ import os
 import re
 import uuid
 import logging
-from collections import OrderedDict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
@@ -45,33 +44,6 @@ _FIXED_TEMPERATURE_MODELS = {
     "gpt-5-nano", "gpt-4.1-nano", "gpt-4o-mini",
     "o1", "o1-mini", "o3-mini", "o3",
 }
-
-# ---------------------------------------------------------------------------
-# LRU Cache for Steps 1+2 — keyed by prompt hash
-# Same query → same seed (temperature=0) → result is deterministic,
-# so caching is safe and has zero quality impact.
-# Max 256 entries; oldest evicted first (OrderedDict-based LRU).
-# ---------------------------------------------------------------------------
-
-_PIPELINE_CACHE_MAX  = 256
-_pipeline_cache: OrderedDict[int, dict] = OrderedDict()
-
-
-def _cache_get(seed: int) -> dict | None:
-    if seed not in _pipeline_cache:
-        return None
-    # Move to end (most-recently-used)
-    _pipeline_cache.move_to_end(seed)
-    return _pipeline_cache[seed]
-
-
-def _cache_set(seed: int, value: dict) -> None:
-    if seed in _pipeline_cache:
-        _pipeline_cache.move_to_end(seed)
-    else:
-        if len(_pipeline_cache) >= _PIPELINE_CACHE_MAX:
-            _pipeline_cache.popitem(last=False)  # evict LRU
-    _pipeline_cache[seed] = value
 
 # ---------------------------------------------------------------------------
 # Storage — per-document files (fast O(1) read/write per doc)
@@ -470,24 +442,13 @@ async def _analyze_query(user_prompt: str) -> dict:
     """Step 1 — fast LLM call to detect document type and extract field values.
     Uses the fast model (JSON classification only).
     Raises HTTP 422 immediately if the query is not a document generation request.
-    Caches result by prompt seed — same query skips the LLM call entirely.
+    Always calls the LLM — no caching.
     """
-    seed   = _prompt_seed(QUERY_ANALYSIS_PROMPT.template, user_prompt)
-    cached = _cache_get(seed)
-    if cached and "analysis" in cached:
-        logger.info("[doc-gen] Step 1: cache hit — skipping LLM call")
-        analysis = cached["analysis"]
-        analysis["_user_prompt"] = user_prompt
-        analysis["_seed"]        = seed
-    else:
-        logger.info("[doc-gen] Step 1: analysing query (fast model)...")
-        raw      = await _call_llm_fast(QUERY_ANALYSIS_PROMPT.template, user_prompt)
-        logger.info(f"[doc-gen] Step 1 raw output: {raw[:300]}")
-        analysis = _parse_analysis_json(raw)
-        analysis["_user_prompt"] = user_prompt   # used by Step 2 for cache lookup
-        analysis["_seed"]        = seed
-        # Store partial cache entry — Step 2 will add "context" to it
-        _cache_set(seed, {"analysis": analysis, "_seed": seed})
+    logger.info("[doc-gen] Step 1: analysing query (fast model)...")
+    raw      = await _call_llm_fast(QUERY_ANALYSIS_PROMPT.template, user_prompt)
+    logger.info(f"[doc-gen] Step 1 raw output: {raw[:300]}")
+    analysis = _parse_analysis_json(raw)
+    analysis["_user_prompt"] = user_prompt
 
     if not analysis.get("is_document_request", True):
         raise HTTPException(
@@ -567,15 +528,9 @@ def _static_template_context(analysis: dict) -> dict:
 async def _build_template_context(analysis: dict) -> dict:
     """Step 2 — fast LLM call to build a tailored document blueprint.
     Uses the fast model (JSON output only).
-    Caches result alongside Step 1 — same query skips both LLM calls.
     Falls back to the static Python template on parse failure.
+    Always calls the LLM — no caching.
     """
-    seed   = _prompt_seed(QUERY_ANALYSIS_PROMPT.template, analysis.get("_user_prompt", ""))
-    cached = _cache_get(seed)
-    if cached and "context" in cached:
-        logger.info("[doc-gen] Step 2: cache hit — skipping LLM call")
-        return cached["context"]
-
     doc_type  = analysis.get("doc_type", "other")
     doc_label = analysis.get("doc_label", "Document")
 
@@ -594,14 +549,7 @@ async def _build_template_context(analysis: dict) -> dict:
     raw = await _call_llm_fast(system_prompt, f"Build the document blueprint for: {doc_label}")
     logger.info(f"[doc-gen] Step 2 raw output: {raw[:300]}")
 
-    context = _parse_blueprint_json(raw, analysis)
-
-    # Update cache entry with the blueprint context
-    if cached:
-        cached["context"] = context
-        _cache_set(seed, cached)
-
-    return context
+    return _parse_blueprint_json(raw, analysis)
 
 
 def _analysis_summary(analysis: dict) -> dict:
@@ -623,23 +571,14 @@ def _analysis_summary(analysis: dict) -> dict:
 async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
     """
     Step 3 — final LLM call using the enriched blueprint context.
-    Result is cached by prompt seed — same context + same prompt → instant return.
+    Always calls the LLM — no caching.
     """
     system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
         **context,
         user_request=user_prompt,
     )
-    seed   = _prompt_seed(system_prompt, user_prompt)
-    cached = _cache_get(seed)
-    if cached and "html" in cached:
-        logger.info("[doc-gen] Step 3: cache hit — skipping LLM call")
-        return cached["html"]
-
     logger.info(f"[doc-gen] Step 3: generating HTML for '{context['doc_label']}'...")
-    html = await _call_llm(system_prompt, user_prompt)
-
-    _cache_set(seed, {"html": html})
-    return html
+    return await _call_llm(system_prompt, user_prompt)
 
 
 # ---------------------------------------------------------------------------
