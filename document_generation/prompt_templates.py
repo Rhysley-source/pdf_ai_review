@@ -488,7 +488,15 @@ STRICT DESIGN RULES — follow exactly:
 - Font: Arial or sans-serif, 11pt–12pt for body text.
 - Section dividers: use <hr> or border-bottom only — no colored divider blocks.
 - Tables: width:100%, 1px solid border, no background colors on rows.
-- The result must look like a clean printed document — not a web app widget.""",
+- The result must look like a clean printed document — not a web app widget.
+
+PDF-SAFE RULES — the HTML will be converted to PDF. Follow these exactly to prevent layout shifts:
+- NEVER use display:flex or display:grid anywhere — use block elements, tables, and floats only.
+- NEVER rely on inheritance for heading styles. Every h1/h2/h3/h4/h5/h6 element MUST have all of these set explicitly as inline style attributes (not in <style>): font-size, font-weight, text-align, margin-top, margin-bottom, color.
+  Example: <h2 style="font-size:14pt; font-weight:bold; text-align:left; margin-top:12px; margin-bottom:6px; color:#000;">Section Title</h2>
+- NEVER use position:fixed, position:sticky, or position:absolute.
+- NEVER use margin:auto for centering — use text-align:center on the element itself.
+- Use only pt or px units for font-size — never em or rem.""",
     input_variables=["doc_type", "doc_label", "tone", "layout_notes", "sections_block", "user_request"],
 )
 
@@ -512,6 +520,8 @@ STRICT RULES:
 4. Preserve all original <style> blocks and CSS logic.
 5. Apply the changes requested by the user accurately.
 6. Do NOT introduce box-shadow, text-shadow, gradients, border-radius, or colored background panels — keep the design flat and print-ready.
+7. Do NOT use display:flex or display:grid — block elements and tables only.
+8. Every h1/h2/h3/h4/h5/h6 MUST keep all inline style attributes (font-size, font-weight, text-align, margin-top, margin-bottom, color) explicitly set — do not remove or move them to a <style> block.
 
 Existing HTML:
 {existing_html}
