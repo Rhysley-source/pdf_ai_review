@@ -13,7 +13,7 @@ from document_validation.validation_router import router as validation_router # 
 from db_files.db import init_db, close_pool
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging 123
 # ---------------------------------------------------------------------------
 logging.config.dictConfig({
     "version": 1,

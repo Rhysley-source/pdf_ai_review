@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-UPLOAD_FOLDER     = "temp"
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+UPLOAD_FOLDER     = os.path.join(BASE_DIR, "temp")
 MAX_PDF_PAGES     = None
 _BLANK_PDF_RESULT = {"overview": "", "summary": "", "highlights": []}
 
