@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from routes.route import router
 from routes.convert_route import router as convert_router
 from document_generation.document_generator import router as document_generate_router
+from document_validation.validation_router import router as validation_router # NEW IMPORT
 from db_files.db import init_db, close_pool
 
 # ---------------------------------------------------------------------------
@@ -148,6 +149,7 @@ app = FastAPI(
 - **POST /detect-risks** — Detect legal/financial risks in a document
 - **POST /red-flag-scanner** — AI red flag scan: identifies dangerous/unusual contract language with ⚠ warnings
 - **POST /convert/pdf-to-docx** — Convert PDF to DOCX
+- **POST /validate-document** — Validate a PDF document for issues like missing fields, wrong clauses, or harmful terms
 
 ### Document Generation (HTML)
 - **POST /generate-html** — Generate an HTML document of any type from a text prompt
@@ -160,6 +162,7 @@ app = FastAPI(
 app.include_router(router)
 app.include_router(convert_router)
 app.include_router(document_generate_router)
+app.include_router(validation_router) # NEW INCLUDE
 
 
 # ---------------------------------------------------------------------------
