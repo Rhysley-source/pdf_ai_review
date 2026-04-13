@@ -317,18 +317,28 @@ async def red_flag_scanner(
         )
         return {
             "status":             "success",
+            "document_type":      result.get("document_type", ""),
             "overall_risk_level": result.get("overall_risk_level", "Low"),
             "summary":            result.get("summary", ""),
             "counts": {
                 "total":     len(flags),
-                "dangerous": sum(1 for f in flags if f.get("category") == "Dangerous"),
-                "unusual":   sum(1 for f in flags if f.get("category") == "Unusual"),
-                "missing":   sum(1 for f in flags if f.get("category") == "Missing"),
+                "dangerous": sum(1 for f in flags if f.get("category") == "dangerous"),
+                "unusual":   sum(1 for f in flags if f.get("category") == "unusual"),
                 "critical":  sum(1 for f in flags if f.get("severity") == "Critical"),
                 "high":      sum(1 for f in flags if f.get("severity") == "High"),
                 "medium":    sum(1 for f in flags if f.get("severity") == "Medium"),
             },
-            "detected_flags": flags,
+            "flags": [
+                {
+                    "label":          f.get("label", ""),
+                    "category":       f.get("category", ""),
+                    "severity":       f.get("severity", ""),
+                    "clause_excerpt": f.get("clause_excerpt", ""),
+                    "why_dangerous":  f.get("why_dangerous", ""),
+                    "recommendation": f.get("recommendation", ""),
+                }
+                for f in flags
+            ],
         }
 
     except Exception as e:

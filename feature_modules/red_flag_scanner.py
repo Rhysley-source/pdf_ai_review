@@ -272,8 +272,10 @@ Contract:
 # Step 3 — build flags from AI results (severity from hardcoded map)
 # ---------------------------------------------------------------------------
 
-_CAT_ICON = {"dangerous": "🔴", "unusual": "🟠", "missing": "🟡"}
 _SORT_ORDER = {"Critical": 0, "High": 1, "Medium": 2}
+
+# Categories surfaced to the user — missing clauses are excluded
+_ACTIVE_CATEGORIES = {"dangerous", "unusual"}
 
 
 def _build_flags(results: list, checklist: list[dict]) -> list[dict]:
@@ -287,21 +289,24 @@ def _build_flags(results: list, checklist: list[dict]) -> list[dict]:
             continue
 
         item_id  = item.get("id", "")
-        category = cat_map.get(item_id, "unusual")
+        category = cat_map.get(item_id, "dangerous")
         severity = sev_map.get(item_id, "Medium")
         label    = label_map.get(item_id, item_id.replace("_", " ").title())
 
+        # Only surface dangerous and unusual clauses
+        if category not in _ACTIVE_CATEGORIES:
+            continue
+
         flags.append({
-            "warning":        f"⚠ {label}",
-            "indicator":      _CAT_ICON.get(category, "⚠"),
+            "label":          label,
             "category":       category,
             "severity":       severity,
-            "clause_excerpt": item.get("clause_excerpt") or "Not present in this contract",
+            "clause_excerpt": item.get("clause_excerpt") or "",
             "why_dangerous":  item.get("why_dangerous")  or "",
             "recommendation": item.get("recommendation") or "",
         })
 
-    flags.sort(key=lambda f: _SORT_ORDER.get(f["severity"], 3))
+    flags.sort(key=lambda f: (_SORT_ORDER.get(f["severity"], 3), f["category"] != "dangerous"))
     return flags
 
 
@@ -325,9 +330,9 @@ async def scan_red_flags(text: str) -> dict:
     """
     # Step 1 — detect type
     doc_type  = await _detect_doc_type(text)
-    checklist = _CHECKLISTS[doc_type]
+    checklist = [item for item in _CHECKLISTS[doc_type] if item["cat"] in _ACTIVE_CATEGORIES]
 
-    logger.info(f"[red_flag_scanner] doc_type={doc_type} | checklist={len(checklist)} items")
+    logger.info(f"[red_flag_scanner] doc_type={doc_type} | checklist={len(checklist)} items (dangerous + unusual)")
 
     # Step 2 — evaluate checklist
     messages = _build_eval_messages(checklist, text)
@@ -366,21 +371,19 @@ async def scan_red_flags(text: str) -> dict:
 
     dangerous = sum(1 for f in flags if f["category"] == "dangerous")
     unusual   = sum(1 for f in flags if f["category"] == "unusual")
-    missing   = sum(1 for f in flags if f["category"] == "missing")
 
     logger.info(
         f"[red_flag_scanner] Done — {len(flags)}/{len(checklist)} flags present | "
-        f"dangerous={dangerous} unusual={unusual} missing={missing} | risk={overall}"
+        f"dangerous={dangerous} unusual={unusual} | risk={overall}"
     )
 
     return {
-        "document_type":     doc_type,
-        "detected_flags":    flags,
+        "document_type":      doc_type,
+        "detected_flags":     flags,
         "overall_risk_level": overall,
         "summary": (
-            f"Scanned {len(checklist)} checklist items for {doc_type.replace('_', ' ')}. "
-            f"Found {len(flags)} flag(s): "
-            f"{dangerous} dangerous, {unusual} unusual, {missing} missing protection(s). "
+            f"Scanned {len(checklist)} checks for {doc_type.replace('_', ' ')}. "
+            f"Found {len(flags)} flag(s): {dangerous} dangerous, {unusual} unusual. "
             f"Overall risk: {overall}."
         ),
     }
