@@ -15,7 +15,9 @@ from utils.json_utils import extract_json
 from db_files.db import log_request
 from feature_modules.key_clause_extraction import classify_document, DOCUMENT_HANDLERS, extract_text_from_upload
 from feature_modules.obligation_detection import analyze_document_obligations
+from feature_modules.key_clause_extraction import extract_key_clauses, extract_text_from_upload
 from feature_modules.risk_detection import analyze_document_risks
+from feature_modules.red_flag_scanner import scan_red_flags
 from auth import verify_api_key
 
 logger = logging.getLogger(__name__)
@@ -201,27 +203,14 @@ async def key_clause_extraction(
     error_msg = None
 
     try:
-        doc_type = await classify_document(text)
-        doc_type = doc_type.lower().strip()
-        logger.info(f"[{request_id}] Step 3 — classified as: '{doc_type}'")
-
-        handler = DOCUMENT_HANDLERS.get(doc_type)
-
-        if handler:
-            result = await handler(text)
-            logger.info(
-                f"[{request_id}] ── REQUEST COMPLETE — "
-                f"total time: {time.perf_counter() - t_start:.2f}s ──────"
-            )
-            return result
-
-        status = "unsupported"
-        logger.warning(f"[{request_id}] No handler found for doc_type='{doc_type}'")
-        return {
-            "status": "unsupported",
-            "document_type": doc_type,
-            "message": "Unsupported document type."
-        }
+        logger.info(f"[{request_id}] Step 3 — extracting key clauses...")
+        result = await extract_key_clauses(text)
+        logger.info(
+            f"[{request_id}] ── REQUEST COMPLETE — "
+            f"clauses={result.get('total_clauses', 0)} "
+            f"total time: {time.perf_counter() - t_start:.2f}s ──────"
+        )
+        return result
 
     except HTTPException:
         status    = "error"
@@ -363,6 +352,80 @@ async def detect_obligations(
 
 
 # ---------------------------------------------------------------------------
+# POST /red-flag-scanner
+# ---------------------------------------------------------------------------
+
+@router.post("/red-flag-scanner")
+async def red_flag_scanner(
+    file: UploadFile = File(...),
+):
+    """
+    AI Red Flag Scanner — identifies dangerous or unusual contract language.
+
+    Returns structured warnings such as:
+      ⚠ Unlimited liability clause detected
+      ⚠ This contract does not include a termination clause
+
+    Each flag includes severity, the exact clause excerpt, why it's dangerous,
+    and a concrete recommendation for negotiation or fix.
+    """
+    text, pages_to_read, total_pages, request_id, t_start, file_path = await extract_text_from_upload(
+        file,
+        endpoint="/red-flag-scanner"
+    )
+
+    status    = "success"
+    error_msg = None
+
+    try:
+        logger.info(f"[{request_id}] Starting Red Flag Scan...")
+        result = await scan_red_flags(text)
+
+        flags    = result.get("detected_flags", [])
+        elapsed  = time.perf_counter() - t_start
+        logger.info(
+            f"[{request_id}] ── RED FLAG SCAN COMPLETE — {elapsed:.2f}s "
+            f"flags={len(flags)} risk={result.get('overall_risk_level', 'Unknown')}"
+        )
+        return {
+            "status":             "success",
+            "overall_risk_level": result.get("overall_risk_level", "Low"),
+            "summary":            result.get("summary", ""),
+            "counts": {
+                "total":     len(flags),
+                "dangerous": sum(1 for f in flags if f.get("category") == "Dangerous"),
+                "unusual":   sum(1 for f in flags if f.get("category") == "Unusual"),
+                "missing":   sum(1 for f in flags if f.get("category") == "Missing"),
+                "critical":  sum(1 for f in flags if f.get("severity") == "Critical"),
+                "high":      sum(1 for f in flags if f.get("severity") == "High"),
+                "medium":    sum(1 for f in flags if f.get("severity") == "Medium"),
+            },
+            "detected_flags": flags,
+        }
+
+    except Exception as e:
+        status    = "error"
+        error_msg = str(e)
+        logger.exception(f"[{request_id}] Red flag scan failed: {e}")
+        raise HTTPException(status_code=500, detail="Internal error during red flag scan.")
+    finally:
+        elapsed = time.perf_counter() - t_start
+        await log_request(
+            request_id        = request_id,
+            pdf_name          = file.filename or "unknown",
+            total_pages       = total_pages,
+            pages_analysed    = pages_to_read,
+            completion_time_s = elapsed,
+            endpoint          = "/red-flag-scanner",
+            status            = status,
+            error_message     = error_msg,
+        )
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logger.debug(f"[{request_id}] Temp file deleted: '{file_path}'")
+
+
+# ---------------------------------------------------------------------------
 # POST /analyze/stream — Server-Sent Events
 # ---------------------------------------------------------------------------
 
@@ -493,7 +556,7 @@ async def analyze_pdf_stream(
                 elif event_type == "synthesis_done":
                     # Fired for both single- and multi-chunk paths
                     final_overview = payload.get("overview", final_overview)
-                    final_summary  = payload.get("summary", "")
+                    final_summary  = payload.get("summary", final_summary)
                     if analysis_type in (0, 1):
                         yield _sse("overview", {"text": final_overview})
                         overview_sent = True
@@ -587,12 +650,12 @@ async def speech_to_text(
 
     try:
         audio_bytes = await file.read()
-        transcript = await transcribe_audio(audio_bytes, file.filename)
+        transcript, detected_language = await transcribe_audio(audio_bytes, file.filename)
     except Exception as e:
         logger.exception(f"[speech-to-text] transcription failed: {e}")
         raise HTTPException(status_code=500, detail="Audio transcription failed.")
 
-    return {"text": transcript}
+    return {"text": transcript, "detected_language": detected_language}
 
 
 # ---------------------------------------------------------------------------

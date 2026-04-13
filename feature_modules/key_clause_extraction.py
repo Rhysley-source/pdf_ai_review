@@ -1,234 +1,269 @@
-from fastapi import HTTPException, UploadFile
+import asyncio
+import json
+import logging
+import re
 import time
 import uuid
 import os
-import logging
+from functools import partial
+
+from fastapi import HTTPException, UploadFile
 
 from llm_model.ai_model import run_llm
 from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from utils.json_utils import extract_json_raw as extract_json_from_text
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "temp")
+UPLOAD_FOLDER = "temp"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ==============================
-# CLASSIFICATION
-# ==============================
-async def classify_document(text: str):
-    prompt = f"""
-Classify the document into EXACTLY ONE of the following categories:
+# ---------------------------------------------------------------------------
+# Chunking — same windows as risk_detection for consistency
+# ---------------------------------------------------------------------------
 
-contract
-resume
-invoice
-report
-other
+_CHUNK_SIZE    = 10_000
+_CHUNK_OVERLAP = 500
 
-Definitions:
-- contract → legal agreements (NDA, Service Agreement, Lease, Terms & Conditions)
-- resume → CV, job profile, candidate details
-- invoice → billing documents, receipts, payment summaries
-- report → business reports, analysis documents, research papers
-- other → anything else (stories, books, random text)
 
-Rules:
-- Return ONLY one word from the list above
-- Do NOT add explanation
-- Do NOT return multiple categories
-- If unsure, return "other"
+def _chunk_text(text: str) -> list[str]:
+    if len(text) <= _CHUNK_SIZE:
+        return [text]
+    chunks, start = [], 0
+    while start < len(text):
+        end = min(start + _CHUNK_SIZE, len(text))
+        chunks.append(text[start:end])
+        if end == len(text):
+            break
+        start += _CHUNK_SIZE - _CHUNK_OVERLAP
+    logger.info(f"[key_clause] Document split into {len(chunks)} chunk(s)")
+    return chunks
 
-Examples:
-"Non Disclosure Agreement between two parties..." → contract
-"John Doe, Software Engineer, Skills: Python..." → resume
-"Invoice No: 12345, Total: $500..." → invoice
-"Quarterly sales analysis shows growth..." → report
-"Once upon a time..." → other
 
-Text:
-\"\"\"{text[:1500]}\"\"\"
-"""
+# ---------------------------------------------------------------------------
+# Step 1 — Document Classification
+# Uses first 4000 chars; returns (slug, human-readable label).
+# Aligned with risk_detection slugs so both routes classify consistently.
+# ---------------------------------------------------------------------------
 
-    result = await run_llm(text[:1500], prompt)
+_KNOWN_SLUGS = {
+    "contract", "employment", "nda", "lease",
+    "invoice", "resume", "report", "other",
+}
 
-    # Safety cleanup
-    result = result.lower().strip()
+_SLUG_LABELS = {
+    "contract":   "Contract / Legal Agreement",
+    "employment": "Employment Agreement",
+    "nda":        "Non-Disclosure Agreement",
+    "lease":      "Lease Agreement",
+    "invoice":    "Invoice / Billing Document",
+    "resume":     "Resume / CV",
+    "report":     "Report / Analysis",
+    "other":      "General Document",
+}
 
-    valid_labels = {"contract", "resume", "invoice", "report", "other"}
+_CLASSIFY_PROMPT = """Analyse the document and return a JSON object with exactly two fields:
 
-    # Handle messy LLM outputs like "contract\n" or "contract document"
-    for label in valid_labels:
-        if label in result:
-            return label
+"slug"  — classify into EXACTLY ONE of:
+          contract, employment, nda, lease, invoice, resume, report, other
 
-    return "other"
+"label" — the specific document type as a short human-readable name (2-5 words)
 
-# ==============================
-# CONTRACT HANDLER
-# ==============================
-async def handle_contract(text: str):
-    prompt = f"""
-Extract key contract clauses from the given text and return in STRICT JSON format.
+Slug definitions:
+- contract   → service agreements, vendor agreements, terms & conditions, MOU, partnership deeds
+- employment → offer letters, employment agreements, appointment letters, HR documents
+- nda        → non-disclosure agreements, confidentiality agreements
+- lease      → rental agreements, property leases, tenancy agreements
+- invoice    → billing documents, receipts, payment summaries, purchase orders
+- resume     → CV, job profiles, candidate profiles
+- report     → analytical, financial, status, or summary reports
+- other      → anything not covered above
 
-Fields:
-- Agreement Type (Service Agreement, NDA, Lease, etc.)
-- Effective Date
-- Contract Term
-- Renewal Conditions
-- Governing Law
-- Payment Terms
-- Termination Notice Period
+Label: be specific (e.g. "Service Agreement", "Tax Invoice", "Job Offer Letter").
+Never return "Other Document" or "Unknown Document" as a label.
 
-Rules:
-- Return ONLY valid JSON (no explanation, no extra text)
-- Use EXACT field names as listed above
-- Do NOT rename keys
-- Do NOT add extra fields
-- If any field is missing, return "Not Found"
-- Keep values short and precise
+Return ONLY this JSON — no markdown, no explanation:
+{"slug": "<slug>", "label": "<label>"}"""
 
-Example Output:
+
+async def _classify_document(text: str) -> tuple[str, str]:
+    raw    = await run_llm(text[:4000], _CLASSIFY_PROMPT)
+    parsed = extract_json_from_text(raw)
+    slug   = (parsed.get("slug") or "").lower().strip()
+    label  = (parsed.get("label") or "").strip()
+
+    if slug not in _KNOWN_SLUGS:
+        for known in _KNOWN_SLUGS:
+            if known in raw.lower():
+                slug = known
+                break
+        else:
+            slug = "other"
+
+    if not label or label.lower() in ("other document", "unknown document", "unknown", "other"):
+        label = _SLUG_LABELS[slug]
+
+    return slug, label
+
+
+# ---------------------------------------------------------------------------
+# Step 2 — Key Clause Extraction (chunked, parallel)
+# ---------------------------------------------------------------------------
+
+async def _extract_clauses_chunk(chunk: str, doc_label: str, chunk_label: str) -> list[dict]:
+    """
+    Asks the LLM to extract key clauses from one chunk.
+    Returns a list of clause dicts: {clause_name, excerpt, significance}.
+    """
+    system_prompt = f"""You are a legal document analyst specialising in {doc_label} documents.
+
+Extract ALL key clauses present in this section of the document.
+
+A key clause is any provision, term, condition, or section that is important for understanding:
+- Rights and obligations of the parties
+- Financial terms, payment conditions, or amounts
+- Time periods, deadlines, notice periods, or renewal terms
+- Restrictions, limitations, permissions, or prohibitions
+- Legal protections, liability, or risks
+- Confidentiality, IP, or data obligations
+
+For each key clause found, return:
+  "clause_name"  — a short, specific name (e.g. "Payment Terms", "Termination Notice", "Non-Compete Restriction")
+  "excerpt"      — the exact relevant text from the document, or a faithful paraphrase if the clause is very long
+  "significance" — one sentence explaining why this clause is important
+
+Return ONLY valid JSON in exactly this structure:
 {{
-  "Agreement Type": "Service Agreement",
-  "Effective Date": "Jan 1, 2026",
-  "Contract Term": "3 years",
-  "Renewal Conditions": "Auto-renew yearly",
-  "Governing Law": "Alberta",
-  "Payment Terms": "Net 30",
-  "Termination Notice Period": "60 days"
-}}
-
-Text:
-\"\"\"{text}\"\"\"
-"""
-
-    result = await run_llm(text, prompt)
-    print("Raw LLM Output:", result)  # Debugging: see the unprocessed output
-    parsed_data = extract_json_from_text(result)
-    return {
-        "status": "success",
-        "document_type": "contract",
-        "data": parsed_data
-    }
-
-
-# ==============================
-# RESUME HANDLER
-# ==============================
-async def handle_resume(text: str):
-    prompt = f"""
-Extract structured resume information from the given text and return in STRICT JSON format.
-
-Fields:
-- Name
-- Skills (list)
-- Experience (list of roles or summary)
-- Education (list)
-- Missing Sections (list of missing sections like Skills, Experience, Education, Summary, Projects)
-
-Rules:
-- Return ONLY valid JSON (no explanation, no extra text)
-- Use EXACT field names as listed above
-- Do NOT rename keys
-- Do NOT add extra fields
-- If a field is not found, return "Not Found"
-- Lists should be arrays ([])
-- Keep values concise
-
-Example Output:
-{{
-  "Name": "John Doe",
-  "Skills": ["Python", "Machine Learning", "FastAPI"],
-  "Experience": ["Software Engineer at ABC Corp (2022-2025)"],
-  "Education": ["B.Tech in Computer Science"],
-  "Missing Sections": ["Projects", "Summary"]
-}}
-
-Text:
-\"\"\"{text}\"\"\"
-"""
-
-    result = await run_llm(text, prompt)
-    print("Raw LLM Output:", result)  # Debugging: see the unprocessed output
-    parsed_data = extract_json_from_text(result)
-    return {
-        "status": "success",
-        "document_type": "resume",
-        "data": parsed_data
-    }
-
-
-# ==============================
-# INVOICE HANDLER
-# ==============================
-async def handle_invoice(text: str):
-    prompt = f"""
-Extract structured invoice information from the given text and return in STRICT JSON format.
-
-Fields:
-- Invoice Number
-- Date
-- Vendor Name
-- Total Amount
-- Tax
-- Line Items (list of objects with: Description, Quantity, Unit Price, Amount)
-
-Rules:
-- Return ONLY valid JSON (no explanation, no extra text)
-- Use EXACT field names as listed above
-- Do NOT rename keys
-- Do NOT add extra fields
-- If any field is missing, return "Not Found"
-- Line Items must be an array of objects
-- If line items are not clearly available, return []
-
-Example Output:
-{{
-  "Invoice Number": "INV-1023",
-  "Date": "2026-01-15",
-  "Vendor Name": "ABC Pvt Ltd",
-  "Total Amount": "1500 USD",
-  "Tax": "150 USD",
-  "Line Items": [
+  "key_clauses": [
     {{
-      "Description": "Software License",
-      "Quantity": "1",
-      "Unit Price": "1000 USD",
-      "Amount": "1000 USD"
-    }},
-    {{
-      "Description": "Support Fee",
-      "Quantity": "1",
-      "Unit Price": "500 USD",
-      "Amount": "500 USD"
+      "clause_name": "<name>",
+      "excerpt": "<text from document>",
+      "significance": "<why it matters>"
     }}
   ]
 }}
 
-Text:
-\"\"\"{text}\"\"\"
-"""
+Rules:
+- Only include clauses that are ACTUALLY present in this section
+- Be specific to "{doc_label}" — not generic observations about what might be present
+- Preserve exact wording in excerpt wherever possible
+- If this section contains no key clauses, return {{"key_clauses": []}}
+- No explanation, no markdown — ONLY the JSON"""
 
-    result = await run_llm(text, prompt)
-    print("Raw LLM Output:", result)  # Debugging: see the unprocessed output
-    parsed_data = extract_json_from_text(result)
+    logger.info(f"[key_clause] Extracting clauses — {chunk_label}")
+    raw    = await run_llm(chunk, system_prompt, max_output_tokens=4096)
+    result = extract_json_from_text(raw)
+
+    clauses = result.get("key_clauses", [])
+    if not isinstance(clauses, list):
+        return []
+
+    # Normalise each clause item
+    cleaned = []
+    for item in clauses:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("clause_name") or item.get("name") or "").strip()
+        if not name:
+            continue
+        cleaned.append({
+            "clause_name":  name,
+            "excerpt":      str(item.get("excerpt") or item.get("text") or item.get("quote") or ""),
+            "significance": str(item.get("significance") or item.get("importance") or item.get("reason") or ""),
+        })
+    return cleaned
+
+
+def _merge_clauses(lists: list[list[dict]]) -> list[dict]:
+    """
+    Merges clause lists from multiple chunks, deduplicating by normalised clause_name.
+    When the same clause appears in multiple chunks, the version with the longer
+    excerpt is kept (more complete quote).
+    """
+    seen: dict[str, dict] = {}
+    for clause_list in lists:
+        if not isinstance(clause_list, list):
+            continue
+        for clause in clause_list:
+            if not isinstance(clause, dict):
+                continue
+            key = re.sub(r"[^a-z0-9]", "", clause.get("clause_name", "").lower())
+            if not key:
+                continue
+            if key not in seen:
+                seen[key] = clause
+            else:
+                # Keep the version with the more complete excerpt
+                if len(clause.get("excerpt", "")) > len(seen[key].get("excerpt", "")):
+                    seen[key]["excerpt"] = clause["excerpt"]
+                if not seen[key].get("significance") and clause.get("significance"):
+                    seen[key]["significance"] = clause["significance"]
+    return list(seen.values())
+
+
+# ---------------------------------------------------------------------------
+# Step 3 — Document Summary (first 4000 chars, fast)
+# ---------------------------------------------------------------------------
+
+async def _generate_summary(text: str, doc_label: str) -> str:
+    system_prompt = f"""You are reviewing a {doc_label}.
+Write a concise 2-3 sentence summary of what this document is, who the parties are (if any),
+and what its main purpose or key terms are.
+Return ONLY the plain text summary — no JSON, no markdown, no headings."""
+    return await run_llm(text[:4000], system_prompt, max_output_tokens=512)
+
+
+# ---------------------------------------------------------------------------
+# Public entry point — replaces all old per-type handlers
+# ---------------------------------------------------------------------------
+
+async def extract_key_clauses(text: str) -> dict:
+    """
+    Full key clause extraction pipeline:
+
+    Step 1 — classify document type (first 4000 chars)
+    Step 2 — extract key clauses from full document (chunked, parallel LLM calls)
+    Step 3 — generate document summary (parallel with Step 2)
+    Step 4 — merge + deduplicate clauses across chunks
+
+    All document types are supported. No more "unsupported" responses.
+    """
+    # Step 1: classify
+    doc_type, doc_label = await _classify_document(text)
+    logger.info(f"[key_clause] Classified as: {doc_type} ('{doc_label}')")
+
+    chunks = _chunk_text(text)
+
+    # Step 2+3: clause extraction (all chunks) + summary — all in parallel
+    clause_tasks  = [
+        _extract_clauses_chunk(chunk, doc_label, f"chunk {i+1}/{len(chunks)}")
+        for i, chunk in enumerate(chunks)
+    ]
+    summary_task  = _generate_summary(text, doc_label)
+
+    *chunk_results, summary = await asyncio.gather(*clause_tasks, summary_task)
+
+    # Step 4: merge
+    key_clauses = _merge_clauses(chunk_results)
+
+    logger.info(
+        f"[key_clause] Done — {len(key_clauses)} unique clause(s) "
+        f"from {len(chunks)} chunk(s)"
+    )
+
     return {
-        "status": "success",
-        "document_type": "invoice",
-        "data": parsed_data
+        "status":        "success",
+        "document_type": doc_label,
+        "total_clauses": len(key_clauses),
+        "summary":       summary.strip(),
+        "key_clauses":   key_clauses,
     }
 
-# ==============================
-# ROUTER MAP
-# ==============================
-DOCUMENT_HANDLERS = {
-    "contract": handle_contract,
-    "resume": handle_resume,
-    "invoice": handle_invoice
-}
+
+# ---------------------------------------------------------------------------
+# Shared PDF ingestion helper (used by /key-clause-extraction and /detect-risks)
+# OCR now runs in thread pool — event loop is never blocked.
+# ---------------------------------------------------------------------------
 
 async def extract_text_from_upload(
     file: UploadFile,
@@ -238,7 +273,7 @@ async def extract_text_from_upload(
 ) -> tuple[str, int, int, str, float, str]:
     logger.info(f"Received file: {file.filename} for endpoint: {endpoint}")
     request_id = str(uuid.uuid4())[:8]
-    t_start = time.perf_counter()
+    t_start    = time.perf_counter()
 
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
@@ -250,11 +285,15 @@ async def extract_text_from_upload(
     with open(file_path, "wb") as f:
         f.write(content)
 
-    total_pages = get_page_count(file_path)
+    total_pages   = get_page_count(file_path)
     pages_to_read = total_pages if max_pages is None else min(total_pages, max_pages)
 
     try:
-        pages = load_pdf(file_path, max_pages=pages_to_read)
+        # Non-blocking: OCR runs in thread pool
+        loop  = asyncio.get_running_loop()
+        pages = await loop.run_in_executor(
+            None, partial(load_pdf, file_path, pages_to_read)
+        )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -262,179 +301,4 @@ async def extract_text_from_upload(
         raise HTTPException(status_code=422, detail="No extractable text found in PDF.")
 
     text = "\n\n".join(p.page_content for p in pages)
-
     return text, pages_to_read, total_pages, request_id, t_start, file_path
-
-
-
-
-
-    # ONLY showing UPDATED / IMPORTANT PARTS (drop-in replace)
-
-# ---------------------------
-# ADD THIS HELPER
-# ---------------------------
-
-def _apply_defaults(document_type: str, fields: dict) -> dict:
-    DEFAULTS = {
-        "nda": {
-            "governing_law": "India",
-            "duration_years": "2",
-            "purpose": "Business evaluation"
-        }
-    }
-
-    defaults = DEFAULTS.get(document_type, {})
-    for k, v in defaults.items():
-        if fields.get(k) == "Not Specified":
-            fields[k] = v
-    return fields
-
-
-# ---------------------------
-# IMPROVED EXTRACTION
-# ---------------------------
-
-async def _extract_fields(document_type: str, user_query: str) -> dict:
-    fields = await _extract_fields_once(document_type, user_query)
-
-    # Retry if weak
-    weak_count = sum(1 for v in fields.values() if v == "Not Specified")
-    if weak_count >= len(fields) * 0.7:
-        logger.warning("[doc_gen] weak extraction → retrying")
-        fields = await _extract_fields_retry(document_type, user_query)
-
-    return fields
-
-
-async def _extract_fields_once(document_type: str, user_query: str) -> dict:
-    schema = _SCHEMAS[document_type]
-    doc_name = SUPPORTED_DOCUMENT_TYPES[document_type]
-
-    system = f"""
-Extract structured data for {doc_name}.
-Return ONLY JSON.
-
-Fields:
-{schema["required"] + schema["optional"]}
-
-Rules:
-- Use exact keys
-- Missing → "Not Specified"
-"""
-
-    client = _get_client()
-    kwargs = _get_model_kwargs(1000)
-    kwargs["messages"] = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_query},
-    ]
-    kwargs["response_format"] = {"type": "json_object"}
-
-    res = await client.chat.completions.create(**kwargs)
-    raw = res.choices[0].message.content or "{}"
-
-    return _extract_fields_from_json(raw)
-
-
-async def _extract_fields_retry(document_type: str, user_query: str) -> dict:
-    doc_name = SUPPORTED_DOCUMENT_TYPES[document_type]
-
-    system = f"""
-You are a legal expert.
-
-Extract ALL possible structured fields for {doc_name}.
-Infer intelligently if possible.
-
-Return JSON only.
-"""
-
-    client = _get_client()
-    kwargs = _get_model_kwargs(1000)
-    kwargs["messages"] = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_query},
-    ]
-    kwargs["response_format"] = {"type": "json_object"}
-
-    res = await client.chat.completions.create(**kwargs)
-    raw = res.choices[0].message.content or "{}"
-
-    return _extract_fields_from_json(raw)
-
-
-# ---------------------------
-# DOCUMENT GENERATION FIX
-# ---------------------------
-
-async def _generate_document_text(document_type, fields, user_query):
-
-    for attempt in range(2):  # retry logic
-        doc_name = SUPPORTED_DOCUMENT_TYPES[document_type]
-
-        system = f"""
-Generate a complete {doc_name}.
-
-Use legal structure.
-Use placeholders if needed.
-Plain text only.
-"""
-
-        client = _get_client()
-        kwargs = _get_model_kwargs(max_tokens=2000)  # FIXED
-
-        kwargs["messages"] = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": str(fields)},
-        ]
-
-        res = await client.chat.completions.create(**kwargs)
-
-        text = res.choices[0].message.content or ""
-
-        if text.strip():
-            return text, res.usage.prompt_tokens, res.usage.completion_tokens
-
-        logger.warning(f"[doc_gen] empty response retry {attempt+1}")
-
-    raise ValueError("LLM failed to generate document")
-
-
-# ---------------------------
-# MAIN FUNCTION FIX
-# ---------------------------
-
-async def generate_document(document_type: str, user_query: str):
-
-    if len(user_query.split()) < 5:
-        raise ValueError("User query too short")
-
-    fields = await _extract_fields(document_type, user_query)
-
-    logger.info(f"[doc_gen] fields:\n{json.dumps(fields, indent=2)}")
-
-    fields = _apply_defaults(document_type, fields)
-
-    missing = _get_missing_fields(document_type, fields)
-
-    document_text, in_tok, out_tok = await _generate_document_text(
-        document_type, fields, user_query
-    )
-
-    if not document_text.strip():
-        raise ValueError("Empty document generated")
-
-    pdf_bytes = _render_pdf(document_text, SUPPORTED_DOCUMENT_TYPES[document_type])
-
-    return {
-        "status": "missing_fields" if missing else "success",
-        "document_type": document_type,
-        "document_name": SUPPORTED_DOCUMENT_TYPES[document_type],
-        "fields": fields,
-        "missing_fields": missing,
-        "document": document_text,
-        "pdf_bytes": pdf_bytes,
-        "word_count": len(document_text.split()),
-        "input_tokens": in_tok,
-        "output_tokens": out_tok,
-    }
