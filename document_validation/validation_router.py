@@ -8,12 +8,6 @@ router = APIRouter()
 @router.post("/validate-document", tags=["Document Validation"])
 async def validate_document_endpoint(
     file: UploadFile = File(..., description="The PDF document to validate."),
-    validation_type: Optional[str] = Query(
-        "general", description="General type of validation (e.g., 'general', 'legal', 'financial')."
-    ),
-    specific_checks: Optional[str] = Query(
-        None, description="Comma-separated list of specific items to check for."
-    ),
 ):
     """
     Endpoint to validate a PDF document using an LLM.
@@ -23,7 +17,7 @@ async def validate_document_endpoint(
     or harmful terms and conditions, returning a structured JSON response.
     """
     try:
-        result = await validate_document(file, validation_type, specific_checks)
+        result = await validate_document(file)
         return result
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))

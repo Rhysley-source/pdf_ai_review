@@ -81,7 +81,7 @@ async def validate_document(
         logger.info("Received response from LLM.")
 
         # Extract JSON from LLM response
-        validation_result = extract_json_from_text(llm_response_text)
+        validation_result = extract_json(llm_response_text)
 
         if not validation_result:
             logger.warning(f"LLM response did not contain valid JSON: {llm_response_text[:500]}...")
