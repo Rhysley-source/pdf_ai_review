@@ -16,6 +16,7 @@ from db_files.db import log_request, log_comparison_request
 from feature_modules.key_clause_extraction import classify_document, extract_key_clauses, extract_text_from_upload
 from feature_modules.risk_detection import analyze_document_risks
 from feature_modules.red_flag_scanner import scan_red_flags
+from feature_modules.obligation_detection import analyze_document_obligations
 from auth import verify_api_key
 
 # for comparison endpoint
