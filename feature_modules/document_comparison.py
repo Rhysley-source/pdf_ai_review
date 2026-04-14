@@ -185,22 +185,18 @@ def _build_raw_changes(
                 continue  # identical — skip
             status = "modified"
 
-        excerpt1 = (c1 or {}).get("excerpt", "")
-        excerpt2 = (c2 or {}).get("excerpt", "")
-
         changes.append({
             "clause_name": name,
             "status":      status,
             "severity":    severity,
             "doc1": {
-                "excerpt":      excerpt1,
+                "excerpt":      (c1 or {}).get("excerpt", ""),
                 "significance": (c1 or {}).get("significance", ""),
             },
             "doc2": {
-                "excerpt":      excerpt2,
+                "excerpt":      (c2 or {}).get("excerpt", ""),
                 "significance": (c2 or {}).get("significance", ""),
             },
-            "word_diff": _word_diff(excerpt1, excerpt2),
             "summary":   "",  # filled by LLM enrichment
         })
     return changes
@@ -413,29 +409,23 @@ async def compare_documents(
     # 1. Match clauses across the two documents
     pairs = _match_clauses(clauses1, clauses2)
 
-    # 2. Build raw change list + text diff stats (CPU-bound, run in thread)
-    raw_changes, diff_stats = await asyncio.gather(
-        asyncio.to_thread(_build_raw_changes, pairs),
-        asyncio.to_thread(_text_diff_stats, text1, text2),
-    )
+    # 2. Build raw change list (CPU-bound, run in thread)
+    # text_diff_stats and risk_score are disabled for v1
+    raw_changes = await asyncio.to_thread(_build_raw_changes, pairs)
 
-    # 3. Risk score
-    risk = _risk_score(raw_changes)
-
-    # 4. LLM enrichment (per-clause summaries, insights, recommendation)
+    # 3. LLM enrichment (per-clause summaries only — insights + recommendation disabled for v1)
     llm_data = await _llm_enrichment(raw_changes, text1, text2)
 
     summaries = llm_data.get("clause_summaries", {})
-    insights  = llm_data.get("semantic_insights", [])
-    rec       = llm_data.get("recommendation", "")
+    # insights = llm_data.get("semantic_insights", [])   # disabled for v1
+    # rec      = llm_data.get("recommendation", "")      # disabled for v1
 
-    # 5. Attach LLM summaries to each clause change
+    # 4. Attach LLM summaries to each clause change
     clause_changes = []
     for c in raw_changes:
         name    = c["clause_name"]
         summary = summaries.get(name, "").strip()
         if not summary:
-            # Fallback: deterministic summary from structured fields
             if c["status"] == "added":
                 summary = f"{name} is a new clause added in the revised document."
             elif c["status"] == "removed":
@@ -449,15 +439,29 @@ async def compare_documents(
             "severity":    c["severity"],
             "doc1":        c["doc1"],
             "doc2":        c["doc2"],
-            "word_diff":   c["word_diff"],
             "summary":     summary,
         })
+
+    # 5. Document type compatibility message
+    doc1_type = extraction1.get("document_type", "")
+    doc2_type = extraction2.get("document_type", "")
+    types_match = _norm(doc1_type) == _norm(doc2_type)
+    if types_match:
+        comparison_notice = (
+            f"Both documents are of the same type ({doc1_type}). "
+            "Comparison results are reliable."
+        )
+    else:
+        comparison_notice = (
+            f"Warning: Document types differ — '{doc1_type}' vs '{doc2_type}'. "
+            "Comparing different document types may produce incomplete or inaccurate results."
+        )
 
     duration_ms = int((time.perf_counter() - t_start) * 1000)
     logger.info(
         f"[comparison] Done — {duration_ms}ms | "
         f"changes={len(clause_changes)} | "
-        f"risk={risk['overall_risk_level']} (score={risk['risk_score']})"
+        f"types_match={types_match}"
     )
 
     return {
@@ -467,16 +471,17 @@ async def compare_documents(
             "session_id":          session_id,
             "doc1_filename":       doc1_filename,
             "doc2_filename":       doc2_filename,
-            "doc1_document_type":  extraction1.get("document_type", ""),
-            "doc2_document_type":  extraction2.get("document_type", ""),
+            "doc1_document_type":  doc1_type,
+            "doc2_document_type":  doc2_type,
+            "comparison_notice":   comparison_notice,
             "compared_at":         datetime.now(timezone.utc).isoformat(),
             "total_changes":       len(clause_changes),
-            "high_risk_changes":   risk["high_risk_changes"],
-            "risk_score":          risk["risk_score"],
-            "overall_risk_level":  risk["overall_risk_level"],
-            "recommendation":      rec,
-            "semantic_insights":   insights,
-            "text_diff_stats":     diff_stats,
+            # "high_risk_changes":  risk["high_risk_changes"],   # disabled for v1
+            # "risk_score":         risk["risk_score"],           # disabled for v1
+            # "overall_risk_level": risk["overall_risk_level"],   # disabled for v1
+            # "recommendation":     rec,                          # disabled for v1
+            # "semantic_insights":  insights,                     # disabled for v1
+            # "text_diff_stats":    diff_stats,                   # disabled for v1
             "clause_changes":      clause_changes,
         },
     }
