@@ -31,26 +31,23 @@ Document Type: {document_type}
         final_prompt += f"\nAlso specifically check for: {specific_checks}\n"
 
     final_prompt += """
-Look for:
-- Missing fields
-- Incorrect or inconsistent data
-- Risky or harmful content
-- Structural issues
+Carefully analyze the document for issues, especially:
+- **Missing fields:** Identify any expected fields that are absent.
+- **Placeholders:** Note any variables or entries that seem to be generic placeholders (e.g., "[Client Name]", "MM/DD/YYYY").
+- **Incorrect/Unprovided Entries:** Point out any entries that are clearly incorrect or have no value provided (e.g., "N/A", "------").
+- Risky or harmful content.
+- Structural or formatting issues.
 
-Provide output in STRICT JSON format:
+Provide your analysis in STRICT JSON format with the following keys:
 {
-  "summary": "Overall assessment",
-  "issues": [
-    {
-      "type": "field_missing | risk | formatting | inconsistency",
-      "description": "Explain the issue",
-      "severity": "low | medium | high"
-    }
-  ],
-  "recommendations": [
-    "Actionable suggestion"
+  "overview": "Overall assessment of the document's completeness and quality.",
+  "summary": "A detailed summary of the document's validation status. **Crucially, list all identified missing fields, placeholders, and incorrect/unprovided entries here.** Group them logically and provide context.",
+  "highlights": [
+    "Specific instance of a missing field or placeholder identified.",
+    "Another specific detail of an incorrect entry."
   ]
 }
+Each item in 'highlights' should be a concise, specific finding of a missing field, placeholder, or incorrect entry.
 """
 
     return final_prompt
