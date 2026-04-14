@@ -38,16 +38,15 @@ Carefully analyze the document for issues, especially:
 - Risky or harmful content.
 - Structural or formatting issues.
 
-Provide your analysis in STRICT JSON format with the following keys:
+Provide your analysis in STRICT JSON format with the following keys. Focus on providing detailed information in the 'highlights' array:
 {
-  "overview": "Overall assessment of the document's completeness and quality.",
-  "summary": "A detailed summary of the document's validation status. **Crucially, list all identified missing fields, placeholders, and incorrect/unprovided entries here.** Group them logically and provide context.",
   "highlights": [
-    "Specific instance of a missing field or placeholder identified.",
-    "Another specific detail of an incorrect entry."
+    "Specific instance of a missing field identified (e.g., 'Missing: Applicant Name').",
+    "Specific instance of a placeholder (e.g., 'Placeholder: [Company Address]').",
+    "Specific instance of an incorrect or unprovided entry (e.g., 'Unprovided: Date of Birth - [N/A]')."
   ]
 }
-Each item in 'highlights' should be a concise, specific finding of a missing field, placeholder, or incorrect entry.
+Each item in 'highlights' should be a concise, specific finding. If no issues are found, the 'highlights' array should be empty.
 """
 
     return final_prompt
@@ -141,6 +140,10 @@ Return STRICT JSON:
                 "message": "Validation completed but JSON parsing failed.",
                 "raw_response": llm_response_text
             }
+        
+        # Filter out 'overview' and 'summary' as per user request
+        validation_result.pop("overview", None)
+        validation_result.pop("summary", None)
 
         return {
             "status": "success",
