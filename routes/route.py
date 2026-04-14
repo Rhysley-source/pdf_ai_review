@@ -13,9 +13,10 @@ from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from llm_model.ai_model import generate_analysis, generate_analysis_stream, transcribe_audio
 from utils.json_utils import extract_json
 from db_files.db import log_request, log_comparison_request
-from feature_modules.key_clause_extraction import extract_key_clauses, extract_text_from_upload
+from feature_modules.key_clause_extraction import classify_document, extract_key_clauses, extract_text_from_upload
 from feature_modules.risk_detection import analyze_document_risks
 from feature_modules.red_flag_scanner import scan_red_flags
+from feature_modules.obligation_detection import analyze_document_obligations
 from feature_modules.document_comparison import compare_documents
 from auth import verify_api_key
 
@@ -278,6 +279,76 @@ async def detect_risks(
         )
         if os.path.exists(file_path):
             os.remove(file_path)
+
+# ---------------------------------------------------------------------------
+# POST /detect-obligations
+# ---------------------------------------------------------------------------
+
+@router.post("/detect-obligations")
+async def detect_obligations(
+    file: UploadFile = File(...),
+):
+    """
+    Obligation Detection Endpoint.
+    Detects positive (MUST DO) and negative (MUST NOT DO) obligations
+    from legal and business documents.
+    Every request is logged to PostgreSQL with real token counts.
+    """
+    text, pages_to_read, total_pages, request_id, t_start, file_path = \
+        await extract_text_from_upload(
+            file,
+            endpoint="/detect-obligations"
+        )
+
+    total_in_tok  = 0
+    total_out_tok = 0
+    pdf_size      = 0
+    status        = "success"
+    error_msg     = None
+
+    try:
+        logger.info(f"[{request_id}] Starting Obligation Detection...")
+
+        # Get file size from temp file
+        if os.path.exists(file_path):
+            pdf_size = os.path.getsize(file_path)
+
+        result, total_in_tok, total_out_tok = await analyze_document_obligations(text)
+
+        logger.info(
+            f"[{request_id}] Obligation Detection complete — "
+            f"tokens={total_in_tok}in/{total_out_tok}out"
+        )
+
+        return result
+
+    except Exception as e:
+        status    = "error"
+        error_msg = str(e)
+        logger.exception(f"[{request_id}] Obligation Detection failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal error during obligation detection."
+        )
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logger.debug(f"[{request_id}] Temp file deleted")
+
+        elapsed = time.perf_counter() - t_start
+        await log_request(
+            request_id        = request_id,
+            pdf_name          = file.filename or "unknown",
+            pdf_size_bytes    = pdf_size,
+            total_pages       = total_pages,
+            pages_analysed    = pages_to_read,
+            input_tokens      = total_in_tok,
+            output_tokens     = total_out_tok,
+            completion_time_s = elapsed,
+            endpoint          = "/detect-obligations",
+            status            = status,
+            error_message     = error_msg,
+        )
 
 
 # ---------------------------------------------------------------------------
