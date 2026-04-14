@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any
 
 from fastapi import UploadFile
 
-from utils.pdf_utils import load_pdf, extract_text_from_pdf
+from utils.pdf_utils import load_pdf, merge_pages
 from llm_model.ai_model import run_llm
 from utils.json_utils import extract_json_from_text
 
@@ -42,7 +42,7 @@ async def validate_document(
 
         # Load PDF and extract text
         pdf_document = load_pdf(temp_file_path)
-        extracted_text = extract_text_from_pdf(pdf_document)
+        extracted_text = merge_pages(pdf_document)[0].page_content
 
         if not extracted_text:
             return {"status": "error", "message": "Could not extract text from the PDF."}
