@@ -410,6 +410,55 @@ async def run_llm(
                                               max_output_tokens=max_output_tokens)
     return content
 
+async def run_llm_with_tokens(
+    text: str,
+    system_prompt: str,
+    max_input_tokens: int = 50000,
+) -> tuple[str, int, int]:
+    """
+    Same as run_llm() but returns (content, input_tokens, output_tokens).
+    Used by obligation detection inside document_comparison.py.
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": f"Document:\n----------------\n{text}\n----------------"},
+    ]
+    content, in_tok, out_tok = await _run_inference_text(messages, "run_llm_with_tokens")
+    return content, in_tok, out_tok
+
+
+async def run_llm_raw(system: str, user: str) -> str:
+    """
+    LLM call with explicit system and user messages — no document wrapper.
+    Use when the caller already embeds all context in the user turn
+    (e.g. enrichment prompts for document comparison).
+    Does NOT set response_format — plain text output only.
+    """
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": user},
+    ]
+    content, _, _ = await _run_inference_text(messages, "run_llm_raw")
+    return content
+
+
+async def run_llm_raw_json(system: str, user: str) -> tuple[str, int, int]:
+    """
+    LLM call with explicit system and user messages, forcing JSON output mode.
+    Use for structured extraction that requires a guaranteed JSON response
+    (e.g. enrichment, obligation extraction in document comparison).
+
+    REQUIREMENT: the combined system+user content MUST contain the word 'json'
+    (OpenAI constraint for response_format=json_object).
+    Returns (content, input_tokens, output_tokens).
+    """
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": user},
+    ]
+    content, in_tok, out_tok = await _run_inference_json(messages, "run_llm_raw_json")
+    return content, in_tok, out_tok
+
 
 # ---------------------------------------------------------------------------
 # _run_map_chunk — one map chunk with semaphore + retry

@@ -117,15 +117,69 @@ CREATE INDEX IF NOT EXISTS idx_document_requests_document_type
 
 CREATE INDEX IF NOT EXISTS idx_document_requests_status
     ON document_requests (status);
-"""
 
+-- Comparison Logs
+CREATE TABLE IF NOT EXISTS comparison_logs (
+    id                  SERIAL PRIMARY KEY,
+
+    # Session & request identity
+    session_id          UUID NOT NULL,
+    request_id          UUID NOT NULL DEFAULT gen_random_uuid(),
+
+    # -- Documents compared
+    doc1_filename       TEXT NOT NULL,
+    doc2_filename       TEXT NOT NULL,
+
+    # -- Timing
+    requested_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at        TIMESTAMPTZ,
+    duration_ms         INTEGER,
+
+    # -- Outcome
+    status              TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'success', 'failed')),
+    error_message       TEXT,
+
+    # -- Change summary (fast querying)
+    total_changes       INTEGER,
+    high_risk_changes   INTEGER,
+    overall_risk_level  TEXT CHECK (overall_risk_level IN ('high', 'medium', 'low')),
+    similarity_percent  TEXT,
+
+    # -- Full result payload
+    result_json         JSONB,
+
+    # -- Token + performance tracking (ADDED for consistency)
+    input_tokens        INTEGER,
+    output_tokens       INTEGER,
+    total_tokens        INTEGER,
+
+    # -- Client metadata
+    client_ip           TEXT,
+    user_agent          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_comparison_logs_session_id
+    ON comparison_logs (session_id);
+
+CREATE INDEX IF NOT EXISTS idx_comparison_logs_requested_at
+    ON comparison_logs (requested_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_comparison_logs_status
+    ON comparison_logs (status);
+
+CREATE INDEX IF NOT EXISTS idx_comparison_logs_risk_level
+    ON comparison_logs (overall_risk_level);
+
+CREATE INDEX IF NOT EXISTS idx_comparison_logs_request_id
+    ON comparison_logs (request_id);
+"""
 
 async def init_db() -> None:
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
             await conn.execute(CREATE_TABLES_SQL)
-        logger.info("[db] Schema initialised (pdf_requests + document_requests tables ready)")
+        logger.info("[db] Schema initialised (pdf_requests + document_requests + comparison_logs tables ready)")
     except Exception as e:
         logger.error(f"[db] Schema init failed: {e}")
         raise
@@ -253,6 +307,94 @@ async def log_document_request(
     except Exception as e:
         logger.error(f"[db] log_document_request failed for {request_id}: {e}")
 
+# Log Comparison Request
+async def log_comparison_request(
+    session_id: str,
+    request_id: str,
+    doc1_filename: str,
+    doc2_filename: str,
+    status: str = "success",
+    duration_ms: int = 0,
+    total_changes: int = 0,
+    high_risk_changes: int = 0,
+    overall_risk_level: str = "low",
+    similarity_percent: str = "",
+    result_json: dict | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    error_message: str | None = None,
+    client_ip: str | None = None,
+    user_agent: str | None = None,
+) -> int | None:
+    """
+    Log a contract comparison request to comparison_logs.
+ 
+    Returns the inserted row id (int) on success, or None on failure.
+    Never raises — safe for production pipelines.
+    """
+    from db_files.db import get_pool   # local import to avoid circular
+ 
+    total_tokens    = input_tokens + output_tokens
+    result_json_str = _json.dumps(result_json) if result_json else None
+ 
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row_id = await conn.fetchval(
+                """
+                INSERT INTO comparison_logs (
+                    session_id, request_id,
+                    doc1_filename, doc2_filename,
+                    completed_at, duration_ms,
+                    status, error_message,
+                    total_changes, high_risk_changes,
+                    overall_risk_level, similarity_percent,
+                    result_json,
+                    input_tokens, output_tokens, total_tokens,
+                    client_ip, user_agent
+                ) VALUES (
+                    $1,  $2,
+                    $3,  $4,
+                    NOW(), $5,
+                    $6,  $7,
+                    $8,  $9,
+                    $10, $11,
+                    $12,
+                    $13, $14, $15,
+                    $16, $17
+                )
+                RETURNING id
+                """,
+                session_id,
+                request_id,
+                doc1_filename,
+                doc2_filename,
+                duration_ms,
+                status,
+                error_message,
+                total_changes,
+                high_risk_changes,
+                overall_risk_level,
+                similarity_percent,
+                result_json_str,
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                client_ip,
+                user_agent,
+            )
+ 
+        logger.info(
+            f"[db] comparison logged — id={row_id} session={session_id} "
+            f"docs=({doc1_filename}, {doc2_filename}) "
+            f"changes={total_changes} risk={overall_risk_level} "
+            f"time={duration_ms}ms status={status}"
+        )
+        return row_id
+ 
+    except Exception as e:
+        logger.error(f"[db] log_comparison_request failed: {e}")
+        return None
 
 # ---------------------------------------------------------------------------
 # Query helpers (optional — for admin/stats endpoints)
@@ -315,4 +457,107 @@ async def get_recent_documents(limit: int = 20) -> list[dict]:
         return [dict(r) for r in rows]
     except Exception as e:
         logger.error(f"[db] get_recent_documents failed: {e}")
+        return []
+    
+async def get_comparison_stats() -> dict:
+    """
+    Returns aggregate stats for comparison logs.
+    """
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+
+            # 🔹 Overall stats
+            overall_row = await conn.fetchrow("""
+                SELECT
+                    COUNT(*)                                  AS total_requests,
+                    COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+                    COUNT(*) FILTER (WHERE status = 'failed')  AS failed_count,
+                    ROUND(AVG(duration_ms))                    AS avg_duration_ms,
+                    ROUND(AVG(total_changes))                  AS avg_changes,
+                    SUM(total_changes)                         AS total_changes,
+                    SUM(high_risk_changes)                     AS total_high_risk_changes,
+                    SUM(total_tokens)                          AS total_tokens
+                FROM comparison_logs
+            """)
+
+            # 🔹 Risk distribution
+            risk_rows = await conn.fetch("""
+                SELECT
+                    overall_risk_level,
+                    COUNT(*) AS count
+                FROM comparison_logs
+                WHERE overall_risk_level IS NOT NULL
+                GROUP BY overall_risk_level
+                ORDER BY count DESC
+            """)
+
+            # 🔹 Recent activity (last 24h)
+            recent_row = await conn.fetchrow("""
+                SELECT
+                    COUNT(*) AS requests_last_24h
+                FROM comparison_logs
+                WHERE requested_at >= NOW() - INTERVAL '24 hours'
+            """)
+
+            # 🔹 Avg similarity
+            similarity_row = await conn.fetchrow("""
+                SELECT
+                    ROUND(AVG(
+                        NULLIF(REPLACE(similarity_percent, '%', ''), '')::numeric
+                    ), 2) AS avg_similarity_percent
+                FROM comparison_logs
+                WHERE similarity_percent IS NOT NULL
+            """)
+
+        return {
+            "overall": dict(overall_row) if overall_row else {},
+            "risk_distribution": [dict(r) for r in risk_rows],
+            "recent": dict(recent_row) if recent_row else {},
+            "similarity": dict(similarity_row) if similarity_row else {},
+        }
+
+    except Exception as e:
+        logger.error(f"[db] get_comparison_stats failed: {e}")
+        return {
+            "overall": {},
+            "risk_distribution": [],
+            "recent": {},
+            "similarity": {}
+        }
+
+async def get_recent_comparisons(limit: int = 20) -> list[dict]:
+    """
+    Returns recent comparison requests.
+    Ordered by most recent first.
+    """
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT
+                    session_id,
+                    request_id,
+                    doc1_filename,
+                    doc2_filename,
+                    status,
+                    total_changes,
+                    high_risk_changes,
+                    overall_risk_level,
+                    similarity_percent,
+                    duration_ms,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    requested_at,
+                    completed_at
+                FROM comparison_logs
+                ORDER BY requested_at DESC
+                LIMIT $1
+            """, limit)
+
+        return [dict(r) for r in rows]
+
+    except Exception as e:
+        logger.error(f"[db] get_recent_comparisons failed: {e}")
         return []

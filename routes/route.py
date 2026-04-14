@@ -12,11 +12,17 @@ from functools import partial
 from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from llm_model.ai_model import generate_analysis, generate_analysis_stream, transcribe_audio
 from utils.json_utils import extract_json
+from db_files.db import log_request, log_comparison_request
+from feature_modules.key_clause_extraction import classify_document, DOCUMENT_HANDLERS, extract_text_from_upload
 from db_files.db import log_request
 from feature_modules.key_clause_extraction import extract_key_clauses, extract_text_from_upload
 from feature_modules.risk_detection import analyze_document_risks
 from feature_modules.red_flag_scanner import scan_red_flags
 from auth import verify_api_key
+
+# for comparison endpoint
+from feature_modules.clause_extraction import extract_clauses
+from feature_modules.document_comparison import compare_documents
 
 logger = logging.getLogger(__name__)
 
@@ -664,3 +670,145 @@ async def convert_pdf_to_docx(
         if os.path.exists(file_path):
             os.remove(file_path)
             logger.debug(f"[{request_id}] temp file deleted")
+
+# POST /compare-documents
+@router.post("/compare-documents")
+async def compare_documents_api(
+    file1: UploadFile = File(...),
+    file2: UploadFile = File(...),
+):
+    """
+    Compare two PDF documents and return a structured diff matching the
+    target JSON schema.
+ 
+    Steps:
+      1. Extract text from both PDFs in parallel.
+      2. Classify document types in parallel.
+      3. Extract clauses from both documents in parallel (LLM-first).
+      4. Run compare_documents() → produces target-shaped JSON.
+      5. Log the result to the DB and inject log_id into the response.
+    """
+    request_id = str(uuid.uuid4())
+    session_id = str(uuid.uuid4())
+    t_start    = time.perf_counter()
+ 
+    status              = "success"
+    error_msg           = None
+    duration_ms         = 0
+    total_changes       = 0
+    high_risk_changes   = 0
+    overall_risk_level  = "low"
+    similarity_percent  = ""
+    input_tokens        = 0
+    output_tokens       = 0
+    compare_result      = {}
+    path1 = path2       = None
+ 
+    logger.info(f"[{request_id}] ── COMPARE START ── files=({file1.filename}, {file2.filename})")
+ 
+    try:
+        # ── Step 1: Extract text (parallel) ──────────────────────────────
+        (text1, pages1, total1, _, _, path1), \
+        (text2, pages2, total2, _, _, path2) = await asyncio.gather(
+            extract_text_from_upload(file1, endpoint="/compare-documents"),
+            extract_text_from_upload(file2, endpoint="/compare-documents"),
+        )
+ 
+        # ── Step 2: Validate length ───────────────────────────────────────
+        if len(text1.split()) < 20 or len(text2.split()) < 20:
+            raise HTTPException(
+                status_code=400,
+                detail="One or both documents are too short for comparison.",
+            )
+ 
+        # ── Step 3a: Classify both documents (parallel) ───────────────────
+        doc_type1, doc_type2 = await asyncio.gather(
+            classify_document(text1),
+            classify_document(text2),
+        )
+
+        # ── Step 3b: Extract clauses using doc_type-aware prompts (parallel)
+        (clauses1, in_tok1, out_tok1), \
+        (clauses2, in_tok2, out_tok2) = await asyncio.gather(
+            extract_clauses(text1, doc_type=doc_type1),
+            extract_clauses(text2, doc_type=doc_type2),
+        )
+
+        input_tokens  = in_tok1 + in_tok2
+        output_tokens = out_tok1 + out_tok2
+
+        logger.info(
+            f"[{request_id}] types=({doc_type1}, {doc_type2}) "
+            f"clauses=({len(clauses1)}, {len(clauses2)}) "
+            f"tokens={input_tokens}in/{output_tokens}out"
+        )
+ 
+        # ── Step 4: Compare ───────────────────────────────────────────────
+        compare_result = await compare_documents(
+            text1, text2, clauses1, clauses2,
+            doc1_filename=file1.filename or "document_1.pdf",
+            doc2_filename=file2.filename or "document_2.pdf",
+            session_id=session_id,
+            log_id=None,    # will be backfilled after DB insert
+        )
+ 
+        # Extract metrics for DB logging
+        comp  = compare_result.get("comparison", {})
+        total_changes      = comp.get("total_changes", 0)
+        high_risk_changes  = comp.get("high_risk_changes", 0)
+        overall_risk_level = comp.get("overall_risk_level", "low")
+        similarity_percent = comp.get("text_diff_stats", {}).get("similarity_percent", "")
+ 
+    except HTTPException:
+        status    = "failed"
+        error_msg = "HTTP error"
+        raise
+ 
+    except Exception as e:
+        status    = "failed"
+        error_msg = str(e)
+        logger.exception(f"[{request_id}] comparison error: {e}")
+        raise HTTPException(status_code=500, detail="Document comparison failed.")
+    # finally:
+    #     duration_ms = int((time.perf_counter() - t_start) * 1000)
+ 
+    #     # ── Step 5: Log to DB ─────────────────────────────────────────────
+    #     log_id = await log_comparison_request(
+    #         session_id=session_id,
+    #         request_id=request_id,
+    #         doc1_filename=file1.filename or "unknown",
+    #         doc2_filename=file2.filename or "unknown",
+    #         status=status,
+    #         duration_ms=duration_ms,
+    #         total_changes=total_changes,
+    #         high_risk_changes=high_risk_changes,
+    #         overall_risk_level=overall_risk_level,
+    #         similarity_percent=similarity_percent,
+    #         result_json=compare_result if status == "success" else None,
+    #         input_tokens=input_tokens,
+    #         output_tokens=output_tokens,
+    #         error_message=error_msg,
+    #     )
+ 
+    #     # Cleanup temp files
+    #     for p in [path1, path2]:
+    #         if p and os.path.exists(p):
+    #             os.remove(p)
+ 
+    #     logger.info(f"[{request_id}] ── COMPLETE — {duration_ms}ms ──")
+ 
+    # # Inject log_id into response (DB layer returns the inserted row id)
+    # if compare_result and log_id:
+    #     compare_result["log_id"] = log_id
+ 
+    finally:
+        # Cleanup temp files regardless of success or failure
+        for p in [path1, path2]:
+            if p and os.path.exists(p):
+                os.remove(p)
+                logger.debug(f"[{request_id}] temp file deleted: {p}")
+
+        duration_ms = int((time.perf_counter() - t_start) * 1000)
+        logger.info(f"[{request_id}] ── COMPLETE — {duration_ms}ms status={status} ──")
+
+    return compare_result
