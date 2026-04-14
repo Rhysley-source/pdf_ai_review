@@ -8,31 +8,67 @@ from fastapi import UploadFile
 from utils.pdf_utils import load_pdf, merge_pages
 from llm_model.ai_model import run_llm
 from utils.json_utils import extract_json
+from .prompts import prompts
 
 logger = logging.getLogger(__name__)
 
+
+# ✅ Prompt Generator Function
+def get_validation_prompt(document_type: str, specific_checks: Optional[str] = None) -> str:
+    base_prompt = "You are an expert document validator."
+
+    
+    selected_prompt = prompts.get(document_type.lower(), "Perform a general document validation.")
+
+    final_prompt = f"""{base_prompt}
+
+Document Type: {document_type}
+
+{selected_prompt}
+"""
+
+    if specific_checks:
+        final_prompt += f"\nAlso specifically check for: {specific_checks}\n"
+
+    final_prompt += """
+Look for:
+- Missing fields
+- Incorrect or inconsistent data
+- Risky or harmful content
+- Structural issues
+
+Provide output in STRICT JSON format:
+{
+  "summary": "Overall assessment",
+  "issues": [
+    {
+      "type": "field_missing | risk | formatting | inconsistency",
+      "description": "Explain the issue",
+      "severity": "low | medium | high"
+    }
+  ],
+  "recommendations": [
+    "Actionable suggestion"
+  ]
+}
+"""
+
+    return final_prompt
+
+
+# ✅ Main Validation Function
 async def validate_document(
     file: UploadFile,
-    validation_type: Optional[str] = "general",
     specific_checks: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Validates a document by extracting text and sending it to an LLM for analysis.
 
-    Args:
-        file: The uploaded PDF file.
-        validation_type: The general type of validation to perform (e.g., "general", "legal", "financial").
-        specific_checks: A comma-separated string of specific items to check for.
-
-    Returns:
-        A dictionary containing the validation results from the LLM.
-    """
     if not file.filename.lower().endswith(".pdf"):
         raise ValueError("Only PDF files are supported for document validation.")
 
     temp_file_path = None
+
     try:
-        # Save the uploaded file to a temporary location
+        # ✅ Save file temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             contents = await file.read()
             tmp.write(contents)
@@ -40,63 +76,90 @@ async def validate_document(
 
         logger.info(f"Processing PDF file: {file.filename}")
 
-        # Load PDF and extract text
+        # ✅ Extract text
         pdf_document = load_pdf(temp_file_path)
         extracted_text = merge_pages(pdf_document)[0].page_content
 
-        if not extracted_text:
-            return {"status": "error", "message": "Could not extract text from the PDF."}
+        if not extracted_text or len(extracted_text.strip()) < 20:
+            return {"status": "error", "message": "Could not extract sufficient text from the PDF."}
 
-        logger.info(f"Extracted {len(extracted_text):,} characters from PDF.")
+        logger.info(f"Extracted {len(extracted_text):,} characters")
 
-        # Prepare prompt for LLM
-        system_message_parts = [
-            "You are an expert document validator. Analyze the provided document text for any issues.",
-            f"Document type for validation: {validation_type}.",
-        ]
-        if specific_checks:
-            system_message_parts.append(f"Specifically check for: {specific_checks}.")
-        
-        system_message_parts.append(
-            "Look for missing fields, incorrect clauses, harmful terms and conditions, "
-            "or any other discrepancies based on the validation type and specific checks.",
+        # =========================
+        # ✅ STEP 1: CLASSIFICATION
+        # =========================
+        classification_prompt = """
+You are a document classification expert.
+
+Classify the document into one of these:
+- resume
+- contract
+- invoice
+- report
+- letter
+- other
+
+Return STRICT JSON:
+{
+  "document_type": "..."
+}
+"""
+
+        document_check = await run_llm(
+            text=extracted_text[:4000],  # limit for safety
+            system_prompt=classification_prompt
         )
-        system_message_parts.append(
-            "Provide your analysis in a JSON format with the following keys: "
-            "'summary' (overall assessment), "
-            "'issues' (a list of detected issues, each with 'type', 'description', 'severity'), "
-            "'recommendations' (suggestions for improvement). "
-            "If no issues are found, the 'issues' list should be empty. "
-            "If there are no recommendations, 'recommendations' should be an empty list."
+
+        classification_json = extract_json(document_check)
+
+        document_type = "other"
+        if classification_json and isinstance(classification_json, dict):
+            document_type = classification_json.get("document_type", "other")
+
+        logger.info(f"Detected document type: {document_type}")
+
+        # =========================
+        # ✅ STEP 2: PROMPT GENERATION
+        # =========================
+        system_prompt = get_validation_prompt(document_type, specific_checks)
+
+        # =========================
+        # ✅ STEP 3: VALIDATION
+        # =========================
+        logger.info("Sending document for validation...")
+
+        llm_response_text = await run_llm(
+            text=extracted_text[:12000],  # limit to avoid token overflow
+            system_prompt=system_prompt
         )
-        
-        system_prompt = "\n".join(system_message_parts)
 
-        # Call the LLM
-        logger.info("Sending document text to LLM for validation...")
-        llm_response_text = await run_llm(text=extracted_text, system_prompt=system_prompt)
-        logger.info("Received response from LLM.")
-
-        # Extract JSON from LLM response
         validation_result = extract_json(llm_response_text)
 
         if not validation_result:
-            logger.warning(f"LLM response did not contain valid JSON: {llm_response_text[:500]}...")
+            logger.warning("Invalid JSON from LLM")
+
             return {
                 "status": "warning",
-                "message": "LLM analysis complete, but structured JSON output could not be parsed.",
-                "raw_llm_response": llm_response_text
+                "document_type": document_type,
+                "message": "Validation completed but JSON parsing failed.",
+                "raw_response": llm_response_text
             }
 
-        return {"status": "success", "result": validation_result}
+        return {
+            "status": "success",
+            "document_type": document_type,
+            "result": validation_result
+        }
 
     except ValueError as ve:
         logger.error(f"Validation error: {ve}")
         return {"status": "error", "message": str(ve)}
+
     except Exception as e:
-        logger.exception("An unexpected error occurred during document validation.")
-        return {"status": "error", "message": f"An unexpected error occurred: {e}"}
+        logger.exception("Unexpected error during validation")
+        return {"status": "error", "message": str(e)}
+
     finally:
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
-            logger.debug(f"Removed temporary file: {temp_file_path}")
+            logger.debug(f"Removed temp file: {temp_file_path}")
