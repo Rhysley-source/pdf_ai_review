@@ -13,7 +13,7 @@ from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from llm_model.ai_model import generate_analysis, generate_analysis_stream, transcribe_audio
 from utils.json_utils import extract_json
 from db_files.db import log_request, log_comparison_request
-from feature_modules.key_clause_extraction import classify_document, DOCUMENT_HANDLERS, extract_text_from_upload
+from feature_modules.key_clause_extraction import _classify_document, extract_text_from_upload
 from db_files.db import log_request
 from feature_modules.key_clause_extraction import extract_key_clauses, extract_text_from_upload
 from feature_modules.risk_detection import analyze_document_risks
@@ -723,8 +723,8 @@ async def compare_documents_api(
  
         # ── Step 3a: Classify both documents (parallel) ───────────────────
         doc_type1, doc_type2 = await asyncio.gather(
-            classify_document(text1),
-            classify_document(text2),
+            _classify_document(text1),
+            _classify_document(text2),
         )
 
         # ── Step 3b: Extract clauses using doc_type-aware prompts (parallel)
