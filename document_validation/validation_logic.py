@@ -142,8 +142,8 @@ Return STRICT JSON:
             }
         
         # Filter out 'overview' and 'summary' as per user request
-        validation_result.pop("overview", None)
-        validation_result.pop("summary", None)
+        # validation_result.pop("overview", None)
+        # validation_result.pop("summary", None)
 
         return {
             "status": "success",
