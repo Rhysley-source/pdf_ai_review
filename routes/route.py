@@ -13,9 +13,8 @@ from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from llm_model.ai_model import generate_analysis, generate_analysis_stream, transcribe_audio
 from utils.json_utils import extract_json
 from db_files.db import log_request, log_comparison_request
-from feature_modules.key_clause_extraction import classify_document, DOCUMENT_HANDLERS, extract_text_from_upload
+from feature_modules.key_clause_extraction import classify_document, extract_key_clauses, extract_text_from_upload
 from db_files.db import log_request
-from feature_modules.key_clause_extraction import extract_key_clauses, extract_text_from_upload
 from feature_modules.risk_detection import analyze_document_risks
 from feature_modules.red_flag_scanner import scan_red_flags
 from auth import verify_api_key

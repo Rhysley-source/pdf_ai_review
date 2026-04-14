@@ -86,6 +86,12 @@ Return ONLY this JSON — no markdown, no explanation:
 {"slug": "<slug>", "label": "<label>"}"""
 
 
+async def classify_document(text: str) -> str:
+    """Public wrapper — returns only the doc-type slug (used by the comparison endpoint)."""
+    slug, _label = await _classify_document(text)
+    return slug
+
+
 async def _classify_document(text: str) -> tuple[str, str]:
     raw    = await run_llm(text[:4000], _CLASSIFY_PROMPT)
     parsed = extract_json_from_text(raw)
