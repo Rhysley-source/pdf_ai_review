@@ -7,7 +7,7 @@ from fastapi import UploadFile
 
 from utils.pdf_utils import load_pdf, merge_pages
 from llm_model.ai_model import run_llm
-from utils.json_utils import extract_json_from_text
+from utils.json_utils import extract_json
 
 logger = logging.getLogger(__name__)
 
