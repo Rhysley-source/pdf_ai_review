@@ -50,18 +50,18 @@ async def validate_document(
         logger.info(f"Extracted {len(extracted_text):,} characters from PDF.")
 
         # Prepare prompt for LLM
-        prompt_parts = [
+        system_message_parts = [
             "You are an expert document validator. Analyze the provided document text for any issues.",
             f"Document type for validation: {validation_type}.",
         ]
         if specific_checks:
-            prompt_parts.append(f"Specifically check for: {specific_checks}.")
+            system_message_parts.append(f"Specifically check for: {specific_checks}.")
         
-        prompt_parts.append(
+        system_message_parts.append(
             "Look for missing fields, incorrect clauses, harmful terms and conditions, "
             "or any other discrepancies based on the validation type and specific checks.",
         )
-        prompt_parts.append(
+        system_message_parts.append(
             "Provide your analysis in a JSON format with the following keys: "
             "'summary' (overall assessment), "
             "'issues' (a list of detected issues, each with 'type', 'description', 'severity'), "
@@ -69,15 +69,12 @@ async def validate_document(
             "If no issues are found, the 'issues' list should be empty. "
             "If there are no recommendations, 'recommendations' should be an empty list."
         )
-        prompt_parts.append("""--- DOCUMENT START ---""")
-        prompt_parts.append(extracted_text)
-        prompt_parts.append("""--- DOCUMENT END ---""")
-
-        llm_prompt = "\n".join(prompt_parts)
+        
+        system_prompt = "\n".join(system_message_parts)
 
         # Call the LLM
         logger.info("Sending document text to LLM for validation...")
-        llm_response_text = await run_llm(llm_prompt)
+        llm_response_text = await run_llm(text=extracted_text, system_prompt=system_prompt)
         logger.info("Received response from LLM.")
 
         # Extract JSON from LLM response
