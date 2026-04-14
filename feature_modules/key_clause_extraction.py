@@ -214,6 +214,15 @@ Return ONLY the plain text summary — no JSON, no markdown, no headings."""
 
 
 # ---------------------------------------------------------------------------
+# Public classify helper — returns just the slug (used by compare-documents)
+# ---------------------------------------------------------------------------
+
+async def classify_document(text: str) -> str:
+    slug, _ = await _classify_document(text)
+    return slug
+
+
+# ---------------------------------------------------------------------------
 # Public entry point — replaces all old per-type handlers
 # ---------------------------------------------------------------------------
 
