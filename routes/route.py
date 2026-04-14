@@ -745,7 +745,7 @@ async def compare_documents_api(
         logger.info(
             f"[{request_id}] ── COMPARE DONE — {elapsed:.2f}s | "
             f"changes={result['comparison']['total_changes']} | "
-            f"risk={result['comparison']['overall_risk_level']}"
+            # f"risk={result['comparison']['overall_risk_level']}"
         )
         return result
  
