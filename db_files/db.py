@@ -14,6 +14,7 @@ Install:
   DATABASE_URL=postgresql://user:password@localhost:5432/dbname
 """
 
+import json as _json
 import os
 import logging
 import asyncpg
@@ -122,39 +123,39 @@ CREATE INDEX IF NOT EXISTS idx_document_requests_status
 CREATE TABLE IF NOT EXISTS comparison_logs (
     id                  SERIAL PRIMARY KEY,
 
-    # Session & request identity
+    -- Session & request identity
     session_id          UUID NOT NULL,
     request_id          UUID NOT NULL DEFAULT gen_random_uuid(),
 
-    # -- Documents compared
+    -- Documents compared
     doc1_filename       TEXT NOT NULL,
     doc2_filename       TEXT NOT NULL,
 
-    # -- Timing
+    -- Timing
     requested_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at        TIMESTAMPTZ,
     duration_ms         INTEGER,
 
-    # -- Outcome
+    -- Outcome
     status              TEXT NOT NULL DEFAULT 'pending'
                         CHECK (status IN ('pending', 'success', 'failed')),
     error_message       TEXT,
 
-    # -- Change summary (fast querying)
+    -- Change summary (fast querying)
     total_changes       INTEGER,
     high_risk_changes   INTEGER,
     overall_risk_level  TEXT CHECK (overall_risk_level IN ('high', 'medium', 'low')),
     similarity_percent  TEXT,
 
-    # -- Full result payload
+    -- Full result payload
     result_json         JSONB,
 
-    # -- Token + performance tracking (ADDED for consistency)
+    -- Token + performance tracking
     input_tokens        INTEGER,
     output_tokens       INTEGER,
     total_tokens        INTEGER,
 
-    # -- Client metadata
+    -- Client metadata
     client_ip           TEXT,
     user_agent          TEXT
 );
@@ -257,8 +258,6 @@ async def log_document_request(
     Log a document generation request to the document_requests table.
     Never raises — DB errors are logged but do not break the API.
     """
-    import json as _json
-
     total_tokens   = input_tokens + output_tokens
     missing        = missing_fields or []
     fields_json    = _json.dumps(fields) if fields else None
