@@ -945,7 +945,7 @@ async def analyze_document_risks(text: str) -> dict:
     document = text[:_MAX_SINGLE_CALL_CHARS]
 
     logger.info(f"[risk_detection] Single-call analysis — {len(document):,} chars")
-    raw    = await run_llm(document, _SINGLE_CALL_SYSTEM, max_output_tokens=4096)
+    raw    = await run_llm(document, _SINGLE_CALL_SYSTEM, max_output_tokens=8192)
     result = extract_json_from_text(raw)
 
     if not result:

@@ -385,7 +385,7 @@ def extract_json_raw(text: str) -> dict:
             return repaired
 
     # Strategy 3 — truncation recovery: extract complete objects from known array fields
-    for field in ("key_clauses", "risks", "flags", "obligations", "clauses"):
+    for field in ("detected_risks", "key_clauses", "risks", "flags", "obligations", "clauses"):
         recovered = _recover_truncated_array(cleaned, field)
         if recovered:
             return recovered
