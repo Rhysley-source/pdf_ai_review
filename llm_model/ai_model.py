@@ -35,8 +35,8 @@ _MAX_COMPLETION_TOKENS_MODELS = {
 }
 
 TOKEN_CHUNK_SIZE    = 800000
-TOKEN_CHUNK_OVERLAP = 500
-MAX_OUTPUT_TOKENS   = 4096
+TOKEN_CHUNK_OVERLAP = 200
+MAX_OUTPUT_TOKENS   = 1500
 MAP_JSON_RETRY_ATTEMPTS = 2
 
 # ---------------------------------------------------------------------------
