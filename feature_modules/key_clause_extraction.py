@@ -276,7 +276,7 @@ async def extract_key_clauses(text: str) -> dict:
         "status":        "success",
         "document_type": doc_label,
         "total_clauses": len(key_clauses),
-        "summary":       summary.strip(),
+        "summary":       "",
         "key_clauses":   key_clauses,
     }
 
