@@ -9,7 +9,7 @@ from functools import partial
 
 from fastapi import HTTPException, UploadFile
 
-from llm_model.ai_model import run_llm
+from llm_model.ai_model import run_llm, run_llm_raw_json
 from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from utils.json_utils import extract_json_raw as extract_json_from_text
 
@@ -157,7 +157,8 @@ Rules:
 - No explanation, no markdown — ONLY the JSON"""
 
     logger.info(f"[key_clause] Extracting clauses — {chunk_label}")
-    raw    = await run_llm(chunk, system_prompt, max_output_tokens=4096)
+    user_content = f"Document:\n----------------\n{chunk}\n----------------"
+    raw, _, _ = await run_llm_raw_json(system_prompt, user_content)
     result = extract_json_from_text(raw)
 
     clauses = result.get("key_clauses", [])
