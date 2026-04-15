@@ -42,10 +42,11 @@ python-docx
 # ------------------------------------------------------------
 # LangChain
 # ------------------------------------------------------------
-langchain==0.0.352
-langchain-community==0.0.20
-langchain-core==0.1.23
-langsmith==0.0.87
+langchain>=0.2.0,<0.3.0
+langchain-community>=0.2.0,<0.3.0
+langchain-core>=0.2.0,<0.3.0
+langsmith>=0.1.0,<0.2.0
+langgraph>=0.1.0,<0.3.0
 
 # ------------------------------------------------------------
 # Image / CV processing
