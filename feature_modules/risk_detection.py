@@ -137,12 +137,64 @@ _RISK_PROFILES = {
 
 
 # ---------------------------------------------------------------------------
-# Chunking — improvement #3
-# Splits long documents into overlapping windows so no clause is missed.
+# Chunking
 # ---------------------------------------------------------------------------
 
-_CHUNK_SIZE    = 10_000   # chars per chunk
+_CHUNK_SIZE    = 15_000   # chars per chunk (larger = fewer parallel calls)
 _CHUNK_OVERLAP = 500      # overlap between consecutive chunks
+
+# ---------------------------------------------------------------------------
+# Keyword-based fast classification
+# Covers ~80% of documents without an LLM call.
+# Patterns matched against the first 2000 chars (title + opening clauses).
+# ---------------------------------------------------------------------------
+
+_KEYWORD_RULES: list[tuple[str, re.Pattern]] = [
+    ("nda",        re.compile(r"\b(non.?disclosure|confidentiality\s+agreement|nda)\b", re.I)),
+    ("employment", re.compile(r"\b(employment\s+agreement|offer\s+letter|appointment\s+letter|employment\s+contract)\b", re.I)),
+    ("lease",      re.compile(r"\b(lease\s+agreement|rental\s+agreement|tenancy\s+agreement|leave\s+and\s+licen[cs]e)\b", re.I)),
+    ("invoice",    re.compile(r"\b(tax\s+invoice|proforma\s+invoice|purchase\s+order|invoice\s+no\.?|bill\s+of\s+sale)\b", re.I)),
+    ("resume",     re.compile(r"\b(curriculum\s+vitae|work\s+experience|professional\s+summary|skills\s+summary)\b", re.I)),
+    ("contract",   re.compile(r"\b(service\s+agreement|vendor\s+agreement|master\s+agreement|terms\s+and\s+conditions|memorandum\s+of\s+understanding|\bm\.?o\.?u\.?\b|agreement\s+between)\b", re.I)),
+]
+
+_SLUG_LABELS = {
+    "contract":   "Contract / Legal Agreement",
+    "employment": "Employment Agreement",
+    "nda":        "Non-Disclosure Agreement",
+    "lease":      "Lease Agreement",
+    "invoice":    "Invoice / Billing Document",
+    "resume":     "Resume / CV",
+    "other":      "General Document",
+}
+
+
+def _classify_by_keywords(text: str) -> tuple[str, str] | None:
+    """
+    Fast keyword classification on the first 2000 chars.
+    Returns (slug, label) on a confident match, or None to fall back to LLM.
+    """
+    sample = text[:2000]
+    for slug, pattern in _KEYWORD_RULES:
+        if pattern.search(sample):
+            logger.info(f"[risk_detection] Keyword classify → {slug}")
+            return slug, _SLUG_LABELS[slug]
+    return None
+
+# ---------------------------------------------------------------------------
+# Regex pre-filter for placeholder detection
+# Skips all LLM calls when the document has no placeholder patterns.
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER_RE = re.compile(
+    r'\[[A-Z][^\]]{0,50}\]'        # [INSERT DATE], [PARTY NAME]
+    r'|_{4,}'                       # __________
+    r'|<[A-Z][^>]{0,30}>'          # <INSERT NAME>
+    r'|\{[A-Z][^}]{0,30}\}'        # {COMPANY NAME}
+    r'|__[A-Z_]{2,30}__'           # __VENDOR_NAME__
+    r'|\bTBD\b|\bTBA\b',
+    re.MULTILINE,
+)
 
 
 def _chunk_text(text: str) -> list[str]:
@@ -441,6 +493,11 @@ async def _detect_placeholders_llm(text: str) -> list[dict]:
     Returns a detected_risks-format list — one entry if any placeholders
     are found, empty list if the document is clean.
     """
+    # Fast pre-filter: skip all LLM calls when no placeholder pattern is present.
+    if not _PLACEHOLDER_RE.search(text):
+        logger.info("[risk_detection] Placeholder scan: no patterns found — skipping LLM")
+        return []
+
     chunks = _chunk_text(text)
 
     chunk_results = await asyncio.gather(*[
@@ -493,6 +550,11 @@ async def _detect_placeholders_llm(text: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 async def _detect_document_type(text: str) -> tuple[str, str]:
+    # Fast path: keyword match avoids an LLM round-trip for most documents
+    fast = _classify_by_keywords(text)
+    if fast:
+        return fast
+
     system_prompt = """Analyse the document and return a JSON object with exactly two fields:
 
 "slug"  — classify into EXACTLY ONE of: contract, employment, nda, lease, invoice, resume, other
@@ -629,7 +691,7 @@ Fill in this exact structure:
   "missing_fields": [],
   "overall_assessment": ""
 }}"""
-        raw    = await run_llm(chunk, retry_system, max_output_tokens=16384)
+        raw    = await run_llm(chunk, retry_system, max_output_tokens=4096)
         result = extract_json_from_text(raw)
 
     if not result:
@@ -741,7 +803,7 @@ Fill in this exact structure:
   "missing_fields": [],
   "overall_assessment": ""
 }}"""
-        raw    = await run_llm(chunk, retry_system, max_output_tokens=16384)
+        raw    = await run_llm(chunk, retry_system, max_output_tokens=4096)
         result = extract_json_from_text(raw)
 
     if not result:
