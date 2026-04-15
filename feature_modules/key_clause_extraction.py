@@ -216,8 +216,13 @@ async def _generate_summary(text: str, doc_label: str) -> str:
     system_prompt = f"""You are reviewing a {doc_label}.
 Write a concise 2-3 sentence summary of what this document is, who the parties are (if any),
 and what its main purpose or key terms are.
-Return ONLY the plain text summary — no JSON, no markdown, no headings."""
-    return await run_llm(text[:4000], system_prompt, max_output_tokens=512)
+Return a JSON object with exactly one field:
+{{"summary": "<your 2-3 sentence summary here>"}}
+No explanation, no markdown — ONLY the JSON."""
+    user_content = f"Document:\n----------------\n{text[:4000]}\n----------------"
+    raw, _, _ = await run_llm_raw_json(system_prompt, user_content)
+    parsed = extract_json_from_text(raw)
+    return parsed.get("summary", "").strip()
 
 
 # ---------------------------------------------------------------------------
