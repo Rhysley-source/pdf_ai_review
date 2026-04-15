@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 
 from routes.route import router
 from routes.convert_route import router as convert_router
+from routes.chat_route import router as chat_router
 from document_generation.document_generator import router as document_generate_router
 from document_validation.validation_router import router as validation_router # NEW IMPORT
 from db_files.db import init_db, close_pool
@@ -161,6 +162,7 @@ app = FastAPI(
 
 app.include_router(router)
 app.include_router(convert_router)
+app.include_router(chat_router)
 app.include_router(document_generate_router)
 app.include_router(validation_router) # NEW INCLUDE
 
