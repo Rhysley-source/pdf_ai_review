@@ -45,6 +45,11 @@ MAP_JSON_RETRY_ATTEMPTS = 2
 _MAP_CONCURRENCY  = 3
 _MAP_SEMAPHORE: asyncio.Semaphore | None = None
 
+# Caps concurrent plain-text LLM calls (risk detection, key clauses, etc.)
+# to avoid OpenAI rate-limit throttling when many chunks fire in parallel.
+_TEXT_CONCURRENCY = 8
+_TEXT_SEMAPHORE: asyncio.Semaphore | None = None
+
 
 def _get_semaphore() -> asyncio.Semaphore:
     global _MAP_SEMAPHORE
@@ -52,6 +57,14 @@ def _get_semaphore() -> asyncio.Semaphore:
         _MAP_SEMAPHORE = asyncio.Semaphore(_MAP_CONCURRENCY)
         logger.info(f"[ai_model] MAP semaphore created (concurrency={_MAP_CONCURRENCY})")
     return _MAP_SEMAPHORE
+
+
+def _get_text_semaphore() -> asyncio.Semaphore:
+    global _TEXT_SEMAPHORE
+    if _TEXT_SEMAPHORE is None:
+        _TEXT_SEMAPHORE = asyncio.Semaphore(_TEXT_CONCURRENCY)
+        logger.info(f"[ai_model] TEXT semaphore created (concurrency={_TEXT_CONCURRENCY})")
+    return _TEXT_SEMAPHORE
 
 
 _client   = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -334,17 +347,18 @@ async def _run_inference_text(
     kwargs = _build_api_kwargs(messages, use_json=False, streaming=False,
                                max_output_tokens=max_output_tokens)
 
-    try:
-        response      = await _client.chat.completions.create(**kwargs)
-        elapsed       = time.perf_counter() - t0
-        content       = response.choices[0].message.content or ""
-        input_tokens  = response.usage.prompt_tokens
-        output_tokens = response.usage.completion_tokens
-        logger.info(f"{tag}in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
-        return content, input_tokens, output_tokens
-    except Exception as e:
-        logger.exception(f"{tag}OpenAI API call failed: {e}")
-        raise
+    async with _get_text_semaphore():
+        try:
+            response      = await _client.chat.completions.create(**kwargs)
+            elapsed       = time.perf_counter() - t0
+            content       = response.choices[0].message.content or ""
+            input_tokens  = response.usage.prompt_tokens
+            output_tokens = response.usage.completion_tokens
+            logger.info(f"{tag}in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
+            return content, input_tokens, output_tokens
+        except Exception as e:
+            logger.exception(f"{tag}OpenAI API call failed: {e}")
+            raise
 
 async def _run_inference_text_obligation(
     messages: list[dict],

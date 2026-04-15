@@ -331,7 +331,7 @@ No explanation, no markdown — only the JSON array."""
 
     async def _check_chunk(chunk: str) -> set[str]:
         try:
-            raw     = await run_llm(chunk, system_prompt, max_output_tokens=16384)
+            raw     = await run_llm(chunk, system_prompt, max_output_tokens=4096)
             # extract_json_raw only handles dicts — parse the array directly
             cleaned = raw.replace("```json", "").replace("```", "").strip()
             parsed  = None
@@ -404,7 +404,7 @@ Rules:
 - No explanation, no markdown, no extra keys — ONLY the JSON array"""
 
     logger.info(f"[risk_detection] Placeholder scan — {chunk_label}")
-    raw = await run_llm(chunk, system_prompt, max_output_tokens=16384)
+    raw = await run_llm(chunk, system_prompt, max_output_tokens=1024)
 
     # extract_json_raw only handles dicts — parse the array directly
     cleaned = raw.replace("```json", "").replace("```", "").strip()
@@ -612,7 +612,7 @@ Rules:
 - If no fields missing, return missing_fields as []"""
 
     logger.info(f"[risk_detection] Dynamic analysis — {chunk_label}")
-    raw    = await run_llm(chunk, system_prompt, max_output_tokens=16384)
+    raw    = await run_llm(chunk, system_prompt, max_output_tokens=4096)
     result = extract_json_from_text(raw)
 
     if not result or (not result.get("detected_risks") and not result.get("overall_assessment")):
@@ -665,14 +665,13 @@ async def _analyze_risks_dynamic(text: str, doc_label: str) -> dict:
         default="",
     )
 
-    candidate_missing = _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results])
-    confirmed_missing = await _verify_missing_fields(chunks, candidate_missing, doc_label)
+    merged_missing = _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results])
 
     return {
         "document_type":      "other",
         "document_label":     doc_label,
         "detected_risks":     _merge_risks([r.get("detected_risks", []) for r in chunk_results]),
-        "missing_fields":     confirmed_missing,
+        "missing_fields":     merged_missing,
         "overall_assessment": overall,
     }
 
@@ -731,7 +730,7 @@ Rules:
 - If no fields missing, return missing_fields as []"""
 
     logger.info(f"[risk_detection] Fixed profile ({doc_type}) — {chunk_label}")
-    raw    = await run_llm(chunk, system_prompt, max_output_tokens=16384)
+    raw    = await run_llm(chunk, system_prompt, max_output_tokens=4096)
     result = extract_json_from_text(raw)
 
     if not result or (not result.get("detected_risks") and not result.get("overall_assessment")):
@@ -787,14 +786,13 @@ async def _analyze_risks_for_type(text: str, doc_type: str, doc_label: str) -> d
         default="",
     )
 
-    candidate_missing = _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results])
-    confirmed_missing = await _verify_missing_fields(chunks, candidate_missing, doc_label)
+    merged_missing = _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results])
 
     return {
         "document_type":      doc_type,
         "document_label":     doc_label,
         "detected_risks":     _merge_risks([r.get("detected_risks", []) for r in chunk_results]),
-        "missing_fields":     confirmed_missing,
+        "missing_fields":     merged_missing,
         "overall_assessment": overall,
     }
 
@@ -865,15 +863,22 @@ async def analyze_document_risks(text: str) -> dict:
 
     _KNOWN_TYPES = {"contract", "employment", "nda", "lease", "invoice", "resume"}
 
+    # Run risk analysis and placeholder scan in parallel — placeholder scan only
+    # needs text and does not depend on the document type.
     if doc_type in _KNOWN_TYPES:
-        analysis = await _analyze_risks_hybrid(text, doc_type, doc_label)
+        analysis, placeholder_risks = await asyncio.gather(
+            _analyze_risks_for_type(text, doc_type, doc_label),
+            _detect_placeholders_llm(text),
+        )
     else:
-        analysis = await _analyze_risks_dynamic(text, doc_label)
+        analysis, placeholder_risks = await asyncio.gather(
+            _analyze_risks_dynamic(text, doc_label),
+            _detect_placeholders_llm(text),
+        )
 
     # Inject placeholder risks from full-document LLM scan.
     # Runs before normalization so the items pass through _normalize_result.
     # Prepended so High-severity placeholder issues appear first.
-    placeholder_risks = await _detect_placeholders_llm(text)
     if placeholder_risks:
         analysis["detected_risks"] = placeholder_risks + analysis.get("detected_risks", [])
 
