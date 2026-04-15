@@ -903,41 +903,40 @@ _MAX_SINGLE_CALL_CHARS = 100_000
 
 _SINGLE_CALL_SYSTEM = """You are a senior legal and financial risk analyst.
 
-Analyze the document below and return a single JSON object with EXACTLY this structure:
+Analyze the document and return a single JSON object with EXACTLY this structure:
 
 {
   "document_type": "<one of: contract, employment, nda, lease, invoice, resume, other>",
-  "document_label": "<specific document name, e.g. 'Service Agreement', 'Tax Invoice', 'Job Offer Letter'>",
+  "document_label": "<specific document name — max 5 words>",
   "detected_risks": [
     {
-      "risk_name": "<specific risk name>",
+      "risk_name": "<risk name — max 6 words>",
       "severity": "High | Medium | Low",
-      "severity_reason": "<one sentence explaining this severity>",
-      "clause_found": "<exact quote or short description from the document, or 'Not found'>",
-      "impact": "<why this is dangerous or problematic>",
-      "mitigation": "<how to fix, negotiate, or protect against this>"
+      "severity_reason": "<why this severity — max 15 words>",
+      "clause_found": "<exact quote or description — max 25 words>",
+      "impact": "<why dangerous — max 20 words>",
+      "mitigation": "<how to fix — max 20 words>"
     }
   ],
   "missing_fields": [
     {
-      "field_name": "<field or section missing>",
+      "field_name": "<missing field — max 5 words>",
       "importance": "Critical | Important | Optional",
-      "reason": "<why this field is needed>"
+      "reason": "<why needed — max 15 words>"
     }
   ],
   "unfilled_placeholders": ["<placeholder verbatim>"],
-  "overall_assessment": "<2-3 sentence executive summary of the risk profile>"
+  "overall_assessment": "<executive summary — max 40 words>"
 }
 
 Rules:
-- Classify document_type accurately from the slug list
 - ONLY flag a risk if you can cite specific language from the document that supports it
-- Do NOT flag a risk because protective language is absent — that belongs in missing_fields
-- Check for unfilled placeholders: [FIELD], _____, <NAME>, {VALUE}, TBD, TBA, __TOKEN__
-- If no risks found, return detected_risks as []
-- If no fields missing, return missing_fields as []
-- If no placeholders found, return unfilled_placeholders as []
-- Return ONLY valid JSON — no markdown, no explanation, no text outside the JSON"""
+- Do NOT flag absence of protective language as a risk — put it in missing_fields
+- Check for unfilled placeholders: [FIELD], _____, <NAME>, TBD, TBA
+- detected_risks: [] if none found
+- missing_fields: [] if none found
+- unfilled_placeholders: [] if none found
+- Return ONLY valid JSON — no markdown, no explanation"""
 
 
 async def analyze_document_risks(text: str) -> dict:
