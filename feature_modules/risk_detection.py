@@ -894,54 +894,96 @@ async def _analyze_risks_hybrid(text: str, doc_type: str, doc_label: str) -> dic
 
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# Public entry point — single LLM call
 # ---------------------------------------------------------------------------
 
+# Maximum chars sent to the LLM. Covers most real documents within the
+# model's context window (~100k chars ≈ 25k tokens).
+_MAX_SINGLE_CALL_CHARS = 100_000
+
+_SINGLE_CALL_SYSTEM = """You are a senior legal and financial risk analyst.
+
+Analyze the document below and return a single JSON object with EXACTLY this structure:
+
+{
+  "document_type": "<one of: contract, employment, nda, lease, invoice, resume, other>",
+  "document_label": "<specific document name, e.g. 'Service Agreement', 'Tax Invoice', 'Job Offer Letter'>",
+  "detected_risks": [
+    {
+      "risk_name": "<specific risk name>",
+      "severity": "High | Medium | Low",
+      "severity_reason": "<one sentence explaining this severity>",
+      "clause_found": "<exact quote or short description from the document, or 'Not found'>",
+      "impact": "<why this is dangerous or problematic>",
+      "mitigation": "<how to fix, negotiate, or protect against this>"
+    }
+  ],
+  "missing_fields": [
+    {
+      "field_name": "<field or section missing>",
+      "importance": "Critical | Important | Optional",
+      "reason": "<why this field is needed>"
+    }
+  ],
+  "unfilled_placeholders": ["<placeholder verbatim>"],
+  "overall_assessment": "<2-3 sentence executive summary of the risk profile>"
+}
+
+Rules:
+- Classify document_type accurately from the slug list
+- ONLY flag a risk if you can cite specific language from the document that supports it
+- Do NOT flag a risk because protective language is absent — that belongs in missing_fields
+- Check for unfilled placeholders: [FIELD], _____, <NAME>, {VALUE}, TBD, TBA, __TOKEN__
+- If no risks found, return detected_risks as []
+- If no fields missing, return missing_fields as []
+- If no placeholders found, return unfilled_placeholders as []
+- Return ONLY valid JSON — no markdown, no explanation, no text outside the JSON"""
+
+
 async def analyze_document_risks(text: str) -> dict:
-    """
-    Step 1 — detect document type (classification window: 4000 chars)
+    """Single LLM call: classify + risk analysis + placeholder check in one shot."""
+    document = text[:_MAX_SINGLE_CALL_CHARS]
 
-    Step 2 — branch based on slug:
-      - Known type  → _analyze_risks_hybrid  (fixed profile + dynamic in parallel)
-      - Other type  → _analyze_risks_dynamic (fully dynamic, chunked)
+    logger.info(f"[risk_detection] Single-call analysis — {len(document):,} chars")
+    raw    = await run_llm(document, _SINGLE_CALL_SYSTEM, max_output_tokens=4096)
+    result = extract_json_from_text(raw)
 
-    Step 3 — placeholder scan: LLM over chunked full text, injected before normalization.
-      Any unfilled placeholder ([INSERT DATE], _____, <PARTY NAME>, etc.)
-      becomes a High-severity detected_risk entry.
+    if not result:
+        logger.warning("[risk_detection] JSON parse failed — returning empty result")
+        result = {
+            "document_type":       "other",
+            "document_label":      "General Document",
+            "detected_risks":      [],
+            "missing_fields":      [],
+            "unfilled_placeholders": [],
+            "overall_assessment":  "",
+        }
 
-    Both paths chunk the full document so no clause is ever missed due to truncation.
-    All detected_risks include severity_reason for transparent, consistent ratings.
-    Results are normalized to a guaranteed fixed structure before returning.
-    """
-    doc_type, doc_label = await _detect_document_type(text)
-    logger.info(f"[risk_detection] Detected: {doc_type} ('{doc_label}')")
+    doc_label = result.get("document_label") or result.get("document_type") or "General Document"
 
-    _KNOWN_TYPES = {"contract", "employment", "nda", "lease", "invoice", "resume"}
+    # Promote unfilled placeholders to a High-severity risk entry
+    placeholders = result.pop("unfilled_placeholders", []) or []
+    if placeholders:
+        count = len(placeholders)
+        display_list = ", ".join(f'"{p}"' for p in placeholders)
+        result.setdefault("detected_risks", []).insert(0, {
+            "risk_name":       "Unfilled Placeholders Detected",
+            "severity":        "High",
+            "severity_reason": (
+                f"{count} unfilled placeholder(s) found — document is incomplete."
+            ),
+            "clause_found":    display_list,
+            "impact":          (
+                "An agreement with blank fields is legally incomplete and may be unenforceable."
+            ),
+            "mitigation":      (
+                "Replace every placeholder with a real value before the document is signed."
+            ),
+        })
 
-    # Run risk analysis and placeholder scan in parallel — placeholder scan only
-    # needs text and does not depend on the document type.
-    if doc_type in _KNOWN_TYPES:
-        analysis, placeholder_risks = await asyncio.gather(
-            _analyze_risks_for_type(text, doc_type, doc_label),
-            _detect_placeholders_llm(text),
-        )
-    else:
-        analysis, placeholder_risks = await asyncio.gather(
-            _analyze_risks_dynamic(text, doc_label),
-            _detect_placeholders_llm(text),
-        )
+    analysis = _normalize_result(result)
 
-    # Inject placeholder risks from full-document LLM scan.
-    # Runs before normalization so the items pass through _normalize_result.
-    # Prepended so High-severity placeholder issues appear first.
-    if placeholder_risks:
-        analysis["detected_risks"] = placeholder_risks + analysis.get("detected_risks", [])
-
-    analysis = _normalize_result(analysis)
-
-    # Convert each confirmed missing field into a detected_risk entry as well.
-    # Missing required fields are a real risk — the document is incomplete.
-    # importance → severity mapping: Critical→High, Important→Medium, Optional→Low
+    # Promote missing fields to risk entries
     _IMPORTANCE_TO_SEVERITY = {"Critical": "High", "Important": "Medium", "Optional": "Low"}
     missing_as_risks = [
         {
@@ -952,8 +994,8 @@ async def analyze_document_risks(text: str) -> dict:
                 f"{doc_label} and is absent from the document."
             ),
             "clause_found":    "Not found",
-            "impact":          f['reason'],
-            "mitigation":      f"Add '{f['field_name']}' with a real value before the document is signed or used.",
+            "impact":          f["reason"],
+            "mitigation":      f"Add '{f['field_name']}' with a real value before signing.",
         }
         for f in analysis.get("missing_fields", [])
     ]
@@ -962,6 +1004,8 @@ async def analyze_document_risks(text: str) -> dict:
 
     detected_count = len(analysis.get("detected_risks", []))
     analysis.pop("missing_fields", None)
+
+    logger.info(f"[risk_detection] Done — {detected_count} risk(s) found")
 
     return {
         "status":        "success",
