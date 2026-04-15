@@ -207,6 +207,59 @@ def _recover_truncated_json(text: str) -> dict | None:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _recover_truncated_array(text: str, field: str) -> dict | None:
+    """
+    Recover a top-level array field from truncated JSON by extracting every
+    complete { } object found before the truncation point.
+    Used as a last resort when the LLM hits its max_output_tokens limit mid-stream.
+    """
+    match = re.search(rf'"{re.escape(field)}"\s*:\s*\[', text)
+    if not match:
+        return None
+
+    array_content = text[match.end():]
+    items = []
+    depth = 0
+    in_string = False
+    escape_next = False
+    start = None
+
+    for i, ch in enumerate(array_content):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    obj = json.loads(array_content[start : i + 1])
+                    if isinstance(obj, dict):
+                        items.append(obj)
+                except json.JSONDecodeError:
+                    pass
+                start = None
+
+    if items:
+        logger.warning(
+            f"extract_json_raw: truncation recovery found {len(items)} "
+            f"complete item(s) in '{field}' array"
+        )
+        return {field: items}
+    return None
+
+
 def extract_json_raw(text: str) -> dict:
     """
     Extract JSON from LLM output and return it AS-IS — no schema normalization.
@@ -236,6 +289,12 @@ def extract_json_raw(text: str) -> dict:
                 return data
         except json.JSONDecodeError:
             pass
+
+    # Strategy 3 — truncation recovery: extract complete objects from known array fields
+    for field in ("key_clauses", "risks", "flags", "obligations", "clauses"):
+        recovered = _recover_truncated_array(cleaned, field)
+        if recovered:
+            return recovered
 
     logger.error("extract_json_raw: could not parse JSON — returning empty dict")
     return {}

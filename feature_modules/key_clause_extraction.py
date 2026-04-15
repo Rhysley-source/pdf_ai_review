@@ -157,7 +157,7 @@ Rules:
 - No explanation, no markdown — ONLY the JSON"""
 
     logger.info(f"[key_clause] Extracting clauses — {chunk_label}")
-    raw    = await run_llm(chunk, system_prompt, max_output_tokens=4096)
+    raw    = await run_llm(chunk, system_prompt, max_output_tokens=16000)
     result = extract_json_from_text(raw)
 
     clauses = result.get("key_clauses", [])
