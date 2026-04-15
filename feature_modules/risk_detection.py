@@ -707,16 +707,9 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
       "severity": "High | Medium | Low",
       "severity_reason": "<one sentence explaining why this severity level was assigned>",
       "clause_found": "<exact quote or short description of the clause, or 'Not found'>",
-      "impact": "<why this is dangerous to the signer>",
-      "mitigation": "<how to negotiate or fix this>"
+   
     }}
-  ],
-  "missing_fields": [
-    {{
-      "field_name": "<field that is missing>",
-      "importance": "Critical | Important | Optional",
-      "reason": "<why this field matters>"
-    }}
+  
   ],
   "overall_assessment": "<executive summary of the document risk profile in 2-3 sentences>"
 }}
