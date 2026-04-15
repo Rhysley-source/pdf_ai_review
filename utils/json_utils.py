@@ -207,6 +207,93 @@ def _recover_truncated_json(text: str) -> dict | None:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _escape_raw_control_chars(text: str) -> str:
+    """
+    Replace literal newlines/tabs/carriage-returns that appear inside JSON
+    string values with their proper escape sequences.
+    Walks character-by-character so it only touches content inside strings.
+    """
+    result = []
+    in_string = False
+    escape_next = False
+    for ch in text:
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            result.append(ch)
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            continue
+        if in_string:
+            if ch == "\n":
+                result.append("\\n")
+            elif ch == "\r":
+                result.append("\\r")
+            elif ch == "\t":
+                result.append("\\t")
+            else:
+                result.append(ch)
+        else:
+            result.append(ch)
+    return "".join(result)
+
+
+def _repair_json(text: str) -> dict | None:
+    """
+    Apply progressive JSON repairs to malformed LLM output and return the
+    first successfully parsed dict, or None if all attempts fail.
+
+    Repairs applied (in order, each layer builds on the previous):
+      1. Python literals  — None → null, True → true, False → false
+      2. Trailing commas  — ,} and ,] are invalid JSON
+      3. Control chars    — raw newlines/tabs inside string values
+      4. Single quotes    — {'key': 'val'} → {"key": "val"} (simple cases)
+    """
+    candidate = text
+
+    # Layer 1 — Python literals
+    candidate = re.sub(r'\bNone\b', 'null', candidate)
+    candidate = re.sub(r'\bTrue\b', 'true', candidate)
+    candidate = re.sub(r'\bFalse\b', 'false', candidate)
+
+    # Layer 2 — trailing commas
+    candidate = re.sub(r',\s*([}\]])', r'\1', candidate)
+
+    try:
+        data = json.loads(candidate)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+
+    # Layer 3 — escape raw control chars inside strings
+    candidate = _escape_raw_control_chars(candidate)
+    try:
+        data = json.loads(candidate)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+
+    # Layer 4 — single quotes (only safe for simple cases with no apostrophes in values)
+    # Replace 'key' and simple 'value' patterns; skip if the text contains apostrophes
+    if "'" in candidate and '"' not in candidate:
+        single_fixed = candidate.replace("'", '"')
+        try:
+            data = json.loads(single_fixed)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
 def _recover_truncated_array(text: str, field: str) -> dict | None:
     """
     Recover a top-level array field from truncated JSON by extracting every
@@ -289,6 +376,13 @@ def extract_json_raw(text: str) -> dict:
                 return data
         except json.JSONDecodeError:
             pass
+
+        # Strategy 2b — repair malformed block (trailing commas, Python literals,
+        #                raw control chars, single quotes)
+        repaired = _repair_json(candidate)
+        if repaired is not None:
+            logger.warning("extract_json_raw: strategy 2b (repair) succeeded")
+            return repaired
 
     # Strategy 3 — truncation recovery: extract complete objects from known array fields
     for field in ("key_clauses", "risks", "flags", "obligations", "clauses"):

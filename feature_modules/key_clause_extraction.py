@@ -123,6 +123,8 @@ async def _extract_clauses_chunk(chunk: str, doc_label: str, chunk_label: str) -
     """
     system_prompt = f"""You are a legal document analyst specialising in {doc_label} documents.
 
+CRITICAL: Your response MUST be a single valid JSON object. No text before or after. No markdown. No code fences. No explanation. Start your response with {{ and end with }}. Any response that is not pure JSON will be rejected.
+
 Extract ALL key clauses present in this section of the document.
 
 A key clause is any provision, term, condition, or section that is important for understanding:
@@ -133,12 +135,12 @@ A key clause is any provision, term, condition, or section that is important for
 - Legal protections, liability, or risks
 - Confidentiality, IP, or data obligations
 
-For each key clause found, return:
+For each key clause found, return these three fields:
   "clause_name"  — a short, specific name (e.g. "Payment Terms", "Termination Notice", "Non-Compete Restriction")
   "excerpt"      — the exact relevant text from the document, or a faithful paraphrase if the clause is very long
   "significance" — one sentence explaining why this clause is important
 
-Return ONLY valid JSON in exactly this structure:
+REQUIRED OUTPUT FORMAT — return exactly this JSON structure, nothing else:
 {{
   "key_clauses": [
     {{
@@ -149,15 +151,19 @@ Return ONLY valid JSON in exactly this structure:
   ]
 }}
 
-Rules:
+STRICT RULES:
+- Output MUST begin with {{ and end with }}
+- All string values MUST use double quotes — never single quotes
+- No trailing commas after the last item in any array or object
+- Escape any double quotes inside string values as \\"
+- Escape any backslashes inside string values as \\\\
+- Do NOT use newlines inside string values — use a space instead
 - Only include clauses that are ACTUALLY present in this section
-- Be specific to "{doc_label}" — not generic observations about what might be present
-- Preserve exact wording in excerpt wherever possible
-- If this section contains no key clauses, return {{"key_clauses": []}}
-- No explanation, no markdown — ONLY the JSON"""
+- Be specific to "{doc_label}" — not generic observations
+- If this section contains no key clauses, return {{"key_clauses": []}}"""
 
     logger.info(f"[key_clause] Extracting clauses — {chunk_label}")
-    raw    = await run_llm(chunk, system_prompt, max_output_tokens=16000)
+    raw    = await run_llm(chunk, system_prompt, max_output_tokens=32000)
     result = extract_json_from_text(raw)
 
     clauses = result.get("key_clauses", [])
