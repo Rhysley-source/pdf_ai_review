@@ -56,7 +56,7 @@ def _normalize_result(result: dict) -> dict:
 # Public entry point — single LLM call
 # ---------------------------------------------------------------------------
 
-_MAX_SINGLE_CALL_CHARS = 100_000
+_MAX_SINGLE_CALL_CHARS = 300_000
 
 _SINGLE_CALL_SYSTEM = """You are a senior legal and financial risk analyst.
 

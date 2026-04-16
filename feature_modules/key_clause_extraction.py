@@ -90,7 +90,7 @@ async def classify_document(text: str) -> str:
 # Key clause extraction — single LLM call
 # ---------------------------------------------------------------------------
 
-_MAX_SINGLE_CALL_CHARS = 100_000
+_MAX_SINGLE_CALL_CHARS = 300_000
 
 _SINGLE_CALL_SYSTEM = """You are a document analyst.
 

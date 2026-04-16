@@ -169,7 +169,7 @@ OUTPUT FORMAT (STRICT JSON ONLY):
 
 Document:
 ---
-{text[:15000]}
+{text[:80_000]}
 ---
 """
 
