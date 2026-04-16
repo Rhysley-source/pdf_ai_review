@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, Query, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 import os
 import io
@@ -8,6 +8,7 @@ import time
 import asyncio
 import logging
 from functools import partial
+from typing import Optional
 
 from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from llm_model.ai_model import generate_analysis, generate_analysis_stream, transcribe_audio
@@ -18,6 +19,7 @@ from feature_modules.risk_detection import analyze_document_risks
 from feature_modules.red_flag_scanner import scan_red_flags
 from feature_modules.obligation_detection import analyze_document_obligations
 from feature_modules.document_comparison import compare_documents
+from utils.session_store import create_session, get_session
 from auth import verify_api_key
 
 logger = logging.getLogger(__name__)
@@ -89,6 +91,7 @@ async def analyze_pdf(
     pdf_size      = 0
     status        = "success"
     error_msg     = None
+    session_id    = None
 
     logger.info(f"[{request_id}] ── NEW REQUEST ──────────────────────────────")
     logger.info(f"[{request_id}] filename='{file.filename}' analysis_type={analysis_type}")
@@ -140,6 +143,14 @@ async def analyze_pdf(
         merged_text = "\n\n".join(p.page_content for p in pages)
         logger.info(f"[{request_id}] Step 4/5 — merged {len(merged_text):,} chars")
 
+        session_id = create_session(
+            text=merged_text,
+            filename=file.filename or "unknown",
+            total_pages=total_pages,
+            pages_analysed=pages_to_read,
+        )
+        logger.info(f"[{request_id}] session created — id={session_id[:8]}")
+
         logger.info(f"[{request_id}] Step 5/5 — running inference")
         t_infer = time.perf_counter()
         final_output, total_in_tok, total_out_tok = await generate_analysis(merged_text)
@@ -180,9 +191,10 @@ async def analyze_pdf(
     if was_truncated:
         final_output.update(truncated=True, pages_analysed=pages_to_read, total_pages=total_pages)
 
-    if analysis_type == 1: return {"overview":   final_output.get("overview", "")}
-    if analysis_type == 2: return {"summary":    final_output.get("summary", "")}
-    if analysis_type == 3: return {"highlights": final_output.get("highlights", [])}
+    if analysis_type == 1: return {"overview":   final_output.get("overview", ""),   "session_id": session_id}
+    if analysis_type == 2: return {"summary":    final_output.get("summary", ""),    "session_id": session_id}
+    if analysis_type == 3: return {"highlights": final_output.get("highlights", []), "session_id": session_id}
+    final_output["session_id"] = session_id
     return final_output
 
 
@@ -192,18 +204,61 @@ async def analyze_pdf(
 
 @router.post("/key-clause-extraction")
 async def key_clause_extraction(
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    session_id: Optional[str]  = Form(None),
 ):
-    text, pages_to_read, total_pages, request_id, t_start, file_path = await extract_text_from_upload(
-        file,
-        endpoint="/key-clause-extraction"
-    )
+    """
+    Extract key clauses from a PDF.
 
-    status    = "success"
-    error_msg = None
+    Accepts either:
+    - A PDF file upload (standard flow — text is extracted via OCR/PyMuPDF).
+    - A session_id returned by POST /analyze (fast path — text already cached,
+      no re-upload or re-extraction needed).
+    """
+    request_id    = str(uuid.uuid4())[:8]
+    t_start       = time.perf_counter()
+    file_path     = None
+    status        = "success"
+    error_msg     = None
+    total_pages   = 0
+    pages_to_read = 0
+    pdf_name      = "unknown"
+
+    text = None
+
+    if session_id:
+        entry = get_session(session_id)
+        if entry is not None:
+            text          = entry["text"]
+            total_pages   = entry["total_pages"]
+            pages_to_read = entry["pages_analysed"]
+            pdf_name      = entry["filename"]
+            logger.info(
+                f"[{request_id}] /key-clause-extraction — "
+                f"session={session_id[:8]} ({len(text):,} chars) [cache hit]"
+            )
+        else:
+            logger.warning(
+                f"[{request_id}] /key-clause-extraction — "
+                f"session={session_id[:8]} not found or expired, falling back to file upload"
+            )
+
+    if text is None:
+        if file is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error":   "missing_input",
+                    "message": "Provide either a PDF file or a valid session_id.",
+                },
+            )
+        text, pages_to_read, total_pages, request_id, t_start, file_path = await extract_text_from_upload(
+            file, endpoint="/key-clause-extraction"
+        )
+        pdf_name = file.filename or "unknown"
 
     try:
-        logger.info(f"[{request_id}] Step 3 — extracting key clauses...")
+        logger.info(f"[{request_id}] Extracting key clauses...")
         result = await extract_key_clauses(text)
         logger.info(
             f"[{request_id}] ── REQUEST COMPLETE — "
@@ -225,7 +280,7 @@ async def key_clause_extraction(
         elapsed = time.perf_counter() - t_start
         await log_request(
             request_id        = request_id,
-            pdf_name          = file.filename or "unknown",
+            pdf_name          = pdf_name,
             total_pages       = total_pages,
             pages_analysed    = pages_to_read,
             completion_time_s = elapsed,
@@ -233,7 +288,7 @@ async def key_clause_extraction(
             status            = status,
             error_message     = error_msg,
         )
-        if os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
             os.remove(file_path)
             logger.debug(f"[{request_id}] Temp file deleted: '{file_path}'")
 
@@ -244,16 +299,58 @@ async def key_clause_extraction(
 
 @router.post("/detect-risks")
 async def detect_risks(
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    session_id: Optional[str]  = Form(None),
 ):
-    """AI Risk Detection Endpoint."""
-    text, pages_to_read, total_pages, request_id, t_start, file_path = await extract_text_from_upload(
-        file,
-        endpoint="/detect-risks"
-    )
+    """
+    AI Risk Detection Endpoint.
 
-    status    = "success"
-    error_msg = None
+    Accepts either:
+    - A PDF file upload (standard flow — text is extracted via OCR/PyMuPDF).
+    - A session_id returned by POST /analyze (fast path — text already cached,
+      no re-upload or re-extraction needed).
+    """
+    request_id    = str(uuid.uuid4())[:8]
+    t_start       = time.perf_counter()
+    file_path     = None
+    status        = "success"
+    error_msg     = None
+    total_pages   = 0
+    pages_to_read = 0
+    pdf_name      = "unknown"
+
+    text = None
+
+    if session_id:
+        entry = get_session(session_id)
+        if entry is not None:
+            text          = entry["text"]
+            total_pages   = entry["total_pages"]
+            pages_to_read = entry["pages_analysed"]
+            pdf_name      = entry["filename"]
+            logger.info(
+                f"[{request_id}] /detect-risks — "
+                f"session={session_id[:8]} ({len(text):,} chars) [cache hit]"
+            )
+        else:
+            logger.warning(
+                f"[{request_id}] /detect-risks — "
+                f"session={session_id[:8]} not found or expired, falling back to file upload"
+            )
+
+    if text is None:
+        if file is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error":   "missing_input",
+                    "message": "Provide either a PDF file or a valid session_id.",
+                },
+            )
+        text, pages_to_read, total_pages, request_id, t_start, file_path = await extract_text_from_upload(
+            file, endpoint="/detect-risks"
+        )
+        pdf_name = file.filename or "unknown"
 
     try:
         logger.info(f"[{request_id}] Starting Risk Detection...")
@@ -269,7 +366,7 @@ async def detect_risks(
         elapsed = time.perf_counter() - t_start
         await log_request(
             request_id        = request_id,
-            pdf_name          = file.filename or "unknown",
+            pdf_name          = pdf_name,
             total_pages       = total_pages,
             pages_analysed    = pages_to_read,
             completion_time_s = elapsed,
@@ -277,7 +374,7 @@ async def detect_risks(
             status            = status,
             error_message     = error_msg,
         )
-        if os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
 # ---------------------------------------------------------------------------
