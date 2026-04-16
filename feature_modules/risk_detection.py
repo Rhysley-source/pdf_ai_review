@@ -137,12 +137,64 @@ _RISK_PROFILES = {
 
 
 # ---------------------------------------------------------------------------
-# Chunking — improvement #3
-# Splits long documents into overlapping windows so no clause is missed.
+# Chunking
 # ---------------------------------------------------------------------------
 
-_CHUNK_SIZE    = 10_000   # chars per chunk
+_CHUNK_SIZE    = 15_000   # chars per chunk (larger = fewer parallel calls)
 _CHUNK_OVERLAP = 500      # overlap between consecutive chunks
+
+# ---------------------------------------------------------------------------
+# Keyword-based fast classification
+# Covers ~80% of documents without an LLM call.
+# Patterns matched against the first 2000 chars (title + opening clauses).
+# ---------------------------------------------------------------------------
+
+_KEYWORD_RULES: list[tuple[str, re.Pattern]] = [
+    ("nda",        re.compile(r"\b(non.?disclosure|confidentiality\s+agreement|nda)\b", re.I)),
+    ("employment", re.compile(r"\b(employment\s+agreement|offer\s+letter|appointment\s+letter|employment\s+contract)\b", re.I)),
+    ("lease",      re.compile(r"\b(lease\s+agreement|rental\s+agreement|tenancy\s+agreement|leave\s+and\s+licen[cs]e)\b", re.I)),
+    ("invoice",    re.compile(r"\b(tax\s+invoice|proforma\s+invoice|purchase\s+order|invoice\s+no\.?|bill\s+of\s+sale)\b", re.I)),
+    ("resume",     re.compile(r"\b(curriculum\s+vitae|work\s+experience|professional\s+summary|skills\s+summary)\b", re.I)),
+    ("contract",   re.compile(r"\b(service\s+agreement|vendor\s+agreement|master\s+agreement|terms\s+and\s+conditions|memorandum\s+of\s+understanding|\bm\.?o\.?u\.?\b|agreement\s+between)\b", re.I)),
+]
+
+_SLUG_LABELS = {
+    "contract":   "Contract / Legal Agreement",
+    "employment": "Employment Agreement",
+    "nda":        "Non-Disclosure Agreement",
+    "lease":      "Lease Agreement",
+    "invoice":    "Invoice / Billing Document",
+    "resume":     "Resume / CV",
+    "other":      "General Document",
+}
+
+
+def _classify_by_keywords(text: str) -> tuple[str, str] | None:
+    """
+    Fast keyword classification on the first 2000 chars.
+    Returns (slug, label) on a confident match, or None to fall back to LLM.
+    """
+    sample = text[:2000]
+    for slug, pattern in _KEYWORD_RULES:
+        if pattern.search(sample):
+            logger.info(f"[risk_detection] Keyword classify → {slug}")
+            return slug, _SLUG_LABELS[slug]
+    return None
+
+# ---------------------------------------------------------------------------
+# Regex pre-filter for placeholder detection
+# Skips all LLM calls when the document has no placeholder patterns.
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER_RE = re.compile(
+    r'\[[A-Z][^\]]{0,50}\]'        # [INSERT DATE], [PARTY NAME]
+    r'|_{4,}'                       # __________
+    r'|<[A-Z][^>]{0,30}>'          # <INSERT NAME>
+    r'|\{[A-Z][^}]{0,30}\}'        # {COMPANY NAME}
+    r'|__[A-Z_]{2,30}__'           # __VENDOR_NAME__
+    r'|\bTBD\b|\bTBA\b',
+    re.MULTILINE,
+)
 
 
 def _chunk_text(text: str) -> list[str]:
@@ -331,7 +383,7 @@ No explanation, no markdown — only the JSON array."""
 
     async def _check_chunk(chunk: str) -> set[str]:
         try:
-            raw     = await run_llm(chunk, system_prompt, max_output_tokens=16384)
+            raw     = await run_llm(chunk, system_prompt, max_output_tokens=4096)
             # extract_json_raw only handles dicts — parse the array directly
             cleaned = raw.replace("```json", "").replace("```", "").strip()
             parsed  = None
@@ -404,7 +456,7 @@ Rules:
 - No explanation, no markdown, no extra keys — ONLY the JSON array"""
 
     logger.info(f"[risk_detection] Placeholder scan — {chunk_label}")
-    raw = await run_llm(chunk, system_prompt, max_output_tokens=16384)
+    raw = await run_llm(chunk, system_prompt, max_output_tokens=1024)
 
     # extract_json_raw only handles dicts — parse the array directly
     cleaned = raw.replace("```json", "").replace("```", "").strip()
@@ -441,6 +493,11 @@ async def _detect_placeholders_llm(text: str) -> list[dict]:
     Returns a detected_risks-format list — one entry if any placeholders
     are found, empty list if the document is clean.
     """
+    # Fast pre-filter: skip all LLM calls when no placeholder pattern is present.
+    if not _PLACEHOLDER_RE.search(text):
+        logger.info("[risk_detection] Placeholder scan: no patterns found — skipping LLM")
+        return []
+
     chunks = _chunk_text(text)
 
     chunk_results = await asyncio.gather(*[
@@ -493,6 +550,11 @@ async def _detect_placeholders_llm(text: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 async def _detect_document_type(text: str) -> tuple[str, str]:
+    # Fast path: keyword match avoids an LLM round-trip for most documents
+    fast = _classify_by_keywords(text)
+    if fast:
+        return fast
+
     system_prompt = """Analyse the document and return a JSON object with exactly two fields:
 
 "slug"  — classify into EXACTLY ONE of: contract, employment, nda, lease, invoice, resume, other
@@ -612,7 +674,7 @@ Rules:
 - If no fields missing, return missing_fields as []"""
 
     logger.info(f"[risk_detection] Dynamic analysis — {chunk_label}")
-    raw    = await run_llm(chunk, system_prompt, max_output_tokens=16384)
+    raw    = await run_llm(chunk, system_prompt, max_output_tokens=4096)
     result = extract_json_from_text(raw)
 
     if not result or (not result.get("detected_risks") and not result.get("overall_assessment")):
@@ -629,7 +691,7 @@ Fill in this exact structure:
   "missing_fields": [],
   "overall_assessment": ""
 }}"""
-        raw    = await run_llm(chunk, retry_system, max_output_tokens=16384)
+        raw    = await run_llm(chunk, retry_system, max_output_tokens=4096)
         result = extract_json_from_text(raw)
 
     if not result:
@@ -665,14 +727,13 @@ async def _analyze_risks_dynamic(text: str, doc_label: str) -> dict:
         default="",
     )
 
-    candidate_missing = _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results])
-    confirmed_missing = await _verify_missing_fields(chunks, candidate_missing, doc_label)
+    merged_missing = _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results])
 
     return {
         "document_type":      "other",
         "document_label":     doc_label,
         "detected_risks":     _merge_risks([r.get("detected_risks", []) for r in chunk_results]),
-        "missing_fields":     confirmed_missing,
+        "missing_fields":     merged_missing,
         "overall_assessment": overall,
     }
 
@@ -708,16 +769,9 @@ OUTPUT FORMAT — return ONLY valid JSON in exactly this structure:
       "severity": "High | Medium | Low",
       "severity_reason": "<one sentence explaining why this severity level was assigned>",
       "clause_found": "<exact quote or short description of the clause, or 'Not found'>",
-      "impact": "<why this is dangerous to the signer>",
-      "mitigation": "<how to negotiate or fix this>"
+   
     }}
-  ],
-  "missing_fields": [
-    {{
-      "field_name": "<field that is missing>",
-      "importance": "Critical | Important | Optional",
-      "reason": "<why this field matters>"
-    }}
+  
   ],
   "overall_assessment": "<executive summary of the document risk profile in 2-3 sentences>"
 }}
@@ -731,7 +785,7 @@ Rules:
 - If no fields missing, return missing_fields as []"""
 
     logger.info(f"[risk_detection] Fixed profile ({doc_type}) — {chunk_label}")
-    raw    = await run_llm(chunk, system_prompt, max_output_tokens=16384)
+    raw    = await run_llm(chunk, system_prompt, max_output_tokens=4096)
     result = extract_json_from_text(raw)
 
     if not result or (not result.get("detected_risks") and not result.get("overall_assessment")):
@@ -749,7 +803,7 @@ Fill in this exact structure:
   "missing_fields": [],
   "overall_assessment": ""
 }}"""
-        raw    = await run_llm(chunk, retry_system, max_output_tokens=16384)
+        raw    = await run_llm(chunk, retry_system, max_output_tokens=4096)
         result = extract_json_from_text(raw)
 
     if not result:
@@ -787,14 +841,13 @@ async def _analyze_risks_for_type(text: str, doc_type: str, doc_label: str) -> d
         default="",
     )
 
-    candidate_missing = _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results])
-    confirmed_missing = await _verify_missing_fields(chunks, candidate_missing, doc_label)
+    merged_missing = _merge_missing_fields([r.get("missing_fields", []) for r in chunk_results])
 
     return {
         "document_type":      doc_type,
         "document_label":     doc_label,
         "detected_risks":     _merge_risks([r.get("detected_risks", []) for r in chunk_results]),
-        "missing_fields":     confirmed_missing,
+        "missing_fields":     merged_missing,
         "overall_assessment": overall,
     }
 
@@ -841,47 +894,95 @@ async def _analyze_risks_hybrid(text: str, doc_type: str, doc_label: str) -> dic
 
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# Public entry point — single LLM call
 # ---------------------------------------------------------------------------
 
+# Maximum chars sent to the LLM. Covers most real documents within the
+# model's context window (~100k chars ≈ 25k tokens).
+_MAX_SINGLE_CALL_CHARS = 100_000
+
+_SINGLE_CALL_SYSTEM = """You are a senior legal and financial risk analyst.
+
+Analyze the document and return a single JSON object with EXACTLY this structure:
+
+{
+  "document_type": "<one of: contract, employment, nda, lease, invoice, resume, other>",
+  "document_label": "<specific document name — max 5 words>",
+  "detected_risks": [
+    {
+      "risk_name": "<risk name — max 6 words>",
+      "severity": "High | Medium | Low",
+      "severity_reason": "<why this severity — max 15 words>",
+      "clause_found": "<exact quote or description — max 25 words>",
+      "impact": "<why dangerous — max 20 words>",
+      "mitigation": "<how to fix — max 20 words>"
+    }
+  ],
+  "missing_fields": [
+    {
+      "field_name": "<missing field — max 5 words>",
+      "importance": "Critical | Important | Optional",
+      "reason": "<why needed — max 15 words>"
+    }
+  ],
+  "unfilled_placeholders": ["<placeholder verbatim>"],
+  "overall_assessment": "<executive summary — max 40 words>"
+}
+
+Rules:
+- ONLY flag a risk if you can cite specific language from the document that supports it
+- Do NOT flag absence of protective language as a risk — put it in missing_fields
+- Check for unfilled placeholders: [FIELD], _____, <NAME>, TBD, TBA
+- detected_risks: [] if none found
+- missing_fields: [] if none found
+- unfilled_placeholders: [] if none found
+- Return ONLY valid JSON — no markdown, no explanation"""
+
+
 async def analyze_document_risks(text: str) -> dict:
-    """
-    Step 1 — detect document type (classification window: 4000 chars)
+    """Single LLM call: classify + risk analysis + placeholder check in one shot."""
+    document = text[:_MAX_SINGLE_CALL_CHARS]
 
-    Step 2 — branch based on slug:
-      - Known type  → _analyze_risks_hybrid  (fixed profile + dynamic in parallel)
-      - Other type  → _analyze_risks_dynamic (fully dynamic, chunked)
+    logger.info(f"[risk_detection] Single-call analysis — {len(document):,} chars")
+    raw    = await run_llm(document, _SINGLE_CALL_SYSTEM, max_output_tokens=8192)
+    result = extract_json_from_text(raw)
 
-    Step 3 — placeholder scan: LLM over chunked full text, injected before normalization.
-      Any unfilled placeholder ([INSERT DATE], _____, <PARTY NAME>, etc.)
-      becomes a High-severity detected_risk entry.
+    if not result:
+        logger.warning("[risk_detection] JSON parse failed — returning empty result")
+        result = {
+            "document_type":       "other",
+            "document_label":      "General Document",
+            "detected_risks":      [],
+            "missing_fields":      [],
+            "unfilled_placeholders": [],
+            "overall_assessment":  "",
+        }
 
-    Both paths chunk the full document so no clause is ever missed due to truncation.
-    All detected_risks include severity_reason for transparent, consistent ratings.
-    Results are normalized to a guaranteed fixed structure before returning.
-    """
-    doc_type, doc_label = await _detect_document_type(text)
-    logger.info(f"[risk_detection] Detected: {doc_type} ('{doc_label}')")
+    doc_label = result.get("document_label") or result.get("document_type") or "General Document"
 
-    _KNOWN_TYPES = {"contract", "employment", "nda", "lease", "invoice", "resume"}
+    # Promote unfilled placeholders to a High-severity risk entry
+    placeholders = result.pop("unfilled_placeholders", []) or []
+    if placeholders:
+        count = len(placeholders)
+        display_list = ", ".join(f'"{p}"' for p in placeholders)
+        result.setdefault("detected_risks", []).insert(0, {
+            "risk_name":       "Unfilled Placeholders Detected",
+            "severity":        "High",
+            "severity_reason": (
+                f"{count} unfilled placeholder(s) found — document is incomplete."
+            ),
+            "clause_found":    display_list,
+            "impact":          (
+                "An agreement with blank fields is legally incomplete and may be unenforceable."
+            ),
+            "mitigation":      (
+                "Replace every placeholder with a real value before the document is signed."
+            ),
+        })
 
-    if doc_type in _KNOWN_TYPES:
-        analysis = await _analyze_risks_hybrid(text, doc_type, doc_label)
-    else:
-        analysis = await _analyze_risks_dynamic(text, doc_label)
+    analysis = _normalize_result(result)
 
-    # Inject placeholder risks from full-document LLM scan.
-    # Runs before normalization so the items pass through _normalize_result.
-    # Prepended so High-severity placeholder issues appear first.
-    placeholder_risks = await _detect_placeholders_llm(text)
-    if placeholder_risks:
-        analysis["detected_risks"] = placeholder_risks + analysis.get("detected_risks", [])
-
-    analysis = _normalize_result(analysis)
-
-    # Convert each confirmed missing field into a detected_risk entry as well.
-    # Missing required fields are a real risk — the document is incomplete.
-    # importance → severity mapping: Critical→High, Important→Medium, Optional→Low
+    # Promote missing fields to risk entries
     _IMPORTANCE_TO_SEVERITY = {"Critical": "High", "Important": "Medium", "Optional": "Low"}
     missing_as_risks = [
         {
@@ -892,8 +993,8 @@ async def analyze_document_risks(text: str) -> dict:
                 f"{doc_label} and is absent from the document."
             ),
             "clause_found":    "Not found",
-            "impact":          f['reason'],
-            "mitigation":      f"Add '{f['field_name']}' with a real value before the document is signed or used.",
+            "impact":          f["reason"],
+            "mitigation":      f"Add '{f['field_name']}' with a real value before signing.",
         }
         for f in analysis.get("missing_fields", [])
     ]
@@ -902,6 +1003,8 @@ async def analyze_document_risks(text: str) -> dict:
 
     detected_count = len(analysis.get("detected_risks", []))
     analysis.pop("missing_fields", None)
+
+    logger.info(f"[risk_detection] Done — {detected_count} risk(s) found")
 
     return {
         "status":        "success",

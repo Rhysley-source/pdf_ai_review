@@ -123,6 +123,8 @@ async def _extract_clauses_chunk(chunk: str, doc_label: str, chunk_label: str) -
     """
     system_prompt = f"""You are a legal document analyst specialising in {doc_label} documents.
 
+CRITICAL: Your response MUST be a single valid JSON object. No text before or after. No markdown. No code fences. No explanation. Start your response with {{ and end with }}. Any response that is not pure JSON will be rejected.
+
 Extract ALL key clauses present in this section of the document.
 
 A key clause is any provision, term, condition, or section that is important for understanding:
@@ -133,12 +135,12 @@ A key clause is any provision, term, condition, or section that is important for
 - Legal protections, liability, or risks
 - Confidentiality, IP, or data obligations
 
-For each key clause found, return:
+For each key clause found, return these three fields:
   "clause_name"  — a short, specific name (e.g. "Payment Terms", "Termination Notice", "Non-Compete Restriction")
   "excerpt"      — the exact relevant text from the document, or a faithful paraphrase if the clause is very long
   "significance" — one sentence explaining why this clause is important
 
-Return ONLY valid JSON in exactly this structure:
+REQUIRED OUTPUT FORMAT — return exactly this JSON structure, nothing else:
 {{
   "key_clauses": [
     {{
@@ -149,15 +151,19 @@ Return ONLY valid JSON in exactly this structure:
   ]
 }}
 
-Rules:
+STRICT RULES:
+- Output MUST begin with {{ and end with }}
+- All string values MUST use double quotes — never single quotes
+- No trailing commas after the last item in any array or object
+- Escape any double quotes inside string values as \\"
+- Escape any backslashes inside string values as \\\\
+- Do NOT use newlines inside string values — use a space instead
 - Only include clauses that are ACTUALLY present in this section
-- Be specific to "{doc_label}" — not generic observations about what might be present
-- Preserve exact wording in excerpt wherever possible
-- If this section contains no key clauses, return {{"key_clauses": []}}
-- No explanation, no markdown — ONLY the JSON"""
+- Be specific to "{doc_label}" — not generic observations
+- If this section contains no key clauses, return {{"key_clauses": []}}"""
 
     logger.info(f"[key_clause] Extracting clauses — {chunk_label}")
-    raw    = await run_llm(chunk, system_prompt, max_output_tokens=4096)
+    raw    = await run_llm(chunk, system_prompt, max_output_tokens=32000)
     result = extract_json_from_text(raw)
 
     clauses = result.get("key_clauses", [])
@@ -232,46 +238,83 @@ async def classify_document(text: str) -> str:
 # Public entry point — replaces all old per-type handlers
 # ---------------------------------------------------------------------------
 
+_MAX_SINGLE_CALL_CHARS = 100_000
+
+_SINGLE_CALL_SYSTEM = """You are a legal document analyst.
+
+Analyze the document below and return a single JSON object with EXACTLY this structure:
+
+{
+  "document_type": "<slug: contract|employment|nda|lease|invoice|resume|report|other>",
+  "document_label": "<specific document name, e.g. 'Service Agreement', 'Tax Invoice'>",
+  "summary": "<2-3 sentence summary: what this document is, who the parties are, and its main purpose>",
+  "key_clauses": [
+    {
+      "clause_name": "<short specific name, e.g. 'Payment Terms', 'Termination Notice', 'Non-Compete'>",
+      "excerpt": "<exact relevant text from the document, or faithful paraphrase if very long>",
+      "significance": "<one sentence explaining why this clause matters>"
+    }
+  ]
+}
+
+Extract ALL key clauses covering:
+- Rights and obligations of the parties
+- Financial terms, payment conditions, or amounts
+- Time periods, deadlines, notice periods, or renewal terms
+- Restrictions, limitations, permissions, or prohibitions
+- Legal protections, liability, or risks
+- Confidentiality, IP, or data obligations
+
+Rules:
+- Only include clauses ACTUALLY present in the document
+- Be specific — not generic observations
+- If no key clauses found, return key_clauses as []
+- Return ONLY valid JSON — no markdown, no explanation"""
+
+
 async def extract_key_clauses(text: str) -> dict:
-    """
-    Full key clause extraction pipeline:
+    """Single LLM call: classify + summarize + extract all key clauses in one shot."""
+    document = text[:_MAX_SINGLE_CALL_CHARS]
 
-    Step 1 — classify document type (first 4000 chars)
-    Step 2 — extract key clauses from full document (chunked, parallel LLM calls)
-    Step 3 — generate document summary (parallel with Step 2)
-    Step 4 — merge + deduplicate clauses across chunks
+    logger.info(f"[key_clause] Single-call extraction — {len(document):,} chars")
+    raw    = await run_llm(document, _SINGLE_CALL_SYSTEM, max_output_tokens=8192)
+    result = extract_json_from_text(raw)
 
-    All document types are supported. No more "unsupported" responses.
-    """
-    # Step 1: classify
-    doc_type, doc_label = await _classify_document(text)
-    logger.info(f"[key_clause] Classified as: {doc_type} ('{doc_label}')")
+    if not result:
+        logger.warning("[key_clause] JSON parse failed — returning empty result")
+        result = {
+            "document_type":  "other",
+            "document_label": "General Document",
+            "summary":        "",
+            "key_clauses":    [],
+        }
 
-    chunks = _chunk_text(text)
+    key_clauses = result.get("key_clauses", [])
+    if not isinstance(key_clauses, list):
+        key_clauses = []
 
-    # Step 2+3: clause extraction (all chunks) + summary — all in parallel
-    clause_tasks  = [
-        _extract_clauses_chunk(chunk, doc_label, f"chunk {i+1}/{len(chunks)}")
-        for i, chunk in enumerate(chunks)
-    ]
-    summary_task  = _generate_summary(text, doc_label)
+    cleaned = []
+    for item in key_clauses:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("clause_name") or item.get("name") or "").strip()
+        if not name:
+            continue
+        cleaned.append({
+            "clause_name":  name,
+            "excerpt":      str(item.get("excerpt") or item.get("text") or item.get("quote") or ""),
+            "significance": str(item.get("significance") or item.get("importance") or item.get("reason") or ""),
+        })
 
-    *chunk_results, summary = await asyncio.gather(*clause_tasks, summary_task)
-
-    # Step 4: merge
-    key_clauses = _merge_clauses(chunk_results)
-
-    logger.info(
-        f"[key_clause] Done — {len(key_clauses)} unique clause(s) "
-        f"from {len(chunks)} chunk(s)"
-    )
+    doc_label = result.get("document_label") or result.get("document_type") or "General Document"
+    logger.info(f"[key_clause] Done — {len(cleaned)} clause(s)")
 
     return {
         "status":        "success",
         "document_type": doc_label,
-        "total_clauses": len(key_clauses),
-        "summary":       summary.strip(),
-        "key_clauses":   key_clauses,
+        "total_clauses": len(cleaned),
+        "summary":       result.get("summary", ""),
+        "key_clauses":   cleaned,
     }
 
 
