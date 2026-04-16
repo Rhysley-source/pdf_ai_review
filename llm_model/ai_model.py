@@ -498,6 +498,41 @@ async def run_llm(
                                               max_output_tokens=max_output_tokens)
     return content
 
+async def run_llm_mini(
+    text:              str,
+    system_prompt:     str,
+    max_output_tokens: int = 16000,
+) -> str:
+    """
+    Same as run_llm() but always uses gpt-4o-mini regardless of MODEL_NAME env var.
+    Used by /key-clause-extraction for faster, lower-latency extraction.
+    gpt-4o-mini supports up to 16,384 output tokens and uses max_tokens (not max_completion_tokens).
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": f"Document:\n----------------\n{text}\n----------------"},
+    ]
+    t0 = time.perf_counter()
+    async with _get_text_semaphore():
+        try:
+            response = await _client.chat.completions.create(
+                model      = "gpt-4o-mini",
+                messages   = messages,
+                temperature= 0.0,
+                seed       = _messages_seed(messages),
+                max_tokens = max_output_tokens,
+            )
+            elapsed       = time.perf_counter() - t0
+            content       = response.choices[0].message.content or ""
+            input_tokens  = response.usage.prompt_tokens
+            output_tokens = response.usage.completion_tokens
+            logger.info(f"[run_llm_mini] in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
+            return content
+        except Exception as e:
+            logger.exception(f"[run_llm_mini] OpenAI API call failed: {e}")
+            raise
+
+
 async def run_llm_with_tokens(
     text: str,
     system_prompt: str,

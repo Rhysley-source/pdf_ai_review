@@ -7,7 +7,7 @@ from functools import partial
 
 from fastapi import HTTPException, UploadFile
 
-from llm_model.ai_model import run_llm
+from llm_model.ai_model import run_llm, run_llm_mini
 from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from utils.json_utils import extract_json_raw as extract_json_from_text
 
@@ -139,7 +139,7 @@ async def extract_key_clauses(text: str) -> dict:
     document = text[:_MAX_SINGLE_CALL_CHARS]
 
     logger.info(f"[key_clause] Single-call extraction — {len(document):,} chars")
-    raw    = await run_llm(document, _SINGLE_CALL_SYSTEM, max_output_tokens=9000)
+    raw    = await run_llm_mini(document, _SINGLE_CALL_SYSTEM, max_output_tokens=16000)
     result = extract_json_from_text(raw)
 
     if not result:
