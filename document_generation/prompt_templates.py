@@ -611,6 +611,60 @@ Return ONLY this JSON — no markdown, no explanation:
 
 
 # ---------------------------------------------------------------------------
+# COMBINED Step 1+2 prompt — replaces the two sequential LLM calls with one.
+# Classifies the request, extracts field values, AND builds the document
+# blueprint in a single fast-model call, saving one full network round-trip.
+# ---------------------------------------------------------------------------
+
+COMBINED_ANALYSIS_BLUEPRINT_PROMPT = SimulatedPromptTemplate(
+    template="""You are a document analysis and blueprint specialist. In ONE step, classify the user's request, extract all field values, and build a complete pre-filled document blueprint.
+
+STANDARD SECTIONS BY DOCUMENT TYPE:
+invoice        → Invoice Header | Bill From | Bill To | Line Items Table | Subtotal/Tax/Total | Payment Instructions | Notes/Terms
+contract       → Parties | Recitals | Scope of Work | Term and Renewal | Fees and Payment | Intellectual Property | Confidentiality | Limitation of Liability | Termination | Governing Law | General Provisions | Signature Block
+employment     → Date/Addressee | Offer of Employment | Job Title/Department | Compensation/Benefits | Start Date/Location | Probation Period | Notice Period | Confidentiality/IP Assignment | Code of Conduct | Acceptance Deadline | Signature Block
+nda            → Parties/Recitals | Definitions | Exclusions | Obligations of Receiving Party | Permitted Disclosures | Term/Termination | Return/Destruction | Remedies | Governing Law | Signature Block
+lease          → Parties | Property Description | Lease Term | Monthly Rent/Due Date | Security Deposit | Utilities/Maintenance | Use/Restrictions | Termination/Notice | Move-out Conditions | Governing Law | Signature Block
+resume         → Header (name, contact) | Professional Summary | Work Experience | Education | Skills | Certifications | Projects
+certificate    → Certificate Title | Awarded To | Achievement Description | Date of Award | Issuer Name/Title | Signature Line
+report         → Title/Metadata | Executive Summary | Introduction | Methodology | Findings/Analysis | Conclusions | Recommendations | Appendices
+proposal       → Cover Page | Executive Summary | Problem Statement | Proposed Solution | Scope of Work | Timeline | Pricing/Budget | About Us | Terms | Call to Action
+purchase_order → PO Header | Vendor Details | Line Items Table | Delivery Details | Payment Terms | Special Instructions | Authorized Signature
+letter         → Sender Details/Date | Recipient/Address | Subject Line | Salutation | Body Paragraphs | Complimentary Close | Signature Block
+other          → Document Title | Parties/Participants | Introduction/Purpose | Main Content | Terms and Conditions | Closing | Signature Block
+
+Return ONLY a valid JSON object — no markdown, no backticks, no explanation:
+
+{
+  "is_document_request": <true | false>,
+  "doc_type": "<invoice | contract | employment | nda | lease | resume | certificate | report | proposal | purchase_order | letter | other>",
+  "doc_label": "<specific document name — max 6 words, e.g. 'Tax Invoice', 'Service Agreement', 'Job Offer Letter'>",
+  "fields": { "<snake_case_key>": "<extracted value, or null if not mentioned>" },
+  "document_title": "<exact heading for top of document, e.g. 'TAX INVOICE', 'RENT AGREEMENT', 'SERVICE AGREEMENT'>",
+  "sections": [
+    {
+      "title": "<section heading>",
+      "content_hint": "<complete, fully pre-filled detail — embed ALL known values. Use [Field Label] only for genuinely missing values.>",
+      "missing_fields": ["<exact label of each missing required field>"]
+    }
+  ],
+  "tone": "<formal | professional | friendly | technical>",
+  "layout_notes": "<exact table/column structure — e.g. 'Two-column header: vendor left, client right. Bordered 5-column line-items table. Two-column signature block at bottom.'>"
+}
+
+RULES:
+1. is_document_request = true only when the user is asking to generate, create, draft, write, or produce a document.
+2. fields: extract every name, amount, date, address, duration, role, and quantity mentioned.
+3. sections: include ALL standard sections for the doc_type PLUS any extras the user mentioned. Every section must be present for a complete document.
+4. content_hint: fully pre-filled with real values — e.g. "Monthly Rent: ₹18,000 due on 1st of each month" not "rent goes here".
+5. missing_fields: list only fields genuinely absent from the user's request using their actual label (e.g. "Email Address", "Phone Number").
+6. layout_notes: describe exact table/column structure — never write "standard layout".
+7. If is_document_request = false: doc_type="other", doc_label="", fields={}, document_title="", sections=[], tone="", layout_notes="".""",
+    input_variables=[],
+)
+
+
+# ---------------------------------------------------------------------------
 # Intent check prompt — kept for backward compatibility (currently unused).
 # ---------------------------------------------------------------------------
 
