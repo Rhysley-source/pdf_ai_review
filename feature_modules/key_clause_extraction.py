@@ -129,6 +129,9 @@ First identify the document type, then extract key clauses relevant to that type
 
 Rules:
 - Extract ALL relevant clauses or sections actually present in the document
+- Keep excerpt to max 30 words and significance to max 20 words — be concise
+- NEVER stop early — always close the JSON array and object completely
+- Do not truncate the key_clauses list — include every clause found
 - Use real text from the document — do not fabricate or infer missing content
 - If a section type is not present in the document, skip it
 - Return ONLY valid JSON — no markdown, no explanation"""
@@ -139,7 +142,7 @@ async def extract_key_clauses(text: str) -> dict:
     document = text[:_MAX_SINGLE_CALL_CHARS]
 
     logger.info(f"[key_clause] Single-call extraction — {len(document):,} chars")
-    raw    = await run_llm(document, _SINGLE_CALL_SYSTEM, max_output_tokens=9000, model="gpt-4o-mini")
+    raw    = await run_llm(document, _SINGLE_CALL_SYSTEM, max_output_tokens=16000, model="gpt-4o-mini")
     result = extract_json_from_text(raw)
 
     if not result:
