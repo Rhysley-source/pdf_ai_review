@@ -92,9 +92,9 @@ async def classify_document(text: str) -> str:
 
 _MAX_SINGLE_CALL_CHARS = 100_000
 
-_SINGLE_CALL_SYSTEM = """You are a legal document analyst.
+_SINGLE_CALL_SYSTEM = """You are a document analyst.
 
-Analyze the document below and return a single JSON object with EXACTLY this structure:
+Analyze the document and return a single JSON object with EXACTLY this structure:
 
 {
   "document_type": "<slug: contract|employment|nda|lease|invoice|resume|report|other>",
@@ -102,24 +102,36 @@ Analyze the document below and return a single JSON object with EXACTLY this str
   "summary": "<what this document is, parties, and main purpose — max 40 words>",
   "key_clauses": [
     {
-      "clause_name": "<clause name — max 5 words>",
+      "clause_name": "<clause or section name — max 5 words>",
       "excerpt": "<key text from document — max 30 words>",
-      "significance": "<why this clause matters — max 20 words>"
+      "significance": "<why this matters — max 20 words>"
     }
   ]
 }
 
-Extract ALL key clauses covering:
-- Rights and obligations of the parties
-- Financial terms, payment conditions, or amounts
-- Time periods, deadlines, notice periods, or renewal terms
-- Restrictions, limitations, permissions, or prohibitions
-- Legal protections, liability, or risks
-- Confidentiality, IP, or data obligations
+First identify the document type, then extract key clauses relevant to that type:
+
+- contract:    payment terms, liability clauses, termination conditions, IP ownership, dispute resolution,
+               indemnification, confidentiality, governing law, force majeure, warranties
+- employment:  job title/role, salary and compensation, benefits, probation period, notice period,
+               non-compete / non-solicitation, leave policy, working hours, termination conditions
+- nda:         parties involved, definition of confidential information, duration, permitted disclosures,
+               exclusions from confidentiality, breach consequences, jurisdiction
+- lease:       rent amount and due date, lease duration, security deposit, maintenance responsibilities,
+               renewal / termination terms, pet / subletting policy, late fees
+- invoice:     line items and descriptions, unit prices, quantities, subtotal, tax, total amount due,
+               payment due date, payment method, late payment penalties, billing parties
+- resume:      professional summary, core skills and technologies, work experience (roles and achievements),
+               education and qualifications, certifications and licenses, notable projects or accomplishments
+- report:      key findings, main conclusions, critical metrics or data points, recommendations,
+               methodology, data sources, risks or issues identified, action items
+- other:       main topics covered, key decisions or outcomes, important figures or dates,
+               parties or stakeholders involved, notable terms or conditions, action items
 
 Rules:
-- Only include clauses ACTUALLY present in the document
-- If no key clauses found, return key_clauses as []
+- Extract ALL relevant clauses or sections actually present in the document
+- Use real text from the document — do not fabricate or infer missing content
+- If a section type is not present in the document, skip it
 - Return ONLY valid JSON — no markdown, no explanation"""
 
 
