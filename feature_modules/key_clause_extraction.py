@@ -99,7 +99,6 @@ Analyze the document and return a single JSON object with EXACTLY this structure
 {
   "document_type": "<slug: contract|employment|nda|lease|invoice|resume|report|other>",
   "document_label": "<specific document name — max 5 words>",
-  "summary": "<what this document is, parties, and main purpose — max 40 words>",
   "key_clauses": [
     {
       "clause_name": "<clause or section name — max 5 words>",
@@ -140,7 +139,7 @@ async def extract_key_clauses(text: str) -> dict:
     document = text[:_MAX_SINGLE_CALL_CHARS]
 
     logger.info(f"[key_clause] Single-call extraction — {len(document):,} chars")
-    raw    = await run_llm(document, _SINGLE_CALL_SYSTEM, max_output_tokens=9000)
+    raw    = await run_llm(document, _SINGLE_CALL_SYSTEM, max_output_tokens=9000, model="gpt-4o-mini")
     result = extract_json_from_text(raw)
 
     if not result:
@@ -176,7 +175,6 @@ async def extract_key_clauses(text: str) -> dict:
         "status":        "success",
         "document_type": doc_label,
         "total_clauses": len(cleaned),
-        "summary":       result.get("summary", ""),
         "key_clauses":   cleaned,
     }
 
