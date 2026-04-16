@@ -5,10 +5,9 @@ import io
 import json
 import os
 import re
-import time
 import uuid
 import logging
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from openai import AsyncOpenAI
@@ -16,7 +15,6 @@ from dotenv import load_dotenv
 from .prompt_templates import (
     QUERY_ANALYSIS_PROMPT,
     TEMPLATE_BUILD_PROMPT,
-    COMBINED_ANALYSIS_BLUEPRINT_PROMPT,
     DOCUMENT_GENERATION_V2_PROMPT,
     REGENERATION_INTENT_PROMPT,
     SECTION_TEMPLATES,
@@ -150,18 +148,7 @@ _MAX_COMPLETION_TOKENS_MODELS = {
 _MAX_TOKENS_HTML      = None  # Step 3: no cap — documents can be any size; model uses its own maximum
 _MAX_TOKENS_BLUEPRINT = 4096  # Step 2: detailed pre-filled section plan — needs more room than plain JSON
 _MAX_TOKENS_JSON      = 2048  # Step 1: small JSON classification response
-_MAX_TOKENS_COMBINED  = 6144  # Combined Step 1+2: classification + full blueprint in one call
 _HTML_GEN_RETRIES     = 3     # Step 3 retry attempts on empty/null response
-
-# ---------------------------------------------------------------------------
-# In-memory analysis+blueprint cache
-#
-# Steps 1+2 are deterministic (use_seed=True, temperature=0). Caching by
-# SHA-256(user_prompt) avoids redundant LLM calls on retries and repeated
-# identical prompts. Entries expire after _CACHE_TTL seconds.
-# ---------------------------------------------------------------------------
-_CACHE_TTL = 300  # seconds (5 minutes)
-_ANALYSIS_CACHE: dict[str, tuple[tuple, float]] = {}  # key → ((analysis_meta, context), timestamp)
 
 
 async def _call_llm(
@@ -595,141 +582,6 @@ def _static_template_context(analysis: dict) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# SSE helper — used by the /generate-html/stream endpoint
-# ---------------------------------------------------------------------------
-
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
-
-# ---------------------------------------------------------------------------
-# Combined Step 1+2 parser
-# ---------------------------------------------------------------------------
-
-def _parse_combined_json(raw: str) -> tuple[bool, dict, dict]:
-    """
-    Parses the combined analysis+blueprint JSON into:
-      (is_document_request, analysis_meta, context)
-
-    analysis_meta — {doc_type, doc_label, fields} for error / logging use
-    context       — {doc_type, doc_label, tone, layout_notes, sections_block}
-                    ready to pass directly into DOCUMENT_GENERATION_V2_PROMPT
-    """
-    cleaned = raw.strip().replace("```json", "").replace("```", "").strip()
-    try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Combined step returned non-JSON: {raw[:200]}") from exc
-
-    is_doc_req = bool(parsed.get("is_document_request", False))
-
-    doc_type = (parsed.get("doc_type") or "other").lower().strip()
-    if doc_type not in SECTION_TEMPLATES:
-        doc_type = "other"
-
-    doc_label = (parsed.get("doc_label") or "").strip()
-    fields    = parsed.get("fields") or {}
-    if not isinstance(fields, dict):
-        fields = {}
-
-    analysis_meta = {"doc_type": doc_type, "doc_label": doc_label, "fields": fields}
-
-    # Build sections_block string for Step 3
-    sections = parsed.get("sections") or []
-    lines = []
-    for i, sec in enumerate(sections, 1):
-        title        = sec.get("title", f"Section {i}")
-        content_hint = sec.get("content_hint", "")
-        missing      = sec.get("missing_fields") or []
-        entry        = f"{i}. {title}\n   → {content_hint}"
-        if missing:
-            entry += f"\n   ⚠ Missing fields (use visible placeholders): {', '.join(missing)}"
-        lines.append(entry)
-    sections_block = "\n\n".join(lines)
-
-    # Fallback to static section names if LLM returned no sections
-    if not sections_block:
-        tmpl = SECTION_TEMPLATES.get(doc_type, SECTION_TEMPLATES["other"])
-        secs = tmpl.get("required_sections", [])
-        sections_block = "\n\n".join(f"{i+1}. {s}" for i, s in enumerate(secs))
-
-    document_title = (parsed.get("document_title") or "").strip() or doc_label
-    tone           = (parsed.get("tone") or "professional").strip()
-    layout_notes   = (parsed.get("layout_notes") or "Standard document layout.").strip()
-
-    context = {
-        "doc_type":       doc_type,
-        "doc_label":      document_title,
-        "tone":           tone,
-        "layout_notes":   layout_notes,
-        "sections_block": sections_block,
-    }
-    return is_doc_req, analysis_meta, context
-
-
-# ---------------------------------------------------------------------------
-# _analyze_and_build — replaces the two sequential _analyze_query +
-# _build_template_context LLM calls with a single combined fast-model call.
-# Saves one full network round-trip on every /generate-html request.
-# ---------------------------------------------------------------------------
-
-async def _analyze_and_build(user_prompt: str) -> tuple[dict, dict]:
-    """
-    Single fast-model LLM call that performs Steps 1+2 in one shot:
-      - classifies the request (is_document_request, doc_type, doc_label, fields)
-      - builds a complete pre-filled section blueprint
-
-    Returns (analysis_meta, context):
-      analysis_meta  — {doc_type, doc_label, fields} for error reporting
-      context        — ready for _generate_html_from_context
-
-    Raises HTTP 422 if the prompt is not a document generation request.
-    Results are cached by SHA-256(user_prompt) for _CACHE_TTL seconds to
-    avoid redundant LLM calls on retries or repeated identical prompts.
-    """
-    cache_key = hashlib.sha256(user_prompt.encode()).hexdigest()
-    now       = time.monotonic()
-
-    cached_entry = _ANALYSIS_CACHE.get(cache_key)
-    if cached_entry:
-        result, ts = cached_entry
-        if now - ts < _CACHE_TTL:
-            logger.info(f"[doc-gen] Combined step cache HIT ({cache_key[:8]})")
-            return result
-        del _ANALYSIS_CACHE[cache_key]
-
-    logger.info("[doc-gen] Combined step (Steps 1+2): analysing + building blueprint...")
-    raw, _ = await _call_llm(
-        COMBINED_ANALYSIS_BLUEPRINT_PROMPT.template,
-        user_prompt,
-        model=_FAST_MODEL,
-        max_tokens=_MAX_TOKENS_COMBINED,
-        temperature=0,
-        use_seed=True,
-    )
-    logger.info(f"[doc-gen] Combined step output: {raw[:300]}")
-
-    try:
-        is_doc_req, analysis_meta, context = _parse_combined_json(raw)
-    except ValueError as e:
-        logger.error(f"[doc-gen] Combined step parse failed: {e}")
-        raise HTTPException(
-            status_code=502,
-            detail=_err_model_failed("Query Analysis", user_prompt, str(e)),
-        )
-
-    if not is_doc_req:
-        raise HTTPException(
-            status_code=422,
-            detail=_err_not_document_request(user_prompt),
-        )
-
-    result = (analysis_meta, context)
-    _ANALYSIS_CACHE[cache_key] = (result, now)
-    return result
-
-
 async def _build_template_context(analysis: dict, user_prompt: str = "") -> dict:
     """Step 2 — builds a detailed, pre-filled document blueprint.
 
@@ -904,16 +756,13 @@ async def _check_regeneration_intent(modification_query: str, existing_html: str
 @router.post("/generate-html", response_class=HTMLResponse)
 async def generate_document_html(
     request: DocumentGenerationRequest,
-    background_tasks: BackgroundTasks,
     _: None = Depends(verify_api_key),
 ):
     """
-    2-step pipeline (optimized from 3):
-      Step 1+2 combined (LLM) — classify request + build blueprint in one fast-model call
-      Step 3          (LLM)   — generate final HTML from the enriched blueprint
-
-    Storage write happens in the background after the response is returned —
-    the client receives the HTML without waiting for the disk write.
+    3-step pipeline:
+      Step 1 (LLM)    — detect document type + extract field values from user_prompt
+      Step 2 (Python) — select type-specific section template, merge extracted fields
+      Step 3 (LLM)    — generate final HTML using the enriched context
     """
     if _is_gibberish(request.user_prompt):
         raise HTTPException(status_code=422, detail=_err_invalid_prompt(request.user_prompt))
@@ -921,19 +770,31 @@ async def generate_document_html(
     doc_id = request.document_id or str(uuid.uuid4())
 
     try:
-        # Steps 1+2 combined: single fast-model call (cached on repeated prompts)
+        # Step 1: query analysis
         try:
-            _, context = await _analyze_and_build(request.user_prompt)
+            analysis = await _analyze_query(request.user_prompt)
         except HTTPException:
             raise
         except Exception as e:
-            logger.exception("[doc-gen] Combined analysis+blueprint step failed")
+            logger.exception("[doc-gen] Step 1 failed")
             raise HTTPException(
                 status_code=502,
                 detail=_err_model_failed("Query Analysis", request.user_prompt, str(e)),
             )
 
-        # Step 3: final HTML generation (with retries)
+        # Step 2: blueprint building (LLM)
+        try:
+            context = await _build_template_context(analysis, user_prompt=request.user_prompt)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("[doc-gen] Step 2 failed")
+            raise HTTPException(
+                status_code=502,
+                detail=_err_model_failed("Blueprint Building", request.user_prompt, str(e)),
+            )
+
+        # Step 3: final HTML generation
         try:
             cleaned_html = await _generate_html_from_context(context, request.user_prompt)
         except Exception as e:
@@ -943,16 +804,25 @@ async def generate_document_html(
                 detail=_err_model_failed("HTML Generation", request.user_prompt, str(e)),
             )
 
-        # _generate_html_from_context already validates — empty string means all retries failed
-        if not cleaned_html:
-            logger.error("[doc-gen] All retries exhausted — HTML generation returned empty")
+        valid, reason = _validate_html(cleaned_html)
+        if not valid:
+            logger.error(f"[doc-gen] All retries exhausted — final HTML invalid: {reason}")
             raise HTTPException(
                 status_code=500,
                 detail=_err_empty_output(request.user_prompt),
             )
 
-        # Save in background — response is returned immediately, no wait for disk write
-        background_tasks.add_task(_save_document, doc_id, cleaned_html)
+        try:
+            await asyncio.to_thread(_save_document, doc_id, cleaned_html)
+        except Exception as e:
+            logger.exception("[doc-gen] Storage write failed")
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error":   "storage_failed",
+                    "message": "Your document was generated but could not be saved. Please try again.",
+                },
+            )
 
         return HTMLResponse(content=cleaned_html, headers={"X-Document-Id": doc_id})
 
@@ -967,115 +837,6 @@ async def generate_document_html(
                 "message": "An unexpected error occurred. Please try again.",
             },
         )
-
-
-@router.post("/generate-html/stream")
-async def generate_document_html_stream(
-    request: DocumentGenerationRequest,
-    background_tasks: BackgroundTasks,
-    _: None = Depends(verify_api_key),
-):
-    """
-    Streaming version of /generate-html using Server-Sent Events.
-
-    Steps 1+2 run as a single combined fast-model call (same as /generate-html).
-    Step 3 streams HTML token-by-token so the client can start rendering immediately.
-
-    SSE events:
-      status  — {"step": "...", "message": "..."}
-      token   — {"delta": "<html chunk>"}
-      done    — {"doc_id": "...", "doc_type": "...", "doc_label": "..."}
-      error   — {"message": "..."}
-    """
-    if _is_gibberish(request.user_prompt):
-        async def _err_stream():
-            yield _sse("error", _err_invalid_prompt(request.user_prompt))
-        return StreamingResponse(_err_stream(), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-    doc_id = request.document_id or str(uuid.uuid4())
-    model  = os.environ.get("MODEL_NAME", _MODEL)
-
-    async def _generate():
-        try:
-            # ── Steps 1+2 combined ────────────────────────────────────────────
-            yield _sse("status", {"step": "analysis", "message": "Analysing request and building document blueprint..."})
-            try:
-                _, context = await _analyze_and_build(request.user_prompt)
-            except HTTPException as exc:
-                detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
-                yield _sse("error", detail)
-                return
-            except Exception as exc:
-                logger.exception("[doc-gen/stream] Combined step failed")
-                yield _sse("error", {"message": "Analysis failed. Please try again."})
-                return
-
-            yield _sse("status", {
-                "step":      "generating",
-                "message":   f"Generating {context['doc_label']}...",
-                "doc_type":  context["doc_type"],
-                "doc_label": context["doc_label"],
-            })
-
-            # ── Step 3: stream HTML token-by-token ───────────────────────────
-            system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
-                **context, user_request=request.user_prompt
-            )
-            stream_kwargs: dict = {
-                "model":    model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": request.user_prompt},
-                ],
-                "stream":         True,
-                "stream_options": {"include_usage": True},
-                "seed":           _prompt_seed(system_prompt, request.user_prompt),
-            }
-            if model not in _FIXED_TEMPERATURE_MODELS:
-                stream_kwargs["temperature"] = 0.2
-
-            html_buffer = ""
-            try:
-                stream = await _CLIENT.chat.completions.create(**stream_kwargs)
-                async for chunk in stream:
-                    if chunk.choices and chunk.choices[0].delta.content:
-                        delta        = chunk.choices[0].delta.content
-                        html_buffer += delta
-                        yield _sse("token", {"delta": delta})
-            except Exception as exc:
-                logger.exception("[doc-gen/stream] Streaming call failed")
-                yield _sse("error", {"message": "HTML generation failed. Please try again."})
-                return
-
-            cleaned_html = _clean_html(html_buffer)
-            valid, reason = _validate_html(cleaned_html)
-            if not valid:
-                logger.error(f"[doc-gen/stream] Invalid HTML: {reason}")
-                yield _sse("error", _err_empty_output(request.user_prompt))
-                return
-
-            background_tasks.add_task(_save_document, doc_id, cleaned_html)
-
-            yield _sse("done", {
-                "doc_id":    doc_id,
-                "doc_type":  context["doc_type"],
-                "doc_label": context["doc_label"],
-            })
-
-        except Exception as exc:
-            logger.exception("[doc-gen/stream] Unexpected error")
-            yield _sse("error", {"message": "An unexpected error occurred."})
-
-    return StreamingResponse(
-        _generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control":     "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection":        "keep-alive",
-        },
-    )
 
 
 @router.post("/regenerate-html", response_class=HTMLResponse)
@@ -1102,52 +863,35 @@ async def regenerate_document_html(
             detail=_err_document_not_found(request.document_id),
         )
 
-    # Build the modification prompt up front — needed in all paths below
-    modify_system = REGENERATE_PROMPT.format(
-        existing_html=existing_html,
-        modification_query=request.modification_query,
-    )
-
-    # ── Intent detection: fast-path or speculative parallel ──────────────────
-    #
-    # _is_modification_query() detects obvious modification keywords in <1ms.
-    # When confident, skip the LLM intent check entirely and start the modify
-    # call immediately.
-    #
-    # For ambiguous queries (no clear keyword match), run the intent check and
-    # the modification LLM call in parallel — the modify call is already in
-    # flight when the intent check returns. If intent turns out to be
-    # new_document the speculative modify task is cancelled with no cost.
-    if _is_modification_query(request.modification_query):
-        logger.info("[doc-gen] Modification keywords detected — skipping intent check")
-        intent      = "modify"
-        modify_task = asyncio.create_task(
-            _call_llm(modify_system, request.modification_query)
-        )
-    else:
-        intent_task = asyncio.create_task(
-            _check_regeneration_intent(request.modification_query, existing_html)
-        )
-        modify_task = asyncio.create_task(
-            _call_llm(modify_system, request.modification_query)
-        )
-        intent = await intent_task
-        if intent == "new_document":
-            modify_task.cancel()
+    # Intent check runs in parallel with nothing else here, but is isolated
+    # so it uses the fast model and doesn't delay the modify path unnecessarily.
+    # LLM intent check — branch based on whether user wants to modify or generate new
+    intent = await _check_regeneration_intent(request.modification_query, existing_html)
 
     if intent == "new_document":
-        # ── New document generation path ──────────────────────────────────────
+        # ── New document generation path (same as /generate-html) ──────────
         logger.info("[doc-gen] Regeneration intent=new_document — running generation pipeline")
 
         try:
-            _, context = await _analyze_and_build(request.modification_query)
+            analysis = await _analyze_query(request.modification_query)
         except HTTPException:
             raise
         except Exception as e:
-            logger.exception("[doc-gen] Combined step failed during regeneration→generate")
+            logger.exception("[doc-gen] Step 1 failed during regeneration→generate")
             raise HTTPException(
                 status_code=502,
                 detail=_err_model_failed("Query Analysis", request.modification_query, str(e)),
+            )
+
+        try:
+            context = await _build_template_context(analysis, user_prompt=request.modification_query)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("[doc-gen] Step 2 failed during regeneration→generate")
+            raise HTTPException(
+                status_code=502,
+                detail=_err_model_failed("Blueprint Building", request.modification_query, str(e)),
             )
 
         try:
@@ -1160,6 +904,7 @@ async def regenerate_document_html(
             )
 
         cleaned_html = _clean_html(raw_html)
+
         if not cleaned_html.strip():
             raise HTTPException(
                 status_code=500,
@@ -1170,14 +915,14 @@ async def regenerate_document_html(
         await asyncio.to_thread(_save_document, doc_id, cleaned_html)
         return HTMLResponse(content=cleaned_html, headers={"X-Document-Id": doc_id})
 
-    # ── Modify existing document path ─────────────────────────────────────────
-    # modify_task was started before intent was known — await its result.
+    # ── Modify existing document path ───────────────────────────────────────
+    system_prompt = REGENERATE_PROMPT.format(
+        existing_html=existing_html,
+        modification_query=request.modification_query,
+    )
+
     try:
-        raw_html, _ = await modify_task
-    except asyncio.CancelledError:
-        # Extremely rare race: task was cancelled just before we awaited it
-        logger.warning("[doc-gen] Speculative modify task cancelled unexpectedly — retrying")
-        raw_html, _ = await _call_llm(modify_system, request.modification_query)
+        raw_html, _ = await _call_llm(system_prompt, request.modification_query)
     except Exception as e:
         logger.exception("[doc-gen] Regeneration LLM call failed")
         raise HTTPException(
