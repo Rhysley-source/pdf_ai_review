@@ -139,7 +139,7 @@ async def extract_key_clauses(text: str) -> dict:
     document = text[:_MAX_SINGLE_CALL_CHARS]
 
     logger.info(f"[key_clause] Single-call extraction — {len(document):,} chars")
-    raw    = await run_llm(document, _SINGLE_CALL_SYSTEM, max_output_tokens=16000)
+    raw    = await run_llm_mini(document, _SINGLE_CALL_SYSTEM, max_output_tokens=16000)
     result = extract_json_from_text(raw)
 
     if not result:
