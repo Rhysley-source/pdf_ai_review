@@ -58,6 +58,33 @@ def _normalize_result(result: dict) -> dict:
 
 _MAX_SINGLE_CALL_CHARS = 300_000
 
+_FALLBACK_SYSTEM = """You are a senior legal and financial risk analyst.
+
+List ONLY the top 5 most critical risks in this document.
+Return a JSON object with EXACTLY this structure — nothing else:
+
+{
+  "document_type": "<one of: contract, employment, nda, lease, invoice, resume, other>",
+  "document_label": "<specific document name — max 5 words>",
+  "detected_risks": [
+    {
+      "risk_name": "<risk name — max 6 words>",
+      "severity": "High | Medium | Low",
+      "severity_reason": "<why this severity — max 15 words>",
+      "clause_found": "<exact quote or description — max 25 words>",
+      "impact": "<why dangerous — max 20 words>",
+      "mitigation": "<how to fix — max 20 words>"
+    }
+  ],
+  "missing_fields": [],
+  "unfilled_placeholders": [],
+  "overall_assessment": ""
+}
+
+Rules:
+- Return EXACTLY 5 risks or fewer if fewer exist
+- Return ONLY valid JSON — no markdown, no explanation"""
+
 _SINGLE_CALL_SYSTEM = """You are a senior legal and financial risk analyst.
 
 Analyze the document and return a single JSON object with EXACTLY this structure:
@@ -101,19 +128,38 @@ async def analyze_document_risks(text: str) -> dict:
     document = text[:_MAX_SINGLE_CALL_CHARS]
 
     logger.info(f"[risk_detection] Single-call analysis — {len(document):,} chars")
-    raw    = await run_llm_mini(document, _SINGLE_CALL_SYSTEM, max_output_tokens=8000)
-    result = extract_json_from_text(raw)
 
-    if not result:
-        logger.warning("[risk_detection] JSON parse failed — returning empty result")
-        result = {
-            "document_type":         "other",
-            "document_label":        "General Document",
-            "detected_risks":        [],
-            "missing_fields":        [],
-            "unfilled_placeholders": [],
-            "overall_assessment":    "",
-        }
+    _MAX_ATTEMPTS = 2
+    result = {}
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        raw = await run_llm_mini(document, _SINGLE_CALL_SYSTEM, max_output_tokens=8000)
+        logger.debug(f"[risk_detection] attempt {attempt} raw output ({len(raw)} chars): {raw[:800]}")
+        result = extract_json_from_text(raw)
+        if result and "detected_risks" in result:
+            break
+        logger.warning(
+            f"[risk_detection] attempt {attempt} JSON parse failed or missing 'detected_risks'. "
+            f"Raw snippet: {raw[:500]}"
+        )
+
+    if not result or "detected_risks" not in result:
+        logger.warning(f"[risk_detection] all {_MAX_ATTEMPTS} attempt(s) failed — trying top-5 fallback call")
+        fallback_raw = await run_llm_mini(document, _FALLBACK_SYSTEM, max_output_tokens=3000)
+        logger.debug(f"[risk_detection] fallback raw output ({len(fallback_raw)} chars): {fallback_raw[:800]}")
+        result = extract_json_from_text(fallback_raw)
+        if not result or "detected_risks" not in result:
+            logger.warning(f"[risk_detection] fallback call also failed — returning empty result. Raw snippet: {fallback_raw[:500]}")
+            result = {
+                "document_type":         "other",
+                "document_label":        "General Document",
+                "detected_risks":        [],
+                "missing_fields":        [],
+                "unfilled_placeholders": [],
+                "overall_assessment":    "",
+            }
+        else:
+            result["detected_risks"] = result["detected_risks"][:5]
+            logger.info(f"[risk_detection] fallback call succeeded — {len(result['detected_risks'])} risk(s) returned")
 
     doc_label = result.get("document_label") or result.get("document_type") or "General Document"
 
