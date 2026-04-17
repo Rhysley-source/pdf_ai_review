@@ -320,6 +320,40 @@ async def _run_inference_json(
         raise
 
 
+async def _run_inference_json_mini(
+    messages: list[dict],
+    label:    str = "",
+) -> tuple[str, int, int]:
+    """
+    Same as _run_inference_json but always uses gpt-4o-mini regardless of MODEL_NAME env var.
+    Used by the red flag scanner.
+    Returns (content, input_tokens, output_tokens).
+    """
+    tag    = f"[{label}] " if label else ""
+    t0     = time.perf_counter()
+
+    kwargs: dict = {
+        "model":           "gpt-4o-mini",
+        "messages":        messages,
+        "temperature":     0.0,
+        "seed":            _messages_seed(messages),
+        "max_tokens":      8000,
+        "response_format": {"type": "json_object"},
+    }
+
+    try:
+        response      = await _client.chat.completions.create(**kwargs)
+        elapsed       = time.perf_counter() - t0
+        content       = response.choices[0].message.content or ""
+        input_tokens  = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        logger.info(f"{tag}[gpt-4o-mini] in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
+        return content, input_tokens, output_tokens
+    except Exception as e:
+        logger.exception(f"{tag}[gpt-4o-mini] OpenAI API call failed: {e}")
+        raise
+
+
 # ---------------------------------------------------------------------------
 # _run_inference_text
 #

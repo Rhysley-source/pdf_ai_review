@@ -1,5 +1,5 @@
 import logging
-from llm_model.ai_model import _run_inference_json
+from llm_model.ai_model import _run_inference_json_mini as _run_inference_json
 from utils.json_utils import extract_json_raw
 
 logger = logging.getLogger(__name__)
