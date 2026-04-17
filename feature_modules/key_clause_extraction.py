@@ -1,15 +1,13 @@
 import asyncio
-import json
 import logging
-import re
+import os
 import time
 import uuid
-import os
 from functools import partial
 
 from fastapi import HTTPException, UploadFile
 
-from llm_model.ai_model import run_llm
+from llm_model.ai_model import run_llm, run_llm_mini
 from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from utils.json_utils import extract_json_raw as extract_json_from_text
 
@@ -19,31 +17,7 @@ UPLOAD_FOLDER = "temp"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# Chunking — same windows as risk_detection for consistency
-# ---------------------------------------------------------------------------
-
-_CHUNK_SIZE    = 10_000
-_CHUNK_OVERLAP = 500
-
-
-def _chunk_text(text: str) -> list[str]:
-    if len(text) <= _CHUNK_SIZE:
-        return [text]
-    chunks, start = [], 0
-    while start < len(text):
-        end = min(start + _CHUNK_SIZE, len(text))
-        chunks.append(text[start:end])
-        if end == len(text):
-            break
-        start += _CHUNK_SIZE - _CHUNK_OVERLAP
-    logger.info(f"[key_clause] Document split into {len(chunks)} chunk(s)")
-    return chunks
-
-
-# ---------------------------------------------------------------------------
-# Step 1 — Document Classification
-# Uses first 4000 chars; returns (slug, human-readable label).
-# Aligned with risk_detection slugs so both routes classify consistently.
+# Document classification — used by /compare-documents and /key-clause-extraction
 # ---------------------------------------------------------------------------
 
 _KNOWN_SLUGS = {
@@ -106,61 +80,83 @@ async def _classify_document(text: str) -> tuple[str, str]:
     return slug, label
 
 
+async def classify_document(text: str) -> str:
+    """Public wrapper — returns only the doc-type slug (used by compare-documents)."""
+    slug, _ = await _classify_document(text)
+    return slug
+
+
 # ---------------------------------------------------------------------------
-# Step 2 — Key Clause Extraction (chunked, parallel)
+# Key clause extraction — single LLM call
 # ---------------------------------------------------------------------------
 
-async def _extract_clauses_chunk(chunk: str, doc_label: str, chunk_label: str) -> list[dict]:
-    """
-    Asks the LLM to extract key clauses from one chunk.
-    Returns a list of clause dicts: {clause_name, excerpt, significance}.
-    """
-    system_prompt = f"""You are a legal document analyst specialising in {doc_label} documents.
+_MAX_SINGLE_CALL_CHARS = 300_000
 
-Extract ALL key clauses present in this section of the document.
+_SINGLE_CALL_SYSTEM = """You are a document analyst.
 
-A key clause is any provision, term, condition, or section that is important for understanding:
-- Rights and obligations of the parties
-- Financial terms, payment conditions, or amounts
-- Time periods, deadlines, notice periods, or renewal terms
-- Restrictions, limitations, permissions, or prohibitions
-- Legal protections, liability, or risks
-- Confidentiality, IP, or data obligations
+Analyze the document and return a single JSON object with EXACTLY this structure:
 
-For each key clause found, return:
-  "clause_name"  — a short, specific name (e.g. "Payment Terms", "Termination Notice", "Non-Compete Restriction")
-  "excerpt"      — the exact relevant text from the document, or a faithful paraphrase if the clause is very long
-  "significance" — one sentence explaining why this clause is important
-
-Return ONLY valid JSON in exactly this structure:
-{{
+{
+  "document_type": "<slug: contract|employment|nda|lease|invoice|resume|report|other>",
+  "document_label": "<specific document name — max 5 words>",
   "key_clauses": [
-    {{
-      "clause_name": "<name>",
-      "excerpt": "<text from document>",
-      "significance": "<why it matters>"
-    }}
+    {
+      "clause_name": "<clause or section name — max 5 words>",
+      "excerpt": "<key text from document — max 30 words>",
+      "significance": "<why this matters — max 20 words>"
+    }
   ]
-}}
+}
+
+First identify the document type, then extract key clauses relevant to that type:
+
+- contract:    payment terms, liability clauses, termination conditions, IP ownership, dispute resolution,
+               indemnification, confidentiality, governing law, force majeure, warranties
+- employment:  job title/role, salary and compensation, benefits, probation period, notice period,
+               non-compete / non-solicitation, leave policy, working hours, termination conditions
+- nda:         parties involved, definition of confidential information, duration, permitted disclosures,
+               exclusions from confidentiality, breach consequences, jurisdiction
+- lease:       rent amount and due date, lease duration, security deposit, maintenance responsibilities,
+               renewal / termination terms, pet / subletting policy, late fees
+- invoice:     line items and descriptions, unit prices, quantities, subtotal, tax, total amount due,
+               payment due date, payment method, late payment penalties, billing parties
+- resume:      professional summary, core skills and technologies, work experience (roles and achievements),
+               education and qualifications, certifications and licenses, notable projects or accomplishments
+- report:      key findings, main conclusions, critical metrics or data points, recommendations,
+               methodology, data sources, risks or issues identified, action items
+- other:       main topics covered, key decisions or outcomes, important figures or dates,
+               parties or stakeholders involved, notable terms or conditions, action items
 
 Rules:
-- Only include clauses that are ACTUALLY present in this section
-- Be specific to "{doc_label}" — not generic observations about what might be present
-- Preserve exact wording in excerpt wherever possible
-- If this section contains no key clauses, return {{"key_clauses": []}}
-- No explanation, no markdown — ONLY the JSON"""
+- Extract ALL relevant clauses or sections actually present in the document
+- Use real text from the document — do not fabricate or infer missing content
+- If a section type is not present in the document, skip it
+- Return ONLY valid JSON — no markdown, no explanation"""
 
-    logger.info(f"[key_clause] Extracting clauses — {chunk_label}")
-    raw    = await run_llm(chunk, system_prompt, max_output_tokens=4096)
+
+async def extract_key_clauses(text: str) -> dict:
+    """Single LLM call: classify + summarize + extract all key clauses in one shot."""
+    document = text[:_MAX_SINGLE_CALL_CHARS]
+
+    logger.info(f"[key_clause] Single-call extraction — {len(document):,} chars")
+    raw    = await run_llm_mini(document, _SINGLE_CALL_SYSTEM, max_output_tokens=16000)
     result = extract_json_from_text(raw)
 
-    clauses = result.get("key_clauses", [])
-    if not isinstance(clauses, list):
-        return []
+    if not result:
+        logger.warning("[key_clause] JSON parse failed — returning empty result")
+        result = {
+            "document_type":  "other",
+            "document_label": "General Document",
+            "summary":        "",
+            "key_clauses":    [],
+        }
 
-    # Normalise each clause item
+    key_clauses = result.get("key_clauses", [])
+    if not isinstance(key_clauses, list):
+        key_clauses = []
+
     cleaned = []
-    for item in clauses:
+    for item in key_clauses:
         if not isinstance(item, dict):
             continue
         name = str(item.get("clause_name") or item.get("name") or "").strip()
@@ -171,98 +167,21 @@ Rules:
             "excerpt":      str(item.get("excerpt") or item.get("text") or item.get("quote") or ""),
             "significance": str(item.get("significance") or item.get("importance") or item.get("reason") or ""),
         })
-    return cleaned
 
-
-def _merge_clauses(lists: list[list[dict]]) -> list[dict]:
-    """
-    Merges clause lists from multiple chunks, deduplicating by normalised clause_name.
-    When the same clause appears in multiple chunks, the version with the longer
-    excerpt is kept (more complete quote).
-    """
-    seen: dict[str, dict] = {}
-    for clause_list in lists:
-        if not isinstance(clause_list, list):
-            continue
-        for clause in clause_list:
-            if not isinstance(clause, dict):
-                continue
-            key = re.sub(r"[^a-z0-9]", "", clause.get("clause_name", "").lower())
-            if not key:
-                continue
-            if key not in seen:
-                seen[key] = clause
-            else:
-                # Keep the version with the more complete excerpt
-                if len(clause.get("excerpt", "")) > len(seen[key].get("excerpt", "")):
-                    seen[key]["excerpt"] = clause["excerpt"]
-                if not seen[key].get("significance") and clause.get("significance"):
-                    seen[key]["significance"] = clause["significance"]
-    return list(seen.values())
-
-
-# ---------------------------------------------------------------------------
-# Step 3 — Document Summary (first 4000 chars, fast)
-# ---------------------------------------------------------------------------
-
-async def _generate_summary(text: str, doc_label: str) -> str:
-    system_prompt = f"""You are reviewing a {doc_label}.
-Write a concise 2-3 sentence summary of what this document is, who the parties are (if any),
-and what its main purpose or key terms are.
-Return ONLY the plain text summary — no JSON, no markdown, no headings."""
-    return await run_llm(text[:4000], system_prompt, max_output_tokens=512)
-
-
-# ---------------------------------------------------------------------------
-# Public entry point — replaces all old per-type handlers
-# ---------------------------------------------------------------------------
-
-async def extract_key_clauses(text: str) -> dict:
-    """
-    Full key clause extraction pipeline:
-
-    Step 1 — classify document type (first 4000 chars)
-    Step 2 — extract key clauses from full document (chunked, parallel LLM calls)
-    Step 3 — generate document summary (parallel with Step 2)
-    Step 4 — merge + deduplicate clauses across chunks
-
-    All document types are supported. No more "unsupported" responses.
-    """
-    # Step 1: classify
-    doc_type, doc_label = await _classify_document(text)
-    logger.info(f"[key_clause] Classified as: {doc_type} ('{doc_label}')")
-
-    chunks = _chunk_text(text)
-
-    # Step 2+3: clause extraction (all chunks) + summary — all in parallel
-    clause_tasks  = [
-        _extract_clauses_chunk(chunk, doc_label, f"chunk {i+1}/{len(chunks)}")
-        for i, chunk in enumerate(chunks)
-    ]
-    summary_task  = _generate_summary(text, doc_label)
-
-    *chunk_results, summary = await asyncio.gather(*clause_tasks, summary_task)
-
-    # Step 4: merge
-    key_clauses = _merge_clauses(chunk_results)
-
-    logger.info(
-        f"[key_clause] Done — {len(key_clauses)} unique clause(s) "
-        f"from {len(chunks)} chunk(s)"
-    )
+    doc_label = result.get("document_label") or result.get("document_type") or "General Document"
+    logger.info(f"[key_clause] Done — {len(cleaned)} clause(s)")
 
     return {
         "status":        "success",
         "document_type": doc_label,
-        "total_clauses": len(key_clauses),
-        "summary":       summary.strip(),
-        "key_clauses":   key_clauses,
+        "total_clauses": len(cleaned),
+        "key_clauses":   cleaned,
     }
 
 
 # ---------------------------------------------------------------------------
 # Shared PDF ingestion helper (used by /key-clause-extraction and /detect-risks)
-# OCR now runs in thread pool — event loop is never blocked.
+# OCR runs in thread pool — event loop is never blocked.
 # ---------------------------------------------------------------------------
 
 async def extract_text_from_upload(
@@ -289,7 +208,6 @@ async def extract_text_from_upload(
     pages_to_read = total_pages if max_pages is None else min(total_pages, max_pages)
 
     try:
-        # Non-blocking: OCR runs in thread pool
         loop  = asyncio.get_running_loop()
         pages = await loop.run_in_executor(
             None, partial(load_pdf, file_path, pages_to_read)

@@ -259,7 +259,7 @@ Checklist ({len(checklist)} items — evaluate ALL {len(checklist)}):
 
 Contract:
 ---
-{text[:15000]}
+{text[:80_000]}
 ---"""
 
     return [

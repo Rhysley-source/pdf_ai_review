@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-
+MODEL_NAME_OB = os.environ.get("MODEL_NAME_OB", "gpt-4o")
 MODEL_NAME     = os.environ.get("MODEL_NAME", "gpt-5-nano")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 if not OPENAI_API_KEY:
@@ -45,6 +45,11 @@ MAP_JSON_RETRY_ATTEMPTS = 2
 _MAP_CONCURRENCY  = 3
 _MAP_SEMAPHORE: asyncio.Semaphore | None = None
 
+# Caps concurrent plain-text LLM calls (risk detection, key clauses, etc.)
+# to avoid OpenAI rate-limit throttling when many chunks fire in parallel.
+_TEXT_CONCURRENCY = 8
+_TEXT_SEMAPHORE: asyncio.Semaphore | None = None
+
 
 def _get_semaphore() -> asyncio.Semaphore:
     global _MAP_SEMAPHORE
@@ -52,6 +57,14 @@ def _get_semaphore() -> asyncio.Semaphore:
         _MAP_SEMAPHORE = asyncio.Semaphore(_MAP_CONCURRENCY)
         logger.info(f"[ai_model] MAP semaphore created (concurrency={_MAP_CONCURRENCY})")
     return _MAP_SEMAPHORE
+
+
+def _get_text_semaphore() -> asyncio.Semaphore:
+    global _TEXT_SEMAPHORE
+    if _TEXT_SEMAPHORE is None:
+        _TEXT_SEMAPHORE = asyncio.Semaphore(_TEXT_CONCURRENCY)
+        logger.info(f"[ai_model] TEXT semaphore created (concurrency={_TEXT_CONCURRENCY})")
+    return _TEXT_SEMAPHORE
 
 
 _client   = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -223,6 +236,53 @@ def _build_api_kwargs(
 
     return kwargs
 
+def _build_api_kwargs_ob(
+    messages:   list[dict],
+    use_json:   bool = False,
+    streaming:  bool = False,
+) -> dict:
+    """
+    Build OpenAI API kwargs handling model differences.
+
+    use_json=True  → sets response_format=json_object
+                     ONLY use when messages contain the word "json"
+                     (OpenAI requirement) — PDF analysis calls only.
+
+    use_json=False → NO response_format
+                     Required for key-clause-extraction, risk-detection,
+                     and any plain-text call where prompt lacks "json".
+    """
+    model = os.environ.get("MODEL_NAME_OB", MODEL_NAME_OB)
+
+    kwargs: dict = {
+        "model":    model,
+        "messages": messages,
+    }
+
+    # temperature: not supported by gpt-5-nano, o1, o3 family
+    if model not in _FIXED_TEMPERATURE_MODELS:
+        kwargs["temperature"] = 0.0
+
+    # seed: makes output deterministic across repeated calls with the same input
+    kwargs["seed"] = 42
+
+    # token limit parameter name differs by model
+    if model in _MAX_COMPLETION_TOKENS_MODELS:
+        kwargs["max_completion_tokens"] = MAX_OUTPUT_TOKENS
+    else:
+        kwargs["max_tokens"] = MAX_OUTPUT_TOKENS
+
+    # JSON mode — ONLY when prompt contains word "json"
+    if use_json:
+        kwargs["response_format"] = {"type": "json_object"}
+
+    # streaming
+    if streaming:
+        kwargs["stream"]         = True
+        kwargs["stream_options"] = {"include_usage": True}
+
+    return kwargs
+
 
 # ---------------------------------------------------------------------------
 # _run_inference_json
@@ -287,6 +347,33 @@ async def _run_inference_text(
     kwargs = _build_api_kwargs(messages, use_json=False, streaming=False,
                                max_output_tokens=max_output_tokens)
 
+    async with _get_text_semaphore():
+        try:
+            response      = await _client.chat.completions.create(**kwargs)
+            elapsed       = time.perf_counter() - t0
+            content       = response.choices[0].message.content or ""
+            input_tokens  = response.usage.prompt_tokens
+            output_tokens = response.usage.completion_tokens
+            logger.info(f"{tag}in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
+            return content, input_tokens, output_tokens
+        except Exception as e:
+            logger.exception(f"{tag}OpenAI API call failed: {e}")
+            raise
+
+async def _run_inference_text_obligation(
+    messages: list[dict],
+    label:    str = "",
+) -> tuple[str, int, int]:
+    """
+    OpenAI call WITHOUT response_format — plain text output.
+    Use for key-clause-extraction, risk-detection, and any call
+    where the prompt does NOT explicitly ask for JSON.
+    Returns (content, input_tokens, output_tokens).
+    """
+    tag    = f"[{label}] " if label else ""
+    t0     = time.perf_counter()
+    kwargs = _build_api_kwargs_ob(messages, use_json=False, streaming=False)
+
     try:
         response      = await _client.chat.completions.create(**kwargs)
         elapsed       = time.perf_counter() - t0
@@ -298,6 +385,7 @@ async def _run_inference_text(
     except Exception as e:
         logger.exception(f"{tag}OpenAI API call failed: {e}")
         raise
+
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +497,90 @@ async def run_llm(
     content, _, _ = await _run_inference_text(messages, "run_llm",
                                               max_output_tokens=max_output_tokens)
     return content
+
+async def run_llm_mini(
+    text:              str,
+    system_prompt:     str,
+    max_output_tokens: int = 16000,
+) -> str:
+    """
+    Same as run_llm() but always uses gpt-4o-mini regardless of MODEL_NAME env var.
+    Used by /key-clause-extraction for faster, lower-latency extraction.
+    gpt-4o-mini supports up to 16,384 output tokens and uses max_tokens (not max_completion_tokens).
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": f"Document:\n----------------\n{text}\n----------------"},
+    ]
+    t0 = time.perf_counter()
+    async with _get_text_semaphore():
+        try:
+            response = await _client.chat.completions.create(
+                model      = "gpt-4o-mini",
+                messages   = messages,
+                temperature= 0.0,
+                seed       = _messages_seed(messages),
+                max_tokens = max_output_tokens,
+            )
+            elapsed       = time.perf_counter() - t0
+            content       = response.choices[0].message.content or ""
+            input_tokens  = response.usage.prompt_tokens
+            output_tokens = response.usage.completion_tokens
+            logger.info(f"[run_llm_mini] in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
+            return content
+        except Exception as e:
+            logger.exception(f"[run_llm_mini] OpenAI API call failed: {e}")
+            raise
+
+
+async def run_llm_with_tokens(
+    text: str,
+    system_prompt: str,
+    max_input_tokens: int = 50000,
+) -> tuple[str, int, int]:
+    """
+    Same as run_llm() but returns (content, input_tokens, output_tokens).
+    Used by obligation detection inside document_comparison.py.
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": f"Document:\n----------------\n{text}\n----------------"},
+    ]
+    content, in_tok, out_tok = await _run_inference_text(messages, "run_llm_with_tokens")
+    return content, in_tok, out_tok
+
+
+async def run_llm_raw(system: str, user: str) -> str:
+    """
+    LLM call with explicit system and user messages — no document wrapper.
+    Use when the caller already embeds all context in the user turn
+    (e.g. enrichment prompts for document comparison).
+    Does NOT set response_format — plain text output only.
+    """
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": user},
+    ]
+    content, _, _ = await _run_inference_text(messages, "run_llm_raw")
+    return content
+
+
+async def run_llm_raw_json(system: str, user: str) -> tuple[str, int, int]:
+    """
+    LLM call with explicit system and user messages, forcing JSON output mode.
+    Use for structured extraction that requires a guaranteed JSON response
+    (e.g. enrichment, obligation extraction in document comparison).
+
+    REQUIREMENT: the combined system+user content MUST contain the word 'json'
+    (OpenAI constraint for response_format=json_object).
+    Returns (content, input_tokens, output_tokens).
+    """
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": user},
+    ]
+    content, in_tok, out_tok = await _run_inference_json(messages, "run_llm_raw_json")
+    return content, in_tok, out_tok
 
 
 # ---------------------------------------------------------------------------
