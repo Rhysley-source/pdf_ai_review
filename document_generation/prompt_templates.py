@@ -481,7 +481,7 @@ Original User Request:
 - Include <html>, <head> with ONE embedded <style> block, and <body>.
 - Add contenteditable="true" to the outermost content div inside <body>.
 - Render every blueprint section in order using its content_hint as the source.
-- Wherever the blueprint shows a [Placeholder], render it as a styled span using the EXACT placeholder text from the blueprint — e.g. if the blueprint says [Email Address] write <span style="color:#cc0000;">[Email Address]</span>, if it says [Phone Number] write <span style="color:#cc0000;">[Phone Number]</span>. NEVER replace every placeholder with [Client Name] — each placeholder must show its own specific field name.
+- Wherever the blueprint shows a [Placeholder], render it as a styled span using the EXACT placeholder text from the blueprint — e.g. if the blueprint says [Email Address] write <span style="font-style:italic;">[Email Address]</span>, if it says [Phone Number] write <span style="font-style:italic;">[Phone Number]</span>. NEVER replace every placeholder with [Client Name] — each placeholder must show its own specific field name.
 - Do NOT include markdown backticks, explanations, or any text outside the HTML.
 
 ━━━ DESIGN RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
