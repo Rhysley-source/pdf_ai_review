@@ -168,14 +168,19 @@ async def extract_key_clauses(text: str) -> dict:
             "significance": str(item.get("significance") or item.get("importance") or item.get("reason") or ""),
         })
 
-    doc_label = result.get("document_label") or result.get("document_type") or "General Document"
-    logger.info(f"[key_clause] Done — {len(cleaned)} clause(s)")
+    raw_slug = (result.get("document_type") or "other").lower().strip()
+    if raw_slug not in _KNOWN_SLUGS:
+        raw_slug = "other"
+
+    doc_label = result.get("document_label") or _SLUG_LABELS.get(raw_slug) or "General Document"
+    logger.info(f"[key_clause] Done — {len(cleaned)} clause(s) | slug={raw_slug} label={doc_label}")
 
     return {
-        "status":        "success",
-        "document_type": doc_label,
-        "total_clauses": len(cleaned),
-        "key_clauses":   cleaned,
+        "status":          "success",
+        "document_slug":   raw_slug,
+        "document_type":   doc_label,
+        "total_clauses":   len(cleaned),
+        "key_clauses":     cleaned,
     }
 
 

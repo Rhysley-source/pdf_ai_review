@@ -260,6 +260,7 @@ async def key_clause_extraction(
     try:
         logger.info(f"[{request_id}] Extracting key clauses...")
         result = await extract_key_clauses(text)
+        result.pop("document_slug", None)   # internal field — not part of public response
         logger.info(
             f"[{request_id}] ── REQUEST COMPLETE — "
             f"clauses={result.get('total_clauses', 0)} "
@@ -893,15 +894,51 @@ async def compare_documents_api(
             extract_key_clauses(text1),
             extract_key_clauses(text2),
         )
- 
+
+        slug1 = extraction1.get("document_slug", "other")
+        slug2 = extraction2.get("document_slug", "other")
+
         logger.info(
             f"[{request_id}] clauses extracted — "
-            f"doc1={extraction1['total_clauses']} ({extraction1['document_type']}) | "
-            f"doc2={extraction2['total_clauses']} ({extraction2['document_type']})"
+            f"doc1={extraction1['total_clauses']} ({extraction1['document_type']}, slug={slug1}) | "
+            f"doc2={extraction2['total_clauses']} ({extraction2['document_type']}, slug={slug2})"
         )
- 
-        # ── Step 3: Compare ───────────────────────────────────────────────
-        result = await compare_documents(
+
+        # Always build both doc content blocks for the response
+        doc1_info = {
+            "filename":      file1.filename or "document_1.pdf",
+            "document_type": extraction1.get("document_type", ""),
+            "total_clauses": extraction1.get("total_clauses", 0),
+            "clauses":       extraction1.get("key_clauses", []),
+        }
+        doc2_info = {
+            "filename":      file2.filename or "document_2.pdf",
+            "document_type": extraction2.get("document_type", ""),
+            "total_clauses": extraction2.get("total_clauses", 0),
+            "clauses":       extraction2.get("key_clauses", []),
+        }
+
+        # ── Step 3: Type check — if different, return early ───────────────
+        if slug1 != slug2:
+            elapsed = time.perf_counter() - t_start
+            logger.info(
+                f"[{request_id}] ── COMPARE ABORTED — type mismatch: {slug1} vs {slug2} | {elapsed:.2f}s"
+            )
+            return {
+                "status":               "success",
+                "documents_compatible": False,
+                "compatibility_message": (
+                    f"These documents are not of the same type — "
+                    f"'{extraction1['document_type']}' vs '{extraction2['document_type']}'. "
+                    f"Comparison cannot be performed."
+                ),
+                "document_1":  doc1_info,
+                "document_2":  doc2_info,
+                "comparison":  None,
+            }
+
+        # ── Step 4: Same type — run full comparison ───────────────────────
+        comp_result = await compare_documents(
             extraction1, extraction2,
             text1, text2,
             doc1_filename=file1.filename or "document_1.pdf",
@@ -912,10 +949,19 @@ async def compare_documents_api(
         elapsed = time.perf_counter() - t_start
         logger.info(
             f"[{request_id}] ── COMPARE DONE — {elapsed:.2f}s | "
-            f"changes={result['comparison']['total_changes']} | "
-            # f"risk={result['comparison']['overall_risk_level']}"
+            f"changes={comp_result['comparison']['total_changes']}"
         )
-        return result
+
+        return {
+            "status":               "success",
+            "documents_compatible": True,
+            "compatibility_message": (
+                f"Both documents are '{extraction1['document_type']}' — comparison is available."
+            ),
+            "document_1":  doc1_info,
+            "document_2":  doc2_info,
+            "comparison":  comp_result.get("comparison"),
+        }
  
     except HTTPException:
         status    = "failed"
