@@ -14,7 +14,7 @@ from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from llm_model.ai_model import generate_analysis, generate_analysis_stream, transcribe_audio
 from utils.json_utils import extract_json
 from db_files.db import log_request, log_comparison_request
-from feature_modules.key_clause_extraction import classify_document, extract_key_clauses, extract_text_from_upload
+from feature_modules.key_clause_extraction import classify_document, extract_key_clauses, extract_key_clauses_for_compare, extract_text_from_upload
 from feature_modules.risk_detection import analyze_document_risks
 from feature_modules.red_flag_scanner import scan_red_flags
 from feature_modules.obligation_detection import analyze_document_obligations
@@ -260,7 +260,6 @@ async def key_clause_extraction(
     try:
         logger.info(f"[{request_id}] Extracting key clauses...")
         result = await extract_key_clauses(text)
-        result.pop("document_slug", None)   # internal field — not part of public response
         logger.info(
             f"[{request_id}] ── REQUEST COMPLETE — "
             f"clauses={result.get('total_clauses', 0)} "
@@ -891,8 +890,8 @@ async def compare_documents_api(
  
         # ── Step 2: Classify + extract key clauses from both docs in parallel
         extraction1, extraction2 = await asyncio.gather(
-            extract_key_clauses(text1),
-            extract_key_clauses(text2),
+            extract_key_clauses_for_compare(text1),
+            extract_key_clauses_for_compare(text2),
         )
 
         slug1 = extraction1.get("document_slug", "other")

@@ -102,7 +102,7 @@ Analyze the document and return a single JSON object with EXACTLY this structure
   "key_clauses": [
     {
       "clause_name": "<clause or section name — max 5 words>",
-      "excerpt": "<key text from document — max 30 words>",
+      "excerpt": "<key text from document — max 80 words>",
       "significance": "<why this matters — max 20 words>"
     }
   ]
@@ -168,15 +168,82 @@ async def extract_key_clauses(text: str) -> dict:
             "significance": str(item.get("significance") or item.get("importance") or item.get("reason") or ""),
         })
 
+    doc_label = result.get("document_label") or result.get("document_type") or "General Document"
+    logger.info(f"[key_clause] Done — {len(cleaned)} clause(s)")
+
+    return {
+        "status":        "success",
+        "document_type": doc_label,
+        "total_clauses": len(cleaned),
+        "key_clauses":   cleaned,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Key clause extraction for /compare-documents — dedicated function
+# Includes: document_slug for type-gate, 2-attempt retry
+# Does NOT affect /key-clause-extraction route response shape
+# ---------------------------------------------------------------------------
+
+async def extract_key_clauses_for_compare(text: str) -> dict:
+    """
+    Dedicated variant of extract_key_clauses used exclusively by /compare-documents.
+
+    Differences from extract_key_clauses:
+    - Returns document_slug (used for document type compatibility check)
+    - 2-attempt retry with raw output logging on failure
+    - No 'status' key — internal use only, never returned directly to client
+    """
+    document = text[:_MAX_SINGLE_CALL_CHARS]
+
+    logger.info(f"[key_clause_compare] extraction — {len(document):,} chars")
+
+    _MAX_ATTEMPTS = 2
+    result = {}
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        raw = await run_llm_mini(document, _SINGLE_CALL_SYSTEM, max_output_tokens=16000)
+        logger.debug(f"[key_clause_compare] attempt {attempt} raw ({len(raw)} chars): {raw[:800]}")
+        result = extract_json_from_text(raw)
+        if result and "key_clauses" in result:
+            break
+        logger.warning(
+            f"[key_clause_compare] attempt {attempt} failed — "
+            f"raw snippet: {raw[:500]}"
+        )
+
+    if not result or "key_clauses" not in result:
+        logger.warning(f"[key_clause_compare] all {_MAX_ATTEMPTS} attempt(s) failed — returning empty result")
+        result = {
+            "document_type":  "other",
+            "document_label": "General Document",
+            "key_clauses":    [],
+        }
+
+    key_clauses = result.get("key_clauses", [])
+    if not isinstance(key_clauses, list):
+        key_clauses = []
+
+    cleaned = []
+    for item in key_clauses:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("clause_name") or item.get("name") or "").strip()
+        if not name:
+            continue
+        cleaned.append({
+            "clause_name":  name,
+            "excerpt":      str(item.get("excerpt") or item.get("text") or item.get("quote") or ""),
+            "significance": str(item.get("significance") or item.get("importance") or item.get("reason") or ""),
+        })
+
     raw_slug = (result.get("document_type") or "other").lower().strip()
     if raw_slug not in _KNOWN_SLUGS:
         raw_slug = "other"
 
     doc_label = result.get("document_label") or _SLUG_LABELS.get(raw_slug) or "General Document"
-    logger.info(f"[key_clause] Done — {len(cleaned)} clause(s) | slug={raw_slug} label={doc_label}")
+    logger.info(f"[key_clause_compare] Done — {len(cleaned)} clause(s) | slug={raw_slug} label={doc_label}")
 
     return {
-        "status":          "success",
         "document_slug":   raw_slug,
         "document_type":   doc_label,
         "total_clauses":   len(cleaned),

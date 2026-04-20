@@ -28,7 +28,7 @@ import time
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
-from llm_model.ai_model import run_llm
+from llm_model.ai_model import run_llm_mini
 from utils.json_utils import extract_json_raw as extract_json_from_text
 
 logger = logging.getLogger(__name__)
@@ -185,19 +185,24 @@ def _build_raw_changes(
                 continue  # identical — skip
             status = "modified"
 
+        e1 = (c1 or {}).get("excerpt", "")
+        e2 = (c2 or {}).get("excerpt", "")
+
         changes.append({
-            "clause_name": name,
-            "status":      status,
-            "severity":    severity,
+            "clause_name":      name,
+            "status":           status,
+            "severity":         severity,
             "doc1": {
-                "excerpt":      (c1 or {}).get("excerpt", ""),
+                "excerpt":      e1,
                 "significance": (c1 or {}).get("significance", ""),
             },
             "doc2": {
-                "excerpt":      (c2 or {}).get("excerpt", ""),
+                "excerpt":      e2,
                 "significance": (c2 or {}).get("significance", ""),
             },
-            "summary":   "",  # filled by LLM enrichment
+            "word_diff":        _word_diff(e1, e2) if status == "modified" else [],
+            "summary":          "",   # filled by LLM enrichment
+            "difference_points": [],  # filled by LLM enrichment
         })
     return changes
 
@@ -259,74 +264,92 @@ def _text_diff_stats(text1: str, text2: str) -> dict:
 # LLM enrichment — per-clause summaries + insights + recommendation
 # ---------------------------------------------------------------------------
 
+_ENRICHMENT_SYSTEM = (
+    "You are a senior legal analyst specialising in contract risk review. "
+    "Analyse the clause changes provided and return a JSON object with exact difference points per clause. "
+    "Return ONLY valid JSON — no markdown, no explanation."
+)
+
+
 def _build_enrichment_prompt(changes: list[dict], doc1_text: str, doc2_text: str) -> str:
+    sorted_changes = sorted(
+        changes[:20],
+        key=lambda c: {"high": 0, "medium": 1, "low": 2}.get(c["severity"], 3),
+    )
     lines = []
-    for i, c in enumerate(changes[:20], 1):
-        e1 = (c["doc1"].get("excerpt") or "")[:300].replace("\n", " ")
-        e2 = (c["doc2"].get("excerpt") or "")[:300].replace("\n", " ")
+    for i, c in enumerate(sorted_changes, 1):
+        e1 = (c["doc1"].get("excerpt") or "")[:500].replace("\n", " ")
+        e2 = (c["doc2"].get("excerpt") or "")[:500].replace("\n", " ")
         lines.append(
             f"{i}. CLAUSE: {c['clause_name'].upper()}\n"
             f"   Status: {c['status']} | Severity: {c['severity']}\n"
             f"   Doc1 (original) : {e1 or '[absent]'}\n"
             f"   Doc2 (revised)  : {e2 or '[absent]'}"
         )
+
+    if len(changes) > 20:
+        logger.warning(f"[comparison] {len(changes)} changes — enriching top 20 by severity")
+
     changes_block = "\n\n".join(lines) or "No changes detected."
 
-    return f"""You are a senior legal analyst specialising in contract risk review.
-
-DETECTED CLAUSE CHANGES ({len(changes)} total):
+    return f"""DETECTED CLAUSE CHANGES ({len(sorted_changes)} shown, sorted by severity):
 {changes_block}
 
 DOCUMENT 1 EXCERPT (original):
-{doc1_text[:1200]}
+{doc1_text[:1500]}
 
 DOCUMENT 2 EXCERPT (revised):
-{doc2_text[:1200]}
+{doc2_text[:1500]}
 
-Return ONLY this JSON — no markdown, no explanation:
+Return ONLY this JSON:
 
 {{
-  "clause_summaries": {{
-    "<clause_name as written above>": "<One sentence: what changed and the business impact>",
-    "...one entry per clause listed above..."
+  "clause_details": {{
+    "<clause_name exactly as written above>": {{
+      "summary": "<one sentence: what changed and the business impact>",
+      "difference_points": [
+        "<specific point 1 — name exact value/term that changed, e.g. 'Payment period changed from Net 30 to Net 15'>",
+        "<specific point 2 — another concrete difference>",
+        "<specific point 3 — add more if needed>"
+      ]
+    }}
   }},
   "semantic_insights": [
-    "<Specific, quantified insight naming exact values/dates/%. E.g. Payment window cut from Net 30 to Net 15, doubling cash-flow pressure.>",
-    "<Another insight on a different clause>",
-    "<Minimum 3 insights — more if there are more changes>",
-    "<FINAL insight: which party does the revised contract favour and why — name 2-3 specific reasons.>"
+    "<quantified insight referencing exact values — e.g. 'Liability cap reduced from $500K to $100K'>",
+    "<another insight on a different clause>",
+    "<which party benefits from these changes and why — name 2-3 specific reasons>"
   ],
-  "recommendation": "<2-3 actionable sentences naming specific clauses to push back on and the target outcome.>"
+  "recommendation": "<2-3 actionable sentences naming specific clauses to negotiate and the target outcome>"
 }}
 
 Rules:
-- clause_summaries key must exactly match the clause_name from the change list
-- Each semantic_insight must reference specific values or clause text — no vague generalities
-- Last insight must name the favoured party with evidence
-- recommendation must name at least 2 specific clauses"""
+- clause_details key must exactly match the clause_name from the change list
+- difference_points must be specific and concrete — name exact values, dates, amounts, percentages
+- Every modified clause must have at least 2 difference_points
+- Added clauses: difference_points should describe what the new clause introduces
+- Removed clauses: difference_points should describe what protection is lost"""
 
 
 async def _llm_enrichment(changes: list[dict], text1: str, text2: str) -> dict:
-    empty = {"clause_summaries": {}, "semantic_insights": [], "recommendation": ""}
+    empty = {"clause_details": {}, "semantic_insights": [], "recommendation": ""}
     if not changes:
         return empty
 
     try:
         prompt = _build_enrichment_prompt(changes, text1, text2)
-        raw = await run_llm("", prompt)
-        if isinstance(raw, tuple):
-            raw = raw[0]
 
+        # Attempt 1
+        raw = await run_llm_mini(prompt, _ENRICHMENT_SYSTEM, max_output_tokens=6000)
         result = extract_json_from_text(raw)
-        if result and (result.get("clause_summaries") or result.get("semantic_insights")):
+        if result and result.get("clause_details"):
             logger.info(
                 f"[comparison] LLM OK — "
-                f"summaries={len(result.get('clause_summaries', {}))} "
+                f"clause_details={len(result.get('clause_details', {}))} "
                 f"insights={len(result.get('semantic_insights', []))}"
             )
             return result
 
-        # Retry with a worked example to guide format
+        # Attempt 2 — retry with worked example
         logger.warning("[comparison] LLM attempt 1 weak — retrying with example")
         ex      = changes[0]
         ex_name = ex["clause_name"]
@@ -334,26 +357,26 @@ async def _llm_enrichment(changes: list[dict], text1: str, text2: str) -> dict:
         ex_e2   = (ex["doc2"].get("excerpt") or "revised text")[:60]
 
         retry_prompt = (
-            "You are a senior legal analyst. Return ONLY valid JSON — no markdown.\n\n"
+            "Return ONLY valid JSON — no markdown.\n\n"
             "Required format example:\n"
             "{\n"
-            f'  "clause_summaries": {{"{ex_name}": '
-            f'"{ex_name} changed from \\"{ex_e1[:40]}...\\" to \\"{ex_e2[:40]}...\\" — increases risk for recipient."}},\n'
-            '  "semantic_insights": [\n'
-            f'    "{ex_name} shifted — original: {ex_e1} / revised: {ex_e2}. Impact: increases financial exposure.",\n'
-            '    "State which party benefits overall and provide 2 specific reasons."\n'
-            '  ],\n'
-            '  "recommendation": "Negotiate to restore [clause] and [clause] before signing."\n'
+            f'  "clause_details": {{"{ex_name}": {{\n'
+            f'    "summary": "{ex_name} changed — increases risk for signer.",\n'
+            f'    "difference_points": [\n'
+            f'      "Original: {ex_e1[:40]} | Revised: {ex_e2[:40]}",\n'
+            f'      "Impact: financial exposure increased"\n'
+            f'    ]\n'
+            f'  }}}},\n'
+            '  "semantic_insights": ["Specific change with exact values.", "Which party benefits and why."],\n'
+            '  "recommendation": "Negotiate to restore [clause] before signing."\n'
             "}\n\n"
             "Now produce the real analysis:\n\n"
             + prompt
         )
 
-        raw2 = await run_llm("", retry_prompt)
-        if isinstance(raw2, tuple):
-            raw2 = raw2[0]
+        raw2   = await run_llm_mini(retry_prompt, _ENRICHMENT_SYSTEM, max_output_tokens=6000)
         result2 = extract_json_from_text(raw2)
-        if result2:
+        if result2 and result2.get("clause_details"):
             logger.info("[comparison] Retry succeeded")
             return result2
 
@@ -413,18 +436,20 @@ async def compare_documents(
     # text_diff_stats and risk_score are disabled for v1
     raw_changes = await asyncio.to_thread(_build_raw_changes, pairs)
 
-    # 3. LLM enrichment (per-clause summaries only — insights + recommendation disabled for v1)
-    llm_data = await _llm_enrichment(raw_changes, text1, text2)
+    # 3. LLM enrichment — summaries, difference_points, insights, recommendation
+    llm_data  = await _llm_enrichment(raw_changes, text1, text2)
+    details   = llm_data.get("clause_details", {})
+    insights  = llm_data.get("semantic_insights", [])
+    rec       = llm_data.get("recommendation", "")
 
-    summaries = llm_data.get("clause_summaries", {})
-    # insights = llm_data.get("semantic_insights", [])   # disabled for v1
-    # rec      = llm_data.get("recommendation", "")      # disabled for v1
-
-    # 4. Attach LLM summaries to each clause change
+    # 4. Attach LLM enrichment to each clause change
     clause_changes = []
     for c in raw_changes:
-        name    = c["clause_name"]
-        summary = summaries.get(name, "").strip()
+        name        = c["clause_name"]
+        llm_entry   = details.get(name, {})
+        summary     = (llm_entry.get("summary") or "").strip()
+        diff_points = llm_entry.get("difference_points") or []
+
         if not summary:
             if c["status"] == "added":
                 summary = f"{name} is a new clause added in the revised document."
@@ -434,12 +459,14 @@ async def compare_documents(
                 summary = f"{name} has been modified in the revised document."
 
         clause_changes.append({
-            "clause_name": name,
-            "status":      c["status"],
-            "severity":    c["severity"],
-            "doc1":        c["doc1"],
-            "doc2":        c["doc2"],
-            "summary":     summary,
+            "clause_name":       name,
+            "status":            c["status"],
+            "severity":          c["severity"],
+            "doc1":              c["doc1"],
+            "doc2":              c["doc2"],
+            "word_diff":         c.get("word_diff", []),
+            "difference_points": diff_points,
+            "summary":           summary,
         })
 
     # 5. Document type compatibility message
@@ -475,13 +502,9 @@ async def compare_documents(
             "doc2_document_type":  doc2_type,
             "comparison_notice":   comparison_notice,
             "compared_at":         datetime.now(timezone.utc).isoformat(),
-            "total_changes":       len(clause_changes),
-            # "high_risk_changes":  risk["high_risk_changes"],   # disabled for v1
-            # "risk_score":         risk["risk_score"],           # disabled for v1
-            # "overall_risk_level": risk["overall_risk_level"],   # disabled for v1
-            # "recommendation":     rec,                          # disabled for v1
-            # "semantic_insights":  insights,                     # disabled for v1
-            # "text_diff_stats":    diff_stats,                   # disabled for v1
-            "clause_changes":      clause_changes,
+            "total_changes":     len(clause_changes),
+            "semantic_insights": insights,
+            "recommendation":    rec,
+            "clause_changes":    clause_changes,
         },
     }
