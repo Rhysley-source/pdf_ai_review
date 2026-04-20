@@ -442,7 +442,7 @@ async def compare_documents(
     insights  = llm_data.get("semantic_insights", [])
     rec       = llm_data.get("recommendation", "")
 
-    # 4. Attach LLM enrichment to each clause change
+    # 4. Attach LLM enrichment + build side_by_side row per clause
     clause_changes = []
     for c in raw_changes:
         name        = c["clause_name"]
@@ -458,15 +458,38 @@ async def compare_documents(
             else:
                 summary = f"{name} has been modified in the revised document."
 
+        e1      = c["doc1"].get("excerpt") or None
+        e2      = c["doc2"].get("excerpt") or None
+        wdiff   = c.get("word_diff", [])
+
+        # Split word_diff into left (doc1) and right (doc2) token lists
+        # Left  pane: equal + delete  (what was in doc1)
+        # Right pane: equal + insert  (what is  in doc2)
+        left_tokens  = [{"text": w["text"], "tag": w["tag"]} for w in wdiff if w["tag"] in ("equal", "delete")]
+        right_tokens = [{"text": w["text"], "tag": w["tag"]} for w in wdiff if w["tag"] in ("equal", "insert")]
+
         clause_changes.append({
-            "clause_name":       name,
-            "status":            c["status"],
-            "severity":          c["severity"],
-            "doc1":              c["doc1"],
-            "doc2":              c["doc2"],
-            "word_diff":         c.get("word_diff", []),
-            "difference_points": diff_points,
-            "summary":           summary,
+            "clause_name":  name,
+            "status":       c["status"],
+            "severity":     c["severity"],
+            "summary":      summary,
+            "side_by_side": {
+                "left": {
+                    "filename":    doc1_filename,
+                    "present":     e1 is not None,
+                    "excerpt":     e1,
+                    "significance": c["doc1"].get("significance", ""),
+                    "tokens":      left_tokens,   # equal + delete — render delete in red strikethrough
+                },
+                "right": {
+                    "filename":    doc2_filename,
+                    "present":     e2 is not None,
+                    "excerpt":     e2,
+                    "significance": c["doc2"].get("significance", ""),
+                    "tokens":      right_tokens,  # equal + insert — render insert in green
+                },
+                "difference_points": diff_points,
+            },
         })
 
     # 5. Document type compatibility message
@@ -491,20 +514,51 @@ async def compare_documents(
         f"types_match={types_match}"
     )
 
+    high_count   = sum(1 for c in clause_changes if c["severity"] == "high")
+    medium_count = sum(1 for c in clause_changes if c["severity"] == "medium")
+    low_count    = sum(1 for c in clause_changes if c["severity"] == "low")
+    added_count  = sum(1 for c in clause_changes if c["status"] == "added")
+    removed_count= sum(1 for c in clause_changes if c["status"] == "removed")
+    modified_count=sum(1 for c in clause_changes if c["status"] == "modified")
+
     return {
         "status":      "success",
         "duration_ms": duration_ms,
         "comparison": {
-            "session_id":          session_id,
-            "doc1_filename":       doc1_filename,
-            "doc2_filename":       doc2_filename,
-            "doc1_document_type":  doc1_type,
-            "doc2_document_type":  doc2_type,
-            "comparison_notice":   comparison_notice,
-            "compared_at":         datetime.now(timezone.utc).isoformat(),
-            "total_changes":     len(clause_changes),
-            "semantic_insights": insights,
-            "recommendation":    rec,
-            "clause_changes":    clause_changes,
+            "session_id":       session_id,
+            "compared_at":      datetime.now(timezone.utc).isoformat(),
+            "comparison_notice": comparison_notice,
+
+            # Header block — drives the top bar of the UI
+            "header": {
+                "document_1": {
+                    "filename":      doc1_filename,
+                    "document_type": doc1_type,
+                },
+                "document_2": {
+                    "filename":      doc2_filename,
+                    "document_type": doc2_type,
+                },
+                "total_changes":  len(clause_changes),
+                "by_severity": {
+                    "high":   high_count,
+                    "medium": medium_count,
+                    "low":    low_count,
+                },
+                "by_status": {
+                    "modified": modified_count,
+                    "added":    added_count,
+                    "removed":  removed_count,
+                },
+            },
+
+            # Insights + recommendation — top section above clause rows
+            "insights": {
+                "semantic_insights": insights,
+                "recommendation":    rec,
+            },
+
+            # Clause rows — each has side_by_side block ready for UI rendering
+            "clause_changes": clause_changes,
         },
     }
