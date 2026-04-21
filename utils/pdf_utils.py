@@ -250,7 +250,7 @@ def _ocr_predict(img: np.ndarray) -> list:
 # Public API
 # ---------------------------------------------------------------------------
 
-def load_pdf(file_path: str, max_pages: int | None = None) -> list[Document]:
+def load_pdf(file_path: str, max_pages: int | None = None, _stats: dict | None = None) -> list[Document]:
     """
     Load a PDF and return one LangChain Document per page.
 
@@ -328,10 +328,14 @@ def load_pdf(file_path: str, max_pages: int | None = None) -> list[Document]:
                     native_results[futures[future]] = None
 
         native_hit = sum(1 for v in native_results.values() if v is not None)
+        _t_pass1_elapsed = time.perf_counter() - t_pass1
         logger.info(
-            f"[pdf_utils] Pass 1 done ({time.perf_counter() - t_pass1:.2f}s) -- "
+            f"[pdf_utils] Pass 1 done ({_t_pass1_elapsed:.2f}s) -- "
             f"native={native_hit}, need_ocr={pages_to_process - native_hit}"
         )
+        if _stats is not None:
+            _stats["pymupdf_time"] = _t_pass1_elapsed
+            _stats["native_pages"] = native_hit
 
     native_hit    = sum(1 for v in native_results.values() if v is not None)
     paddle_needed = [i for i, v in native_results.items() if v is None]
@@ -371,6 +375,7 @@ def load_pdf(file_path: str, max_pages: int | None = None) -> list[Document]:
 
     # ── Pass 2: OCR with per-page timeout ─────────────────────────────────
     paddle_results: dict[int, str] = {}
+    _t_ocr_total = 0.0
 
     for idx in paddle_needed:
         fitz_page = fitz_pages[idx]
@@ -390,6 +395,7 @@ def load_pdf(file_path: str, max_pages: int | None = None) -> list[Document]:
                 future  = _OCR_EXECUTOR.submit(_ocr_predict, img)
                 results = future.result(timeout=OCR_PAGE_TIMEOUT)
                 elapsed = time.perf_counter() - t_ocr
+                _t_ocr_total += elapsed
 
                 page_parts = []
                 for res in results:
@@ -485,6 +491,13 @@ def load_pdf(file_path: str, max_pages: int | None = None) -> list[Document]:
     doc.close()
     elapsed      = time.perf_counter() - t_load
     total_loaded = len(pages)
+
+    if _stats is not None:
+        _stats.setdefault("pymupdf_time", 0.0)
+        _stats.setdefault("native_pages", native_hit)
+        _stats["ocr_time"]  = _t_ocr_total
+        _stats["ocr_pages"] = paddle_count
+        _stats["total_time"] = elapsed
 
     # ── Integrity report ──────────────────────────────────────────────────
     logger.info("[pdf_utils] -- EXTRACTION COMPLETE --------------------------")

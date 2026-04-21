@@ -45,7 +45,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # Solution: run load_pdf in the default ThreadPoolExecutor so the event
 # loop remains free to handle other work while OCR runs in a thread.
 # ---------------------------------------------------------------------------
-async def _load_pdf_async(file_path: str, max_pages: int | None = None):
+async def _load_pdf_async(file_path: str, max_pages: int | None = None, _stats: dict | None = None):
     """
     Non-blocking wrapper around load_pdf.
     Runs the synchronous PDF extraction + OCR in a thread pool so the
@@ -54,7 +54,7 @@ async def _load_pdf_async(file_path: str, max_pages: int | None = None):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,                              # default ThreadPoolExecutor
-        partial(load_pdf, file_path, max_pages)
+        partial(load_pdf, file_path, max_pages, _stats)
     )
 
 
@@ -118,12 +118,18 @@ async def analyze_pdf(
         )
 
         try:
-            t_extract = time.perf_counter()
+            t_extract   = time.perf_counter()
+            extract_stats: dict = {}
             # ── Non-blocking: OCR runs in thread pool ──────────────────────
-            pages = await _load_pdf_async(file_path, pages_to_read)
+            pages = await _load_pdf_async(file_path, pages_to_read, extract_stats)
+            t_extracted = time.perf_counter() - t_extract
             logger.info(
                 f"[{request_id}] Step 3/5 — extracted {len(pages)} page(s) "
-                f"({time.perf_counter()-t_extract:.2f}s)"
+                f"total={t_extracted:.2f}s | "
+                f"pymupdf={extract_stats.get('pymupdf_time', 0):.2f}s "
+                f"({extract_stats.get('native_pages', 0)}p) | "
+                f"ocr={extract_stats.get('ocr_time', 0):.2f}s "
+                f"({extract_stats.get('ocr_pages', 0)}p)"
             )
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
