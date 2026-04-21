@@ -21,14 +21,15 @@ from feature_modules.obligation_detection import analyze_document_obligations
 from feature_modules.document_comparison import compare_documents
 from utils.session_store import create_session, get_session
 from auth import verify_api_key
+
 from utils.ocr_compare_utils import (
     pdf_to_images,
     img_to_base64,
     run_paddleocr,
-    run_openai_vision
+    run_openai_vision,
+    paddle_ocr,
+    openai_client
 )
-from utils.pdf_utils import paddle_ocr
-from utils.openai_client import openai_client
 
 logger = logging.getLogger(__name__)
 
