@@ -1014,8 +1014,28 @@ async def ocr_compare(file: UploadFile = File(...)):
 
     logger.info(f"[{request_id}] ── OCR COMPARE START ── {file.filename}")
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF allowed")
+    ALLOWED_EXTENSIONS = {
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".bmp",
+    ".tiff"
+    }
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File is required")
+
+    ext = os.path.splitext(file.filename.lower())[1]
+
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Allowed: pdf, doc, docx, images"
+        )
 
     pdf_bytes = await file.read()
 
