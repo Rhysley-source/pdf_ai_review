@@ -1016,10 +1016,10 @@ async def ocr_compare(file: UploadFile = File(...)):
         for i, img in enumerate(images):
             page_no = i + 1
 
-            paddle_text = run_paddleocr(img, paddle_ocr)
+            paddle_text = run_paddleocr(img)
 
             base64_img = img_to_base64(img)
-            openai_text = run_openai_vision(base64_img, openai_client)
+            openai_text = run_openai_vision(base64_img)
 
             results.append({
                 "page": page_no,
