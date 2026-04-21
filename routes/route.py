@@ -1014,28 +1014,8 @@ async def ocr_compare(file: UploadFile = File(...)):
 
     logger.info(f"[{request_id}] ── OCR COMPARE START ── {file.filename}")
 
-    ALLOWED_EXTENSIONS = {
-    ".pdf",
-    ".doc",
-    ".docx",
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".webp",
-    ".bmp",
-    ".tiff"
-    }
-
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="File is required")
-
-    ext = os.path.splitext(file.filename.lower())[1]
-
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail="Unsupported file type. Allowed: pdf, doc, docx, images"
-        )
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF allowed")
 
     pdf_bytes = await file.read()
 
@@ -1140,99 +1120,178 @@ async def ocr_compare(file: UploadFile = File(...)):
     
 
 
-@router.post("/ocr-compare-openai")
-async def ocr_compare_openai(file: UploadFile = File(...)):
+import os
+import io
+import uuid
+import time
+import asyncio
+import base64
+from fastapi import UploadFile, File, HTTPException
+from docx import Document
+
+logger = logging.getLogger(__name__)
+
+
+# ----------------------------
+# ALLOWED FILE TYPES
+# ----------------------------
+ALLOWED_EXTENSIONS = {
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".bmp",
+    ".tiff"
+}
+
+
+# ----------------------------
+# DOCX TEXT EXTRACTOR
+# ----------------------------
+def extract_docx(file_bytes: bytes) -> str:
+    doc = Document(io.BytesIO(file_bytes))
+    return "\n".join([p.text for p in doc.paragraphs])
+
+
+# ----------------------------
+# IMAGE OCR (OPENAI)
+# ----------------------------
+def ocr_image_openai(file_bytes: bytes) -> str:
+    base64_img = base64.b64encode(file_bytes).decode()
+    return run_openai_vision(base64_img)
+
+
+# ----------------------------
+# PDF → IMAGES (EXISTING FUNC)
+# ----------------------------
+# pdf_to_images(pdf_bytes, dpi=150)
+
+
+# =========================================================
+# 🚀 MAIN API (UNIVERSAL OCR + COMPARE)
+# =========================================================
+@router.post("/ocr-compare-all")
+async def ocr_compare(file: UploadFile = File(...)):
     request_id = str(uuid.uuid4())[:8]
     t_start = time.perf_counter()
 
-    logger.info(f"[{request_id}] ── OPENAI OCR COMPARE START ── {file.filename}")
+    logger.info(f"[{request_id}] ── OCR UNIVERSAL START ── {file.filename}")
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files allowed")
+    # ----------------------------
+    # VALIDATION
+    # ----------------------------
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File is required")
 
-    pdf_bytes = await file.read()
+    ext = os.path.splitext(file.filename.lower())[1]
 
-    try:
-        # ----------------------------
-        # STEP 1: PDF → Images
-        # ----------------------------
-        t0 = time.perf_counter()
-        images = pdf_to_images(pdf_bytes, dpi=150)
-
-        logger.info(
-            f"[{request_id}] PDF→Images done | pages={len(images)} | "
-            f"{time.perf_counter() - t0:.2f}s"
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type"
         )
 
+    file_bytes = await file.read()
+
+    try:
         results = []
 
-        # ----------------------------
-        # STEP 2: OpenAI Vision OCR
-        # ----------------------------
-        for i, img in enumerate(images, start=1):
-            page_start = time.perf_counter()
+        # =====================================================
+        # 1️⃣ PDF HANDLING
+        # =====================================================
+        if ext == ".pdf":
+            logger.info(f"[{request_id}] PDF detected")
 
-            logger.info(f"[{request_id}] [P{i}] OpenAI OCR START")
+            images = pdf_to_images(file_bytes, dpi=150)
 
-            try:
+            logger.info(f"[{request_id}] PDF → {len(images)} pages")
+
+            for i, img in enumerate(images, start=1):
+                start = time.perf_counter()
+
                 base64_img = img_to_base64(img)
-
-                response = await run_with_timeout(
+                text = await run_with_timeout(
                     run_openai_vision,
                     base64_img,
                     timeout=90
                 )
 
+                results.append({
+                    "page": i,
+                    "text": text,
+                    "length": len(text)
+                })
+
                 logger.info(
-                    f"[{request_id}] [P{i}] OpenAI OCR DONE | "
-                    f"chars={len(response)} | "
-                    f"{time.perf_counter() - page_start:.2f}s"
+                    f"[{request_id}] Page {i} done in {time.perf_counter()-start:.2f}s"
                 )
 
-                results.append({
-                    "page": i,
-                    "text": response,
-                    "length": len(response)
-                })
+        # =====================================================
+        # 2️⃣ DOCX HANDLING
+        # =====================================================
+        elif ext == ".docx":
+            logger.info(f"[{request_id}] DOCX detected")
 
-            except asyncio.TimeoutError:
-                logger.error(f"[{request_id}] [P{i}] OpenAI TIMEOUT")
+            text = extract_docx(file_bytes)
 
-                results.append({
-                    "page": i,
-                    "text": "[TIMEOUT]",
-                    "length": 0
-                })
+            results.append({
+                "page": 1,
+                "text": text,
+                "length": len(text)
+            })
 
-            except Exception as e:
-                logger.exception(f"[{request_id}] [P{i}] OpenAI FAILED")
+        # =====================================================
+        # 3️⃣ IMAGE HANDLING
+        # =====================================================
+        elif ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"]:
+            logger.info(f"[{request_id}] IMAGE detected")
 
-                results.append({
-                    "page": i,
-                    "text": f"[ERROR] {str(e)}",
-                    "length": 0
-                })
+            text = ocr_image_openai(file_bytes)
+
+            results.append({
+                "page": 1,
+                "text": text,
+                "length": len(text)
+            })
+
+        # =====================================================
+        # 4️⃣ DOC fallback (OCR via OpenAI)
+        # =====================================================
+        else:
+            logger.info(f"[{request_id}] DOC detected (fallback OCR)")
+
+            text = ocr_image_openai(file_bytes)
+
+            results.append({
+                "page": 1,
+                "text": text,
+                "length": len(text)
+            })
 
         # ----------------------------
         # FINAL RESPONSE
         # ----------------------------
-        total_time = time.perf_counter() - t_start
+        elapsed = time.perf_counter() - t_start
 
-        full_text = "\n\n".join(r["text"] for r in results)
+        merged_text = "\n\n".join(r["text"] for r in results)
 
         logger.info(
-            f"[{request_id}] ── OPENAI OCR COMPLETE ── "
-            f"time={total_time:.2f}s pages={len(results)}"
+            f"[{request_id}] ── OCR COMPLETE ── "
+            f"pages={len(results)} time={elapsed:.2f}s"
         )
 
         return {
             "request_id": request_id,
+            "filename": file.filename,
             "total_pages": len(results),
             "results": results,
-            "merged_text": full_text,
-            "total_time_sec": round(total_time, 2)
+            "merged_text": merged_text,
+            "total_time_sec": round(elapsed, 2)
         }
 
     except Exception as e:
-        logger.exception(f"[{request_id}] OPENAI OCR FAILED: {e}")
-        raise HTTPException(status_code=500, detail="OpenAI OCR failed")
+        logger.exception(f"[{request_id}] OCR FAILED: {e}")
+        raise HTTPException(status_code=500, detail="OCR processing failed")
