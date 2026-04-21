@@ -23,19 +23,18 @@ from utils.session_store import create_session, get_session
 from auth import verify_api_key
 
 
-import io
-import time
-import uuid
-import os
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+
+
 from pdf2image import convert_from_path
+from PIL import Image
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
 from paddleocr import PaddleOCR
 from openai import OpenAI
 
-client = OpenAI()
+UPLOAD_FOLDER = "/tmp"
 
 logger = logging.getLogger(__name__)
 
@@ -995,76 +994,69 @@ async def compare_documents_api(
 
 
 
-import io
-import time
-import uuid
-import os
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from pdf2image import convert_from_path
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from paddleocr import PaddleOCR
-
-router = APIRouter()
-
-# Initialize PaddleOCR ONCE (important for performance)
-ocr = PaddleOCR(use_angle_cls=True, lang="en")
+# -----------------------------
+# INIT MODELS (GLOBAL SINGLETON)
+# -----------------------------
+ocr = PaddleOCR(use_angle_cls=False, lang='en')  # IMPORTANT: no cls
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
-def paddle_extract(image):
-    result = ocr.ocr(image, cls=True)
-    if not result or not result[0]:
-        return ""
-    return "\n".join([line[1][0] for line in result[0]])
-
-
-def text_similarity(a, b):
+# -----------------------------
+# HELPER: SIMILARITY
+# -----------------------------
+def similarity(a, b):
     if not a or not b:
         return 0.0
     vec = CountVectorizer().fit_transform([a, b]).toarray()
     return cosine_similarity([vec[0]], [vec[1]])[0][0]
 
 
-@router.post("/ocr-benchmark")
-async def ocr_benchmark(file: UploadFile = File(...)):
+# -----------------------------
+# OCR COMPARISON API
+# -----------------------------
+@router.post("/ocr-compare")
+async def ocr_compare(file: UploadFile = File(...)):
     request_id = str(uuid.uuid4())[:8]
-    t_start = time.perf_counter()
+    start_time = time.time()
 
     if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files allowed")
+        raise HTTPException(status_code=400, detail="Only PDF allowed")
 
     file_path = f"/tmp/{uuid.uuid4()}.pdf"
 
     try:
-        # ---------------------------
+        # -----------------------------
         # Save file
-        # ---------------------------
+        # -----------------------------
         content = await file.read()
         with open(file_path, "wb") as f:
             f.write(content)
 
-        # ---------------------------
+        # -----------------------------
         # PDF → Images
-        # ---------------------------
+        # -----------------------------
         images = convert_from_path(file_path, dpi=300)
 
+        paddle_pages = []
+        openai_pages = []
+
         # ==========================================================
-        # 🟢 PADDLE OCR
+        # 🟢 PADDLEOCR-VL
         # ==========================================================
-        paddle_start = time.perf_counter()
-        paddle_results = []
+        paddle_start = time.time()
 
         for img in images:
-            paddle_results.append(paddle_extract(img))
+            result = ocr.predict(img)  # ✅ correct API
+            text = "\n".join(result[0]["rec_texts"])
+            paddle_pages.append(text)
 
-        paddle_time = time.perf_counter() - paddle_start
+        paddle_time = time.time() - paddle_start
 
         # ==========================================================
         # 🟣 OPENAI VISION OCR
         # ==========================================================
-        openai_start = time.perf_counter()
-        openai_results = []
+        openai_start = time.time()
 
         for img in images:
             buffer = io.BytesIO()
@@ -1089,20 +1081,21 @@ async def ocr_benchmark(file: UploadFile = File(...)):
                 ]
             )
 
-            openai_results.append(response.output_text)
+            openai_pages.append(response.output_text)
 
-        openai_time = time.perf_counter() - openai_start
+        openai_time = time.time() - openai_start
 
         # ==========================================================
         # 📊 SIMILARITY SCORE
         # ==========================================================
         scores = []
-        for i in range(len(images)):
-            scores.append(
-                text_similarity(paddle_results[i], openai_results[i])
-            )
 
-        avg_similarity = sum(scores) / len(scores) if scores else 0.0
+        for i in range(len(images)):
+            scores.append(similarity(paddle_pages[i], openai_pages[i]))
+
+        avg_similarity = sum(scores) / len(scores) if scores else 0
+
+        total_time = time.time() - start_time
 
         # ==========================================================
         # RESPONSE
@@ -1113,25 +1106,26 @@ async def ocr_benchmark(file: UploadFile = File(...)):
 
             "paddle_ocr": {
                 "time_sec": round(paddle_time, 3),
-                "pages": paddle_results
+                "pages": paddle_pages
             },
 
             "openai_vision": {
                 "time_sec": round(openai_time, 3),
-                "pages": openai_results
+                "pages": openai_pages
             },
 
             "comparison": {
                 "avg_similarity": round(avg_similarity, 3),
-                "speed_winner": (
-                    "paddleocr" if paddle_time < openai_time else "openai_vision"
+                "faster_engine": (
+                    "PaddleOCR" if paddle_time < openai_time else "OpenAI Vision"
                 )
             },
 
-            "total_time": round(time.perf_counter() - t_start, 3)
+            "total_time_sec": round(total_time, 3)
         }
 
     except Exception as e:
+        logger.exception(f"[{request_id}] OCR compare failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
