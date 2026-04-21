@@ -993,6 +993,9 @@ async def compare_documents_api(
 # ---------------------------------------------------------------------------
 
 # -----------------------------
+# -----------------------------
+# TIMEOUT WRAPPER (IMPORTANT)
+# -----------------------------
 async def run_with_timeout(func, *args, timeout=60):
     """
     Prevent infinite hang on PaddleOCR / OpenAI calls
@@ -1113,4 +1116,3 @@ async def ocr_compare(file: UploadFile = File(...)):
     except Exception as e:
         logger.exception(f"[{request_id}] OCR COMPARE FAILED: {e}")
         raise HTTPException(status_code=500, detail="OCR comparison failed")
-   
