@@ -22,6 +22,21 @@ from feature_modules.document_comparison import compare_documents
 from utils.session_store import create_session, get_session
 from auth import verify_api_key
 
+
+import io
+import time
+import uuid
+import os
+
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from pdf2image import convert_from_path
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from paddleocr import PaddleOCR
+from openai import OpenAI
+
+client = OpenAI()
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -976,3 +991,149 @@ async def compare_documents_api(
 
         duration_ms = int((time.perf_counter() - t_start) * 1000)
         logger.info(f"[{request_id}] ── COMPLETE — {duration_ms}ms status={status} ──")
+
+
+
+
+import io
+import time
+import uuid
+import os
+
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from pdf2image import convert_from_path
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from paddleocr import PaddleOCR
+
+router = APIRouter()
+
+# Initialize PaddleOCR ONCE (important for performance)
+ocr = PaddleOCR(use_angle_cls=True, lang="en")
+
+
+def paddle_extract(image):
+    result = ocr.ocr(image, cls=True)
+    if not result or not result[0]:
+        return ""
+    return "\n".join([line[1][0] for line in result[0]])
+
+
+def text_similarity(a, b):
+    if not a or not b:
+        return 0.0
+    vec = CountVectorizer().fit_transform([a, b]).toarray()
+    return cosine_similarity([vec[0]], [vec[1]])[0][0]
+
+
+@router.post("/ocr-benchmark")
+async def ocr_benchmark(file: UploadFile = File(...)):
+    request_id = str(uuid.uuid4())[:8]
+    t_start = time.perf_counter()
+
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files allowed")
+
+    file_path = f"/tmp/{uuid.uuid4()}.pdf"
+
+    try:
+        # ---------------------------
+        # Save file
+        # ---------------------------
+        content = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+        # ---------------------------
+        # PDF → Images
+        # ---------------------------
+        images = convert_from_path(file_path, dpi=300)
+
+        # ==========================================================
+        # 🟢 PADDLE OCR
+        # ==========================================================
+        paddle_start = time.perf_counter()
+        paddle_results = []
+
+        for img in images:
+            paddle_results.append(paddle_extract(img))
+
+        paddle_time = time.perf_counter() - paddle_start
+
+        # ==========================================================
+        # 🟣 OPENAI VISION OCR
+        # ==========================================================
+        openai_start = time.perf_counter()
+        openai_results = []
+
+        for img in images:
+            buffer = io.BytesIO()
+            img.save(buffer, format="PNG")
+
+            response = client.responses.create(
+                model="gpt-4o-mini",
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Extract all text from this page. Return only raw text."
+                            },
+                            {
+                                "type": "input_image",
+                                "image": buffer.getvalue()
+                            }
+                        ]
+                    }
+                ]
+            )
+
+            openai_results.append(response.output_text)
+
+        openai_time = time.perf_counter() - openai_start
+
+        # ==========================================================
+        # 📊 SIMILARITY SCORE
+        # ==========================================================
+        scores = []
+        for i in range(len(images)):
+            scores.append(
+                text_similarity(paddle_results[i], openai_results[i])
+            )
+
+        avg_similarity = sum(scores) / len(scores) if scores else 0.0
+
+        # ==========================================================
+        # RESPONSE
+        # ==========================================================
+        return {
+            "request_id": request_id,
+            "pages": len(images),
+
+            "paddle_ocr": {
+                "time_sec": round(paddle_time, 3),
+                "pages": paddle_results
+            },
+
+            "openai_vision": {
+                "time_sec": round(openai_time, 3),
+                "pages": openai_results
+            },
+
+            "comparison": {
+                "avg_similarity": round(avg_similarity, 3),
+                "speed_winner": (
+                    "paddleocr" if paddle_time < openai_time else "openai_vision"
+                )
+            },
+
+            "total_time": round(time.perf_counter() - t_start, 3)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
