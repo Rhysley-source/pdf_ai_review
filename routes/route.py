@@ -490,9 +490,9 @@ async def red_flag_scanner(
             "summary":            result.get("summary", ""),
             "counts": {
                 "total":     len(flags),
-                "dangerous": sum(1 for f in flags if f.get("category") == "Dangerous"),
-                "unusual":   sum(1 for f in flags if f.get("category") == "Unusual"),
-                "missing":   sum(1 for f in flags if f.get("category") == "Missing"),
+                "dangerous": sum(1 for f in flags if f.get("category") == "dangerous"),
+                "unusual":   sum(1 for f in flags if f.get("category") == "unusual"),
+                "missing":   sum(1 for f in flags if f.get("category") == "missing"),
                 "critical":  sum(1 for f in flags if f.get("severity") == "Critical"),
                 "high":      sum(1 for f in flags if f.get("severity") == "High"),
                 "medium":    sum(1 for f in flags if f.get("severity") == "Medium"),
