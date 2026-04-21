@@ -991,153 +991,129 @@ async def compare_documents_api(
 # POST /ocr-compare
 # PaddleOCR-VL vs OpenAI Vision comparison
 # ---------------------------------------------------------------------------
+
+# -----------------------------
+
+# -----------------------------
+# TIMEOUT WRAPPER (IMPORTANT)
+# -----------------------------
+async def run_with_timeout(func, *args, timeout=60):
+    """
+    Prevent infinite hang on PaddleOCR / OpenAI calls
+    """
+    return await asyncio.wait_for(
+        asyncio.to_thread(func, *args),
+        timeout=timeout
+    )
+
+
 @router.post("/ocr-compare")
 async def ocr_compare(file: UploadFile = File(...)):
     request_id = str(uuid.uuid4())[:8]
     t_start = time.perf_counter()
 
-    logger.info(f"[{request_id}] ── OCR COMPARE START ── file={file.filename}")
+    logger.info(f"[{request_id}] ── OCR COMPARE START ── {file.filename}")
 
     if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files allowed")
+        raise HTTPException(status_code=400, detail="Only PDF allowed")
 
     pdf_bytes = await file.read()
 
     try:
-        # =========================================================
-        # STEP 1: PDF → Images
-        # =========================================================
+        # -----------------------------
+        # STEP 1: PDF → IMAGES
+        # -----------------------------
         t0 = time.perf_counter()
         images = pdf_to_images(pdf_bytes, dpi=150)
-        t1 = time.perf_counter()
+        logger.info(f"[{request_id}] PDF→IMG done | pages={len(images)} | {time.perf_counter()-t0:.2f}s")
 
-        logger.info(
-            f"[{request_id}] PDF→IMG done | pages={len(images)} | time={t1-t0:.2f}s"
-        )
-
-        if not images:
-            raise HTTPException(status_code=400, detail="Empty or invalid PDF")
-
-        # =========================================================
-        # STEP 2: Paddle OCR (PARALLEL)
-        # =========================================================
-        async def run_paddle_async(img, page_no):
-            loop = asyncio.get_running_loop()
-
-            t_start_page = time.perf_counter()
-            logger.info(f"[{request_id}] [P{page_no}] Paddle START")
-
-            result = await loop.run_in_executor(
-                None,
-                lambda: run_paddleocr(img)
-            )
-
-            t_end_page = time.perf_counter()
-
-            logger.info(
-                f"[{request_id}] [P{page_no}] Paddle DONE | "
-                f"time={t_end_page - t_start_page:.2f}s | len={len(result)}"
-            )
-
-            return result
-
-        paddle_tasks = [
-            run_paddle_async(img, i + 1)
-            for i, img in enumerate(images)
-        ]
-
-        t2 = time.perf_counter()
-        paddle_results = await asyncio.gather(*paddle_tasks)
-        t3 = time.perf_counter()
-
-        logger.info(
-            f"[{request_id}] Paddle ALL DONE | total_time={t3 - t2:.2f}s"
-        )
-
-        # =========================================================
-        # STEP 3: OpenAI (ONLY IF NEEDED)
-        # =========================================================
         results = []
 
-        for i, (img, paddle_text) in enumerate(zip(images, paddle_results)):
-            page_no = i + 1
+        # -----------------------------
+        # STEP 2: OCR PER PAGE
+        # -----------------------------
+        for i, img in enumerate(images, start=1):
+            page_t = time.perf_counter()
+            logger.info(f"[{request_id}] ── PAGE {i} START ──")
 
-            t_page = time.perf_counter()
+            # ---- Paddle OCR ----
+            try:
+                t_paddle = time.perf_counter()
+                logger.info(f"[{request_id}] [P{i}] Paddle START")
 
-            # Decide fallback
-            use_openai = len(paddle_text.strip()) < 20
-
-            logger.info(
-                f"[{request_id}] [P{page_no}] Decision → "
-                f"use_openai={use_openai}"
-            )
-
-            openai_text = ""
-            base64_img = None
-
-            if use_openai:
-                t_oa_start = time.perf_counter()
-
-                base64_img = img_to_base64(img)
-                openai_text = run_openai_vision(base64_img)
-
-                t_oa_end = time.perf_counter()
+                paddle_text = await run_with_timeout(
+                    run_paddleocr,
+                    img,
+                    timeout=60
+                )
 
                 logger.info(
-                    f"[{request_id}] [P{page_no}] OpenAI DONE | "
-                    f"time={t_oa_end - t_oa_start:.2f}s | len={len(openai_text)}"
+                    f"[{request_id}] [P{i}] Paddle DONE | "
+                    f"chars={len(paddle_text)} | {time.perf_counter()-t_paddle:.2f}s"
                 )
-            else:
-                openai_text = "[skipped - paddle sufficient]"
 
-            diff = abs(len(paddle_text) - len(openai_text))
+            except asyncio.TimeoutError:
+                paddle_text = "[PaddleOCR TIMEOUT]"
+                logger.error(f"[{request_id}] [P{i}] Paddle TIMEOUT")
 
-            t_page_end = time.perf_counter()
+            except Exception as e:
+                paddle_text = f"[PaddleOCR ERROR] {str(e)}"
+                logger.exception(f"[{request_id}] [P{i}] Paddle FAILED")
 
-            logger.info(
-                f"[{request_id}] [P{page_no}] COMPLETE | "
-                f"total_time={t_page_end - t_page:.2f}s"
-            )
+            # ---- OpenAI Vision ----
+            try:
+                t_openai = time.perf_counter()
+                logger.info(f"[{request_id}] [P{i}] OpenAI START")
 
+                base64_img = img_to_base64(img)
+
+                openai_text = await run_with_timeout(
+                    run_openai_vision,
+                    base64_img,
+                    timeout=90
+                )
+
+                logger.info(
+                    f"[{request_id}] [P{i}] OpenAI DONE | "
+                    f"chars={len(openai_text)} | {time.perf_counter()-t_openai:.2f}s"
+                )
+
+            except asyncio.TimeoutError:
+                openai_text = "[OpenAI TIMEOUT]"
+                logger.error(f"[{request_id}] [P{i}] OpenAI TIMEOUT")
+
+            except Exception as e:
+                openai_text = f"[OpenAI ERROR] {str(e)}"
+                logger.exception(f"[{request_id}] [P{i}] OpenAI FAILED")
+
+            # ---- STORE RESULT ----
             results.append({
-                "page": page_no,
-                "paddleocr_vl": paddle_text,
-                "openai_vision": openai_text,
-                "paddle_length": len(paddle_text),
-                "openai_length": len(openai_text),
-                "diff": diff,
-                "used_openai": use_openai
+                "page": i,
+                "paddleocr": paddle_text,
+                "openai": openai_text,
+                "paddle_len": len(paddle_text),
+                "openai_len": len(openai_text),
+                "diff": abs(len(paddle_text) - len(openai_text))
             })
 
-        # =========================================================
-        # FINAL METRICS
-        # =========================================================
+            logger.info(
+                f"[{request_id}] PAGE {i} COMPLETE | "
+                f"time={time.perf_counter()-page_t:.2f}s"
+            )
+
+        # -----------------------------
+        # FINAL RESPONSE
+        # -----------------------------
         elapsed = time.perf_counter() - t_start
-
-        avg_diff = (
-            sum(r["diff"] for r in results) / len(results)
-            if results else 0
-        )
-
-        logger.info(
-            f"[{request_id}] ── OCR COMPARE DONE ── "
-            f"time={elapsed:.2f}s | avg_diff={avg_diff:.2f}"
-        )
 
         return {
             "request_id": request_id,
             "total_pages": len(images),
-            "avg_diff": avg_diff,
+            "avg_diff": sum(r["diff"] for r in results) / len(results) if results else 0,
             "results": results,
-            "time_sec": round(elapsed, 2)
+            "total_time_sec": round(elapsed, 2)
         }
 
     except Exception as e:
-        logger.exception(f"[{request_id}] OCR compare failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "request_error",
-                "message": "OCR comparison failed"
-            }
-        )
+        logger.exception(f"[{request_id}] OCR COMPARE FAILED: {e}")
+        raise HTTPException(status_code=500, detail="OCR comparison failed")
