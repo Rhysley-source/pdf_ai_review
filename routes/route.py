@@ -1117,3 +1117,102 @@ async def ocr_compare(file: UploadFile = File(...)):
     except Exception as e:
         logger.exception(f"[{request_id}] OCR COMPARE FAILED: {e}")
         raise HTTPException(status_code=500, detail="OCR comparison failed")
+    
+
+
+@router.post("/ocr-compare-openai")
+async def ocr_compare_openai(file: UploadFile = File(...)):
+    request_id = str(uuid.uuid4())[:8]
+    t_start = time.perf_counter()
+
+    logger.info(f"[{request_id}] ── OPENAI OCR COMPARE START ── {file.filename}")
+
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files allowed")
+
+    pdf_bytes = await file.read()
+
+    try:
+        # ----------------------------
+        # STEP 1: PDF → Images
+        # ----------------------------
+        t0 = time.perf_counter()
+        images = pdf_to_images(pdf_bytes, dpi=150)
+
+        logger.info(
+            f"[{request_id}] PDF→Images done | pages={len(images)} | "
+            f"{time.perf_counter() - t0:.2f}s"
+        )
+
+        results = []
+
+        # ----------------------------
+        # STEP 2: OpenAI Vision OCR
+        # ----------------------------
+        for i, img in enumerate(images, start=1):
+            page_start = time.perf_counter()
+
+            logger.info(f"[{request_id}] [P{i}] OpenAI OCR START")
+
+            try:
+                base64_img = img_to_base64(img)
+
+                response = await run_with_timeout(
+                    run_openai_vision,
+                    base64_img,
+                    timeout=90
+                )
+
+                logger.info(
+                    f"[{request_id}] [P{i}] OpenAI OCR DONE | "
+                    f"chars={len(response)} | "
+                    f"{time.perf_counter() - page_start:.2f}s"
+                )
+
+                results.append({
+                    "page": i,
+                    "text": response,
+                    "length": len(response)
+                })
+
+            except asyncio.TimeoutError:
+                logger.error(f"[{request_id}] [P{i}] OpenAI TIMEOUT")
+
+                results.append({
+                    "page": i,
+                    "text": "[TIMEOUT]",
+                    "length": 0
+                })
+
+            except Exception as e:
+                logger.exception(f"[{request_id}] [P{i}] OpenAI FAILED")
+
+                results.append({
+                    "page": i,
+                    "text": f"[ERROR] {str(e)}",
+                    "length": 0
+                })
+
+        # ----------------------------
+        # FINAL RESPONSE
+        # ----------------------------
+        total_time = time.perf_counter() - t_start
+
+        full_text = "\n\n".join(r["text"] for r in results)
+
+        logger.info(
+            f"[{request_id}] ── OPENAI OCR COMPLETE ── "
+            f"time={total_time:.2f}s pages={len(results)}"
+        )
+
+        return {
+            "request_id": request_id,
+            "total_pages": len(results),
+            "results": results,
+            "merged_text": full_text,
+            "total_time_sec": round(total_time, 2)
+        }
+
+    except Exception as e:
+        logger.exception(f"[{request_id}] OPENAI OCR FAILED: {e}")
+        raise HTTPException(status_code=500, detail="OpenAI OCR failed")
