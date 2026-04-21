@@ -132,7 +132,7 @@ async def analyze_document_risks(text: str) -> dict:
     _MAX_ATTEMPTS = 2
     result = {}
     for attempt in range(1, _MAX_ATTEMPTS + 1):
-        raw = await run_llm_mini(document, _SINGLE_CALL_SYSTEM, max_output_tokens=8000)
+        raw = await run_llm_mini(document, _SINGLE_CALL_SYSTEM, max_output_tokens=6000)
         logger.debug(f"[risk_detection] attempt {attempt} raw output ({len(raw)} chars): {raw[:800]}")
         result = extract_json_from_text(raw)
         if result and "detected_risks" in result:
