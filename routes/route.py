@@ -33,6 +33,9 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from paddleocr import PaddleOCR
 from openai import OpenAI
+import numpy as np
+
+paddle_pages = []
 
 UPLOAD_FOLDER = "/tmp"
 
@@ -1047,9 +1050,19 @@ async def ocr_compare(file: UploadFile = File(...)):
         paddle_start = time.time()
 
         for img in images:
-            result = ocr.predict(img)  # ✅ correct API
-            text = "\n".join(result[0]["rec_texts"])
-            paddle_pages.append(text)
+            try:
+                img_np = np.array(img)
+                result = ocr.predict(img_np)
+
+                if not result or not result[0]:
+                    text = ""
+                else:
+                    text = "\n".join(result[0].get("rec_texts", []))
+
+                paddle_pages.append(text)
+
+            except Exception as e:
+                paddle_pages.append("")
 
         paddle_time = time.time() - paddle_start
 
