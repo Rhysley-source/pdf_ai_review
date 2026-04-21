@@ -102,30 +102,39 @@ async def analyze_pdf(
     safe_name = f"{uuid.uuid4()}.pdf"
     file_path = os.path.join(UPLOAD_FOLDER, safe_name)
 
+    t_s1 = t_s2 = t_s3 = t_s4 = t_session = t_s5 = 0.0
+
     try:
+        # ── Step 1: read & save uploaded file ────────────────────────────
+        _t = time.perf_counter()
         content  = await file.read()
         pdf_size = len(content)
         with open(file_path, "wb") as f:
             f.write(content)
-        logger.info(f"[{request_id}] Step 1/5 — saved {pdf_size:,} bytes → '{safe_name}'")
+        t_s1 = time.perf_counter() - _t
+        logger.info(f"[{request_id}] Step 1/5 — upload+save {pdf_size:,} bytes → '{safe_name}' ({t_s1:.3f}s)")
 
+        # ── Step 2: page count ────────────────────────────────────────────
+        _t = time.perf_counter()
         total_pages   = get_page_count(file_path)
         pages_to_read = total_pages if MAX_PDF_PAGES is None else min(total_pages, MAX_PDF_PAGES)
         was_truncated = MAX_PDF_PAGES is not None and total_pages > MAX_PDF_PAGES
+        t_s2 = time.perf_counter() - _t
         logger.info(
-            f"[{request_id}] Step 2/5 — pages={total_pages} analysing={pages_to_read} "
-            f"{'(TRUNCATED)' if was_truncated else '(all pages)'}"
+            f"[{request_id}] Step 2/5 — page count: total={total_pages} analysing={pages_to_read} "
+            f"{'(TRUNCATED)' if was_truncated else '(all pages)'} ({t_s2:.3f}s)"
         )
 
+        # ── Step 3: PDF extraction (PyMuPDF + OCR) ────────────────────────
         try:
-            t_extract   = time.perf_counter()
+            _t            = time.perf_counter()
             extract_stats: dict = {}
             # ── Non-blocking: OCR runs in thread pool ──────────────────────
             pages = await _load_pdf_async(file_path, pages_to_read, extract_stats)
-            t_extracted = time.perf_counter() - t_extract
+            t_s3 = time.perf_counter() - _t
             logger.info(
-                f"[{request_id}] Step 3/5 — extracted {len(pages)} page(s) "
-                f"total={t_extracted:.2f}s | "
+                f"[{request_id}] Step 3/5 — extraction: {len(pages)} page(s) "
+                f"total={t_s3:.2f}s | "
                 f"pymupdf={extract_stats.get('pymupdf_time', 0):.2f}s "
                 f"({extract_stats.get('native_pages', 0)}p) | "
                 f"ocr={extract_stats.get('ocr_time', 0):.2f}s "
@@ -146,21 +155,32 @@ async def analyze_pdf(
             if analysis_type == 3: return {"highlights": []}
             return result
 
+        # ── Step 4: merge page text ───────────────────────────────────────
+        _t = time.perf_counter()
         merged_text = "\n\n".join(p.page_content for p in pages)
-        logger.info(f"[{request_id}] Step 4/5 — merged {len(merged_text):,} chars")
+        t_s4 = time.perf_counter() - _t
+        logger.info(f"[{request_id}] Step 4/5 — merge: {len(merged_text):,} chars ({t_s4:.3f}s)")
 
+        # ── Session ───────────────────────────────────────────────────────
+        _t = time.perf_counter()
         session_id = create_session(
             text=merged_text,
             filename=file.filename or "unknown",
             total_pages=total_pages,
             pages_analysed=pages_to_read,
         )
-        logger.info(f"[{request_id}] session created — id={session_id[:8]}")
+        t_session = time.perf_counter() - _t
+        logger.info(f"[{request_id}] session created — id={session_id[:8]} ({t_session:.3f}s)")
 
-        logger.info(f"[{request_id}] Step 5/5 — running inference")
-        t_infer = time.perf_counter()
+        # ── Step 5: LLM inference ─────────────────────────────────────────
+        logger.info(f"[{request_id}] Step 5/5 — inference start")
+        _t = time.perf_counter()
         final_output, total_in_tok, total_out_tok = await generate_analysis(merged_text)
-        logger.info(f"[{request_id}] Step 5/5 — done ({time.perf_counter()-t_infer:.2f}s)")
+        t_s5 = time.perf_counter() - _t
+        logger.info(
+            f"[{request_id}] Step 5/5 — inference done ({t_s5:.2f}s) "
+            f"tokens={total_in_tok}in/{total_out_tok}out"
+        )
 
     except HTTPException:
         status    = "error"
@@ -192,7 +212,12 @@ async def analyze_pdf(
         )
 
     elapsed = time.perf_counter() - t_start
-    logger.info(f"[{request_id}] ── COMPLETE — {elapsed:.2f}s ──────")
+    logger.info(
+        f"[{request_id}] ── COMPLETE — {elapsed:.2f}s total | "
+        f"upload={t_s1:.3f}s | pagecount={t_s2:.3f}s | "
+        f"extract={t_s3:.2f}s | merge={t_s4:.3f}s | "
+        f"session={t_session:.3f}s | inference={t_s5:.2f}s"
+    )
 
     if was_truncated:
         final_output.update(truncated=True, pages_analysed=pages_to_read, total_pages=total_pages)
