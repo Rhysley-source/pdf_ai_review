@@ -36,7 +36,7 @@ _RE_SPACES    = re.compile(r" {2,}")
 # Thresholds
 # ---------------------------------------------------------------------------
 NATIVE_TEXT_THRESHOLD = 0
-OCR_RETRY_ATTEMPTS    = 2
+OCR_RETRY_ATTEMPTS    = 1
 
 # Parallel workers for native extraction (fitz is thread-safe for reads)
 _NATIVE_EXTRACT_WORKERS = 4
@@ -420,14 +420,11 @@ def load_pdf(file_path: str, max_pages: int | None = None, _stats: dict | None =
 
             except FuturesTimeoutError:
                 elapsed = time.perf_counter() - t_ocr
-                is_last = attempt == OCR_RETRY_ATTEMPTS
                 logger.error(
                     f"[pdf_utils] Page {page_num}: PaddleOCR-VL TIMEOUT "
-                    f"(attempt {attempt}, {elapsed:.1f}s > {OCR_PAGE_TIMEOUT}s limit) "
-                    + ("— giving up" if is_last else "— retrying at higher DPI")
+                    f"({elapsed:.1f}s > {OCR_PAGE_TIMEOUT}s limit) — giving up"
                 )
-                if is_last:
-                    _ocr_timeout_count += 1
+                _ocr_timeout_count += 1
                 future.cancel()
                 if paddle.device.is_compiled_with_cuda():
                     paddle.device.cuda.empty_cache()
@@ -435,9 +432,8 @@ def load_pdf(file_path: str, max_pages: int | None = None, _stats: dict | None =
             except Exception as e:
                 elapsed = time.perf_counter() - t_ocr
                 logger.warning(
-                    f"[pdf_utils] Page {page_num}: PaddleOCR-VL attempt {attempt} failed "
-                    f"({elapsed:.2f}s, {e})"
-                    + (" -- retrying" if attempt < OCR_RETRY_ATTEMPTS else " -- exhausted")
+                    f"[pdf_utils] Page {page_num}: PaddleOCR-VL failed "
+                    f"({elapsed:.2f}s) — {e}"
                 )
                 if paddle.device.is_compiled_with_cuda():
                     paddle.device.cuda.empty_cache()
