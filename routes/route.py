@@ -58,6 +58,30 @@ async def _load_pdf_async(file_path: str, max_pages: int | None = None, _stats: 
     )
 
 
+async def _get_page_count_async(file_path: str) -> int:
+    """
+    Run get_page_count in a thread to avoid blocking the event loop.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, partial(get_page_count, file_path))
+
+
+async def _save_upload_to_disk(upload: UploadFile, target_path: str, chunk_size: int = 1024 * 1024) -> int:
+    """
+    Stream upload to disk chunk-by-chunk to avoid loading full file in memory.
+    Returns total bytes written.
+    """
+    written = 0
+    with open(target_path, "wb") as f:
+        while True:
+            chunk = await upload.read(chunk_size)
+            if not chunk:
+                break
+            f.write(chunk)
+            written += len(chunk)
+    return written
+
+
 # ---------------------------------------------------------------------------
 # SSE helper
 # ---------------------------------------------------------------------------
@@ -108,16 +132,13 @@ async def analyze_pdf(
     try:
         # ── Step 1: read & save uploaded file ────────────────────────────
         _t = time.perf_counter()
-        content  = await file.read()
-        pdf_size = len(content)
-        with open(file_path, "wb") as f:
-            f.write(content)
+        pdf_size = await _save_upload_to_disk(file, file_path)
         t_s1 = time.perf_counter() - _t
         logger.info(f"[{request_id}] Step 1/5 — upload+save {pdf_size:,} bytes → '{safe_name}' ({t_s1:.3f}s)")
 
         # ── Step 2: page count ────────────────────────────────────────────
         _t = time.perf_counter()
-        total_pages   = get_page_count(file_path)
+        total_pages   = await _get_page_count_async(file_path)
         pages_to_read = total_pages if MAX_PDF_PAGES is None else min(total_pages, MAX_PDF_PAGES)
         was_truncated = MAX_PDF_PAGES is not None and total_pages > MAX_PDF_PAGES
         t_s2 = time.perf_counter() - _t
@@ -175,7 +196,10 @@ async def analyze_pdf(
         # ── Step 5: LLM inference ─────────────────────────────────────────
         logger.info(f"[{request_id}] Step 5/5 — inference start")
         _t = time.perf_counter()
-        final_output, total_in_tok, total_out_tok = await generate_analysis(merged_text)
+        final_output, total_in_tok, total_out_tok = await generate_analysis(
+            merged_text,
+            analysis_type=analysis_type,
+        )
         t_s5 = time.perf_counter() - _t
         logger.info(
             f"[{request_id}] Step 5/5 — inference done ({t_s5:.2f}s) "
@@ -197,45 +221,47 @@ async def analyze_pdf(
             logger.debug(f"[{request_id}] temp file deleted")
 
         elapsed = time.perf_counter() - t_start
-        await log_request(
-            request_id        = request_id,
-            pdf_name          = file.filename or "unknown",
-            pdf_size_bytes    = pdf_size,
-            total_pages       = total_pages,
-            pages_analysed    = pages_to_read,
-            input_tokens      = total_in_tok,
-            output_tokens     = total_out_tok,
-            completion_time_s = elapsed,
-            endpoint          = "/analyze",
-            status            = status,
-            error_message     = error_msg,
-        )
-        await log_analyse_detail(
-            request_id        = request_id,
-            pdf_name          = file.filename or "unknown",
-            pdf_size_bytes    = pdf_size,
-            total_pages       = total_pages,
-            pages_analysed    = pages_to_read,
-            pdf_type          = extract_stats.get("pdf_type"),
-            native_pages      = extract_stats.get("native_pages",       0),
-            ocr_pages         = extract_stats.get("ocr_pages",          0),
-            ocr_timeout_pages = extract_stats.get("ocr_timeout_pages",  0),
-            placeholder_pages = extract_stats.get("placeholder_pages",  0),
-            blank_pages       = extract_stats.get("blank_pages",       0),
-            t_upload_s        = t_s1,
-            t_pagecount_s     = t_s2,
-            t_extract_s       = t_s3,
-            t_pymupdf_s       = extract_stats.get("pymupdf_time", 0.0),
-            t_ocr_s           = extract_stats.get("ocr_time",     0.0),
-            t_merge_s         = t_s4,
-            t_session_s       = t_session,
-            t_inference_s     = t_s5,
-            t_total_s         = elapsed,
-            input_tokens      = total_in_tok,
-            output_tokens     = total_out_tok,
-            endpoint          = "/analyze",
-            status            = status,
-            error_message     = error_msg,
+        await asyncio.gather(
+            log_request(
+                request_id        = request_id,
+                pdf_name          = file.filename or "unknown",
+                pdf_size_bytes    = pdf_size,
+                total_pages       = total_pages,
+                pages_analysed    = pages_to_read,
+                input_tokens      = total_in_tok,
+                output_tokens     = total_out_tok,
+                completion_time_s = elapsed,
+                endpoint          = "/analyze",
+                status            = status,
+                error_message     = error_msg,
+            ),
+            log_analyse_detail(
+                request_id        = request_id,
+                pdf_name          = file.filename or "unknown",
+                pdf_size_bytes    = pdf_size,
+                total_pages       = total_pages,
+                pages_analysed    = pages_to_read,
+                pdf_type          = extract_stats.get("pdf_type"),
+                native_pages      = extract_stats.get("native_pages",       0),
+                ocr_pages         = extract_stats.get("ocr_pages",          0),
+                ocr_timeout_pages = extract_stats.get("ocr_timeout_pages",  0),
+                placeholder_pages = extract_stats.get("placeholder_pages",  0),
+                blank_pages       = extract_stats.get("blank_pages",       0),
+                t_upload_s        = t_s1,
+                t_pagecount_s     = t_s2,
+                t_extract_s       = t_s3,
+                t_pymupdf_s       = extract_stats.get("pymupdf_time", 0.0),
+                t_ocr_s           = extract_stats.get("ocr_time",     0.0),
+                t_merge_s         = t_s4,
+                t_session_s       = t_session,
+                t_inference_s     = t_s5,
+                t_total_s         = elapsed,
+                input_tokens      = total_in_tok,
+                output_tokens     = total_out_tok,
+                endpoint          = "/analyze",
+                status            = status,
+                error_message     = error_msg,
+            ),
         )
 
     elapsed = time.perf_counter() - t_start
@@ -648,13 +674,10 @@ async def analyze_pdf_stream(
 
         try:
             yield _sse("status", {"step": "saving", "message": "Saving uploaded file..."})
-            content  = await file.read()
-            pdf_size = len(content)
-            with open(file_path, "wb") as f:
-                f.write(content)
+            pdf_size = await _save_upload_to_disk(file, file_path)
             logger.info(f"[{request_id}] saved {pdf_size:,} bytes")
 
-            total_pages   = get_page_count(file_path)
+            total_pages   = await _get_page_count_async(file_path)
             pages_to_read = total_pages if MAX_PDF_PAGES is None else min(total_pages, MAX_PDF_PAGES)
             was_truncated = MAX_PDF_PAGES is not None and total_pages > MAX_PDF_PAGES
 
@@ -693,7 +716,10 @@ async def analyze_pdf_stream(
             overview_sent   = False
             highlight_index = 0
 
-            async for event_type, payload in generate_analysis_stream(merged_text):
+            async for event_type, payload in generate_analysis_stream(
+                merged_text,
+                analysis_type=analysis_type,
+            ):
 
                 if event_type == "chunk_start":
                     yield _sse("status", {
