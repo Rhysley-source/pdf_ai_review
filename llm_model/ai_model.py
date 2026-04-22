@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 MODEL_NAME_OB  = os.environ.get("MODEL_NAME_OB", "gpt-4o")
 MODEL_NAME     = os.environ.get("MODEL_NAME", "gpt-5-nano")
-ANALYSE_MODEL  = os.environ.get("ANALYSE_MODEL", "gpt-4o-mini")
+ANALYSE_MODEL  = os.environ.get("ANALYSE_MODEL", "gpt-5-nano")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 if not OPENAI_API_KEY:
     logger.error("OPENAI_API_KEY is not set in environment variables.")
@@ -35,15 +35,16 @@ _MAX_COMPLETION_TOKENS_MODELS = {
     "o1", "o1-mini", "o3-mini", "o3",
 }
 
-TOKEN_CHUNK_SIZE    = 800000
-TOKEN_CHUNK_OVERLAP = 500
-MAX_OUTPUT_TOKENS   = 4096
+TOKEN_CHUNK_SIZE       = 50000   # smaller chunks → parallel map calls; suits reasoning model latency
+TOKEN_CHUNK_OVERLAP    = 200
+MAX_OUTPUT_TOKENS      = 4096
+ANALYSE_MAX_OUT_TOKENS = 2048   # tighter cap for analyse map+synthesis — limits reasoning depth
 MAP_JSON_RETRY_ATTEMPTS = 2
 
 # ---------------------------------------------------------------------------
 # Module-level semaphore — shared across all requests on this worker
 # ---------------------------------------------------------------------------
-_MAP_CONCURRENCY  = 3
+_MAP_CONCURRENCY  = 5
 _MAP_SEMAPHORE: asyncio.Semaphore | None = None
 
 # Caps concurrent plain-text LLM calls (risk detection, key clauses, etc.)
@@ -309,7 +310,8 @@ async def _run_inference_json(
     """
     tag    = f"[{label}] " if label else ""
     t0     = time.perf_counter()
-    kwargs = _build_api_kwargs(messages, use_json=True, streaming=False, model=model)
+    kwargs = _build_api_kwargs(messages, use_json=True, streaming=False,
+                               max_output_tokens=ANALYSE_MAX_OUT_TOKENS, model=model)
 
     try:
         response      = await _client.chat.completions.create(**kwargs)
