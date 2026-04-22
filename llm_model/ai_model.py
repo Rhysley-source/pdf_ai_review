@@ -622,10 +622,11 @@ async def run_llm_raw_json(system: str, user: str) -> tuple[str, int, int]:
 # Uses _run_inference_json (PDF analysis prompts contain "json")
 # ---------------------------------------------------------------------------
 
-async def _run_map_chunk(i: int, total: int, chunk_text: str) -> tuple[dict, int, int]:
-    _EMPTY = {"overview": "", "summary": "", "highlights": []}
-    sem    = _get_semaphore()
-    lbl    = f"map {i+1}/{total}"
+async def _run_map_chunk(i: int, total: int, chunk_text: str, use_mini: bool = False) -> tuple[dict, int, int]:
+    _EMPTY  = {"overview": "", "summary": "", "highlights": []}
+    sem     = _get_semaphore()
+    lbl     = f"map {i+1}/{total}"
+    _infer  = _run_inference_json_mini if use_mini else _run_inference_json
 
     async with sem:
         t_chunk    = time.perf_counter()
@@ -638,7 +639,7 @@ async def _run_map_chunk(i: int, total: int, chunk_text: str) -> tuple[dict, int
                 messages = _build_map_messages(chunk_text, retry=(attempt > 1))
                 if attempt > 1:
                     logger.warning(f"[generate_analysis] [{lbl}] retry {attempt}")
-                raw, i_tok, o_tok = await _run_inference_json(
+                raw, i_tok, o_tok = await _infer(
                     messages, f"{lbl}-a{attempt}"
                 )
                 in_tokens  += i_tok
@@ -675,14 +676,15 @@ async def _run_map_chunk(i: int, total: int, chunk_text: str) -> tuple[dict, int
 # Route: POST /analyze
 # ---------------------------------------------------------------------------
 
-async def generate_analysis(merged_text: str) -> tuple[dict, int, int]:
+async def generate_analysis(merged_text: str, use_mini: bool = False) -> tuple[dict, int, int]:
     _EMPTY = {"overview": "", "summary": "", "highlights": []}
     if not merged_text or not merged_text.strip():
         return dict(_EMPTY), 0, 0
 
-    t0     = time.perf_counter()
-    chunks = split_by_tokens(merged_text)
-    logger.info(f"[generate_analysis] {len(chunks)} chunk(s) in {time.perf_counter()-t0:.3f}s")
+    model_tag = "gpt-4o-mini" if use_mini else os.environ.get("MODEL_NAME", MODEL_NAME)
+    t0        = time.perf_counter()
+    chunks    = split_by_tokens(merged_text)
+    logger.info(f"[generate_analysis] model={model_tag} {len(chunks)} chunk(s) in {time.perf_counter()-t0:.3f}s")
 
     t_pipeline    = time.perf_counter()
     total_in_tok  = 0
@@ -692,7 +694,7 @@ async def generate_analysis(merged_text: str) -> tuple[dict, int, int]:
         f"[generate_analysis] MAP: {len(chunks)} chunk(s) "
         f"(parallel, concurrency={_MAP_CONCURRENCY})"
     )
-    map_tasks   = [_run_map_chunk(i, len(chunks), ct) for i, ct in enumerate(chunks)]
+    map_tasks   = [_run_map_chunk(i, len(chunks), ct, use_mini) for i, ct in enumerate(chunks)]
     raw_results = list(await asyncio.gather(*map_tasks))
 
     map_results = []
@@ -718,7 +720,8 @@ async def generate_analysis(merged_text: str) -> tuple[dict, int, int]:
             synth_messages = _build_synth_messages(
                 [r for r in map_results if r.get("overview") or r.get("summary")]
             )
-            raw_synth, s_in, s_out = await _run_inference_json(synth_messages, "synthesis")
+            _infer_synth = _run_inference_json_mini if use_mini else _run_inference_json
+            raw_synth, s_in, s_out = await _infer_synth(synth_messages, "synthesis")
             total_in_tok  += s_in
             total_out_tok += s_out
 

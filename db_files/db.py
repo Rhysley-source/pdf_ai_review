@@ -210,10 +210,14 @@ CREATE TABLE IF NOT EXISTS pdf_analyse_logs (
     total_tokens        INTEGER,
 
     -- Outcome
+    endpoint            TEXT,
     status              TEXT,
     error_message       TEXT,
     created_at          TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_pdf_analyse_logs_endpoint
+    ON pdf_analyse_logs (endpoint);
 
 CREATE INDEX IF NOT EXISTS idx_pdf_analyse_logs_request_id
     ON pdf_analyse_logs (request_id);
@@ -307,12 +311,14 @@ async def log_analyse_detail(
     t_total_s:         float = 0.0,
     input_tokens:      int   = 0,
     output_tokens:     int   = 0,
+    endpoint:          str   = "/analyze",
     status:            str   = "success",
     error_message:     str | None = None,
 ) -> None:
     """
-    Write one row to pdf_analyse_logs for every /analyze request.
+    Write one row to pdf_analyse_logs for any analysis route.
     Captures per-step durations, PDF type, and page-level extraction stats.
+    For routes that reuse a session (no re-extraction), extraction fields will be 0/None.
     Never raises — DB errors are logged but do not affect the API response.
     """
     total_tokens = input_tokens + output_tokens
@@ -330,7 +336,7 @@ async def log_analyse_detail(
                     t_pymupdf_s, t_ocr_s,
                     t_merge_s, t_session_s, t_inference_s, t_total_s,
                     input_tokens, output_tokens, total_tokens,
-                    status, error_message
+                    endpoint, status, error_message
                 ) VALUES (
                     $1,  $2,  $3,
                     $4,  $5,
@@ -340,7 +346,7 @@ async def log_analyse_detail(
                     $15, $16,
                     $17, $18, $19, $20,
                     $21, $22, $23,
-                    $24, $25
+                    $24, $25, $26
                 )
                 """,
                 request_id, pdf_name, pdf_size_bytes,
@@ -352,10 +358,10 @@ async def log_analyse_detail(
                 round(t_merge_s,     3), round(t_session_s,   3),
                 round(t_inference_s, 3), round(t_total_s,     3),
                 input_tokens, output_tokens, total_tokens,
-                status, error_message,
+                endpoint, status, error_message,
             )
         logger.info(
-            f"[db] pdf_analyse_log saved — id={request_id} "
+            f"[db] pdf_analyse_log saved — id={request_id} endpoint={endpoint} "
             f"pdf_type={pdf_type} native={native_pages} ocr={ocr_pages} "
             f"total={t_total_s:.2f}s status={status}"
         )

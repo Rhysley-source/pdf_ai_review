@@ -175,7 +175,7 @@ async def analyze_pdf(
         # ── Step 5: LLM inference ─────────────────────────────────────────
         logger.info(f"[{request_id}] Step 5/5 — inference start")
         _t = time.perf_counter()
-        final_output, total_in_tok, total_out_tok = await generate_analysis(merged_text)
+        final_output, total_in_tok, total_out_tok = await generate_analysis(merged_text, use_mini=True)
         t_s5 = time.perf_counter() - _t
         logger.info(
             f"[{request_id}] Step 5/5 — inference done ({t_s5:.2f}s) "
@@ -233,6 +233,7 @@ async def analyze_pdf(
             t_total_s         = elapsed,
             input_tokens      = total_in_tok,
             output_tokens     = total_out_tok,
+            endpoint          = "/analyze",
             status            = status,
             error_message     = error_msg,
         )
@@ -345,6 +346,17 @@ async def key_clause_extraction(
             status            = status,
             error_message     = error_msg,
         )
+        await log_analyse_detail(
+            request_id    = request_id,
+            pdf_name      = pdf_name,
+            total_pages   = total_pages,
+            pages_analysed= pages_to_read,
+            t_inference_s = elapsed,
+            t_total_s     = elapsed,
+            endpoint      = "/key-clause-extraction",
+            status        = status,
+            error_message = error_msg,
+        )
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
             logger.debug(f"[{request_id}] Temp file deleted: '{file_path}'")
@@ -430,6 +442,17 @@ async def detect_risks(
             endpoint          = "/detect-risks",
             status            = status,
             error_message     = error_msg,
+        )
+        await log_analyse_detail(
+            request_id    = request_id,
+            pdf_name      = pdf_name,
+            total_pages   = total_pages,
+            pages_analysed= pages_to_read,
+            t_inference_s = elapsed,
+            t_total_s     = elapsed,
+            endpoint      = "/detect-risks",
+            status        = status,
+            error_message = error_msg,
         )
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
