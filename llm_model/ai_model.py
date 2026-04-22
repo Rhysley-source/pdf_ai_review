@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-MODEL_NAME_OB = os.environ.get("MODEL_NAME_OB", "gpt-4o")
+MODEL_NAME_OB  = os.environ.get("MODEL_NAME_OB", "gpt-4o")
 MODEL_NAME     = os.environ.get("MODEL_NAME", "gpt-5-nano")
+ANALYSE_MODEL  = os.environ.get("ANALYSE_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 if not OPENAI_API_KEY:
     logger.error("OPENAI_API_KEY is not set in environment variables.")
@@ -193,6 +194,7 @@ def _build_api_kwargs(
     use_json:         bool = False,
     streaming:        bool = False,
     max_output_tokens: int = MAX_OUTPUT_TOKENS,
+    model:            str | None = None,
 ) -> dict:
     """
     Build OpenAI API kwargs handling model differences.
@@ -205,7 +207,8 @@ def _build_api_kwargs(
                      Required for key-clause-extraction, risk-detection,
                      and any plain-text call where prompt lacks "json".
     """
-    model = os.environ.get("MODEL_NAME", MODEL_NAME)
+    if model is None:
+        model = os.environ.get("MODEL_NAME", MODEL_NAME)
 
     kwargs: dict = {
         "model":    model,
@@ -297,6 +300,7 @@ def _build_api_kwargs_ob(
 async def _run_inference_json(
     messages: list[dict],
     label:    str = "",
+    model:    str | None = None,
 ) -> tuple[str, int, int]:
     """
     OpenAI call with response_format=json_object.
@@ -305,7 +309,7 @@ async def _run_inference_json(
     """
     tag    = f"[{label}] " if label else ""
     t0     = time.perf_counter()
-    kwargs = _build_api_kwargs(messages, use_json=True, streaming=False)
+    kwargs = _build_api_kwargs(messages, use_json=True, streaming=False, model=model)
 
     try:
         response      = await _client.chat.completions.create(**kwargs)
@@ -432,14 +436,14 @@ async def _run_inference_text_obligation(
 # Yields: ("delta", str) | ("done", (input_tokens, output_tokens))
 # ---------------------------------------------------------------------------
 
-async def _run_inference_stream(messages: list[dict], label: str = ""):
+async def _run_inference_stream(messages: list[dict], label: str = "", model: str | None = None):
     """
     Streaming OpenAI call — yields token deltas then final token counts.
     No response_format (not needed; extract_json handles parsing).
     """
     tag    = f"[{label}] " if label else ""
     t0     = time.perf_counter()
-    kwargs = _build_api_kwargs(messages, use_json=False, streaming=True)
+    kwargs = _build_api_kwargs(messages, use_json=False, streaming=True, model=model)
 
     input_tokens  = 0
     output_tokens = 0
@@ -639,7 +643,7 @@ async def _run_map_chunk(i: int, total: int, chunk_text: str) -> tuple[dict, int
                 if attempt > 1:
                     logger.warning(f"[generate_analysis] [{lbl}] retry {attempt}")
                 raw, i_tok, o_tok = await _run_inference_json(
-                    messages, f"{lbl}-a{attempt}"
+                    messages, f"{lbl}-a{attempt}", model=ANALYSE_MODEL
                 )
                 in_tokens  += i_tok
                 out_tokens += o_tok
@@ -718,7 +722,7 @@ async def generate_analysis(merged_text: str) -> tuple[dict, int, int]:
             synth_messages = _build_synth_messages(
                 [r for r in map_results if r.get("overview") or r.get("summary")]
             )
-            raw_synth, s_in, s_out = await _run_inference_json(synth_messages, "synthesis")
+            raw_synth, s_in, s_out = await _run_inference_json(synth_messages, "synthesis", model=ANALYSE_MODEL)
             total_in_tok  += s_in
             total_out_tok += s_out
 
@@ -787,7 +791,7 @@ async def _run_map_chunk_stream(i: int, total: int, chunk_text: str):
 
             try:
                 async for event_type, payload in _run_inference_stream(
-                    messages, f"{lbl}-a{attempt}"
+                    messages, f"{lbl}-a{attempt}", model=ANALYSE_MODEL
                 ):
                     if event_type == "delta":
                         raw_buffer += payload
@@ -912,7 +916,7 @@ async def generate_analysis_stream(merged_text: str):
             synth_messages = _build_synth_messages(
                 [r for r in map_results if r.get("overview") or r.get("summary")]
             )
-            async for event_type, payload in _run_inference_stream(synth_messages, "synthesis"):
+            async for event_type, payload in _run_inference_stream(synth_messages, "synthesis", model=ANALYSE_MODEL):
                 if event_type == "delta":
                     synth_buffer += payload
                     yield ("token", {"chunk": "synthesis", "delta": payload})
