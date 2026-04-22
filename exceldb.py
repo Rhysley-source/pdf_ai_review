@@ -9,4 +9,12 @@ conn = psycopg2.connect(
 )
 
 df = pd.read_sql("SELECT * FROM pdf_analyse_logs", conn)
+
+# 🔥 Remove timezone from all datetime columns
+for col in df.select_dtypes(include=["datetime64[ns, UTC]"]):
+    df[col] = df[col].dt.tz_localize(None)
+
+# Save to Excel
 df.to_excel("table_data.xlsx", index=False)
+
+print("✅ Exported successfully")
