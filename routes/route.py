@@ -175,7 +175,7 @@ async def analyze_pdf(
         # ── Step 5: LLM inference ─────────────────────────────────────────
         logger.info(f"[{request_id}] Step 5/5 — inference start")
         _t = time.perf_counter()
-        final_output, total_in_tok, total_out_tok = await generate_analysis(merged_text, use_mini=True)
+        final_output, total_in_tok, total_out_tok = await generate_analysis(merged_text)
         t_s5 = time.perf_counter() - _t
         logger.info(
             f"[{request_id}] Step 5/5 — inference done ({t_s5:.2f}s) "
