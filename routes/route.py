@@ -197,7 +197,7 @@ async def analyze_pdf(
             logger.debug(f"[{request_id}] temp file deleted")
 
         elapsed = time.perf_counter() - t_start
-        asyncio.create_task(log_request(
+        await log_request(
             request_id        = request_id,
             pdf_name          = file.filename or "unknown",
             pdf_size_bytes    = pdf_size,
@@ -209,8 +209,8 @@ async def analyze_pdf(
             endpoint          = "/analyze",
             status            = status,
             error_message     = error_msg,
-        ))
-        asyncio.create_task(log_analyse_detail(
+        )
+        await log_analyse_detail(
             request_id        = request_id,
             pdf_name          = file.filename or "unknown",
             pdf_size_bytes    = pdf_size,
@@ -236,7 +236,7 @@ async def analyze_pdf(
             endpoint          = "/analyze",
             status            = status,
             error_message     = error_msg,
-        ))
+        )
 
     elapsed = time.perf_counter() - t_start
     logger.info(
