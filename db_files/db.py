@@ -173,6 +173,52 @@ CREATE INDEX IF NOT EXISTS idx_comparison_logs_risk_level
 
 CREATE INDEX IF NOT EXISTS idx_comparison_logs_request_id
     ON comparison_logs (request_id);
+
+-- Detailed per-request analyse logs (step timings + PDF extraction breakdown)
+CREATE TABLE IF NOT EXISTS pdf_analyse_logs (
+    id                  SERIAL PRIMARY KEY,
+    request_id          TEXT        NOT NULL,
+    pdf_name            TEXT        NOT NULL,
+    pdf_size_bytes      INTEGER,
+    total_pages         INTEGER,
+    pages_analysed      INTEGER,
+
+    -- PDF type detected during extraction
+    pdf_type            TEXT,           -- 'native' | 'image_only' | 'mixed'
+
+    -- Page-level extraction breakdown
+    native_pages        INTEGER,
+    ocr_pages           INTEGER,
+    placeholder_pages   INTEGER,
+    blank_pages         INTEGER,
+
+    -- Step durations (seconds)
+    t_upload_s          NUMERIC(10, 3),
+    t_pagecount_s       NUMERIC(10, 3),
+    t_extract_s         NUMERIC(10, 3),
+    t_pymupdf_s         NUMERIC(10, 3),
+    t_ocr_s             NUMERIC(10, 3),
+    t_merge_s           NUMERIC(10, 3),
+    t_session_s         NUMERIC(10, 3),
+    t_inference_s       NUMERIC(10, 3),
+    t_total_s           NUMERIC(10, 3),
+
+    -- LLM token usage
+    input_tokens        INTEGER,
+    output_tokens       INTEGER,
+    total_tokens        INTEGER,
+
+    -- Outcome
+    status              TEXT,
+    error_message       TEXT,
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdf_analyse_logs_request_id
+    ON pdf_analyse_logs (request_id);
+
+CREATE INDEX IF NOT EXISTS idx_pdf_analyse_logs_created_at
+    ON pdf_analyse_logs (created_at DESC);
 """
 
 async def init_db() -> None:
@@ -180,7 +226,7 @@ async def init_db() -> None:
         pool = await get_pool()
         async with pool.acquire() as conn:
             await conn.execute(CREATE_TABLES_SQL)
-        logger.info("[db] Schema initialised (pdf_requests + document_requests + comparison_logs tables ready)")
+        logger.info("[db] Schema initialised (pdf_requests + document_requests + comparison_logs + pdf_analyse_logs tables ready)")
     except Exception as e:
         logger.error(f"[db] Schema init failed: {e}")
         raise
@@ -231,6 +277,88 @@ async def log_request(
         )
     except Exception as e:
         logger.error(f"[db] log_request failed for {request_id}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Log detailed analyse step timings + PDF extraction breakdown
+# ---------------------------------------------------------------------------
+
+async def log_analyse_detail(
+    request_id:        str,
+    pdf_name:          str,
+    pdf_size_bytes:    int   = 0,
+    total_pages:       int   = 0,
+    pages_analysed:    int   = 0,
+    pdf_type:          str | None = None,
+    native_pages:      int   = 0,
+    ocr_pages:         int   = 0,
+    placeholder_pages: int   = 0,
+    blank_pages:       int   = 0,
+    t_upload_s:        float = 0.0,
+    t_pagecount_s:     float = 0.0,
+    t_extract_s:       float = 0.0,
+    t_pymupdf_s:       float = 0.0,
+    t_ocr_s:           float = 0.0,
+    t_merge_s:         float = 0.0,
+    t_session_s:       float = 0.0,
+    t_inference_s:     float = 0.0,
+    t_total_s:         float = 0.0,
+    input_tokens:      int   = 0,
+    output_tokens:     int   = 0,
+    status:            str   = "success",
+    error_message:     str | None = None,
+) -> None:
+    """
+    Write one row to pdf_analyse_logs for every /analyze request.
+    Captures per-step durations, PDF type, and page-level extraction stats.
+    Never raises — DB errors are logged but do not affect the API response.
+    """
+    total_tokens = input_tokens + output_tokens
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO pdf_analyse_logs (
+                    request_id, pdf_name, pdf_size_bytes,
+                    total_pages, pages_analysed,
+                    pdf_type,
+                    native_pages, ocr_pages, placeholder_pages, blank_pages,
+                    t_upload_s, t_pagecount_s, t_extract_s,
+                    t_pymupdf_s, t_ocr_s,
+                    t_merge_s, t_session_s, t_inference_s, t_total_s,
+                    input_tokens, output_tokens, total_tokens,
+                    status, error_message
+                ) VALUES (
+                    $1,  $2,  $3,
+                    $4,  $5,
+                    $6,
+                    $7,  $8,  $9,  $10,
+                    $11, $12, $13,
+                    $14, $15,
+                    $16, $17, $18, $19,
+                    $20, $21, $22,
+                    $23, $24
+                )
+                """,
+                request_id, pdf_name, pdf_size_bytes,
+                total_pages, pages_analysed,
+                pdf_type,
+                native_pages, ocr_pages, placeholder_pages, blank_pages,
+                round(t_upload_s,    3), round(t_pagecount_s, 3), round(t_extract_s,   3),
+                round(t_pymupdf_s,   3), round(t_ocr_s,       3),
+                round(t_merge_s,     3), round(t_session_s,   3),
+                round(t_inference_s, 3), round(t_total_s,     3),
+                input_tokens, output_tokens, total_tokens,
+                status, error_message,
+            )
+        logger.info(
+            f"[db] pdf_analyse_log saved — id={request_id} "
+            f"pdf_type={pdf_type} native={native_pages} ocr={ocr_pages} "
+            f"total={t_total_s:.2f}s status={status}"
+        )
+    except Exception as e:
+        logger.error(f"[db] log_analyse_detail failed for {request_id}: {e}")
 
 
 # ---------------------------------------------------------------------------

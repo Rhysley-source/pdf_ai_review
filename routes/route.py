@@ -13,7 +13,7 @@ from typing import Optional
 from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from llm_model.ai_model import generate_analysis, generate_analysis_stream, transcribe_audio
 from utils.json_utils import extract_json
-from db_files.db import log_request, log_comparison_request
+from db_files.db import log_request, log_comparison_request, log_analyse_detail
 from feature_modules.key_clause_extraction import classify_document, extract_key_clauses, extract_key_clauses_for_compare, extract_text_from_upload
 from feature_modules.risk_detection import analyze_document_risks
 from feature_modules.red_flag_scanner import scan_red_flags
@@ -92,6 +92,7 @@ async def analyze_pdf(
     status        = "success"
     error_msg     = None
     session_id    = None
+    extract_stats: dict = {}
 
     logger.info(f"[{request_id}] ── NEW REQUEST ──────────────────────────────")
     logger.info(f"[{request_id}] filename='{file.filename}' analysis_type={analysis_type}")
@@ -127,8 +128,7 @@ async def analyze_pdf(
 
         # ── Step 3: PDF extraction (PyMuPDF + OCR) ────────────────────────
         try:
-            _t            = time.perf_counter()
-            extract_stats: dict = {}
+            _t = time.perf_counter()
             # ── Non-blocking: OCR runs in thread pool ──────────────────────
             pages = await _load_pdf_async(file_path, pages_to_read, extract_stats)
             t_s3 = time.perf_counter() - _t
@@ -207,6 +207,31 @@ async def analyze_pdf(
             output_tokens     = total_out_tok,
             completion_time_s = elapsed,
             endpoint          = "/analyze",
+            status            = status,
+            error_message     = error_msg,
+        )
+        await log_analyse_detail(
+            request_id        = request_id,
+            pdf_name          = file.filename or "unknown",
+            pdf_size_bytes    = pdf_size,
+            total_pages       = total_pages,
+            pages_analysed    = pages_to_read,
+            pdf_type          = extract_stats.get("pdf_type"),
+            native_pages      = extract_stats.get("native_pages",      0),
+            ocr_pages         = extract_stats.get("ocr_pages",         0),
+            placeholder_pages = extract_stats.get("placeholder_pages", 0),
+            blank_pages       = extract_stats.get("blank_pages",       0),
+            t_upload_s        = t_s1,
+            t_pagecount_s     = t_s2,
+            t_extract_s       = t_s3,
+            t_pymupdf_s       = extract_stats.get("pymupdf_time", 0.0),
+            t_ocr_s           = extract_stats.get("ocr_time",     0.0),
+            t_merge_s         = t_s4,
+            t_session_s       = t_session,
+            t_inference_s     = t_s5,
+            t_total_s         = elapsed,
+            input_tokens      = total_in_tok,
+            output_tokens     = total_out_tok,
             status            = status,
             error_message     = error_msg,
         )

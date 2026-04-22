@@ -495,9 +495,12 @@ def load_pdf(file_path: str, max_pages: int | None = None, _stats: dict | None =
     if _stats is not None:
         _stats.setdefault("pymupdf_time", 0.0)
         _stats.setdefault("native_pages", native_hit)
-        _stats["ocr_time"]  = _t_ocr_total
-        _stats["ocr_pages"] = paddle_count
-        _stats["total_time"] = elapsed
+        _stats["ocr_time"]         = _t_ocr_total
+        _stats["ocr_pages"]        = paddle_count
+        _stats["total_time"]       = elapsed
+        _stats["pdf_type"]         = pdf_type
+        _stats["placeholder_pages"] = placeholder_count
+        _stats["blank_pages"]       = blank_count
 
     # ── Integrity report ──────────────────────────────────────────────────
     logger.info("[pdf_utils] -- EXTRACTION COMPLETE --------------------------")
