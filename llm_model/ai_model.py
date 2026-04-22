@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 MODEL_NAME_OB  = os.environ.get("MODEL_NAME_OB", "gpt-4o")
 MODEL_NAME     = os.environ.get("MODEL_NAME", "gpt-5-nano")
-ANALYSE_MODEL  = os.environ.get("ANALYSE_MODEL", "gpt-4o-mini")
+ANALYSE_MODEL  = os.environ.get("ANALYSE_MODEL", "gpt-5-nano")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 if not OPENAI_API_KEY:
     logger.error("OPENAI_API_KEY is not set in environment variables.")
