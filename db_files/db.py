@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS comparison_logs (
 
     -- Session & request identity
     session_id          UUID NOT NULL,
-    request_id          UUID NOT NULL DEFAULT gen_random_uuid(),
+    request_id          TEXT NOT NULL,
 
     -- Documents compared
     doc1_filename       TEXT NOT NULL,
@@ -231,6 +231,22 @@ async def init_db() -> None:
         pool = await get_pool()
         async with pool.acquire() as conn:
             await conn.execute(CREATE_TABLES_SQL)
+            # Migrate comparison_logs.request_id from UUID → TEXT if the table
+            # already existed with the old UUID column type.
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'comparison_logs'
+                          AND column_name = 'request_id'
+                          AND data_type = 'uuid'
+                    ) THEN
+                        ALTER TABLE comparison_logs
+                            ALTER COLUMN request_id TYPE TEXT USING request_id::TEXT;
+                    END IF;
+                END$$;
+            """)
         logger.info("[db] Schema initialised (pdf_requests + document_requests + comparison_logs + pdf_analyse_logs tables ready)")
     except Exception as e:
         logger.error(f"[db] Schema init failed: {e}")
