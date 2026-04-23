@@ -271,7 +271,12 @@ _ENRICHMENT_SYSTEM = (
 )
 
 
-def _build_enrichment_prompt(changes: list[dict], doc1_text: str, doc2_text: str) -> str:
+def _build_enrichment_prompt(
+    changes: list[dict],
+    doc1_text: str,
+    doc2_text: str,
+    include_insights: bool = True,
+) -> str:
     sorted_changes = sorted(
         changes[:20],
         key=lambda c: {"high": 0, "medium": 1, "low": 2}.get(c["severity"], 3),
@@ -292,65 +297,89 @@ def _build_enrichment_prompt(changes: list[dict], doc1_text: str, doc2_text: str
 
     changes_block = "\n\n".join(lines) or "No changes detected."
 
-    return f"""DETECTED CLAUSE CHANGES ({len(sorted_changes)} shown, sorted by severity):
-{changes_block}
-
-DOCUMENT 1 EXCERPT (original):
-{doc1_text[:1500]}
-
-DOCUMENT 2 EXCERPT (revised):
-{doc2_text[:1500]}
-
-Return ONLY this JSON:
-
-{{
-  "clause_details": {{
-    "<clause_name exactly as written above>": {{
+    if include_insights:
+        json_shape = """\
+{
+  "clause_details": {
+    "<clause_name exactly as written above>": {
       "summary": "<one sentence: what changed and the business impact>",
       "difference_points": [
         "<specific point 1 — name exact value/term that changed, e.g. 'Payment period changed from Net 30 to Net 15'>",
         "<specific point 2 — another concrete difference>",
         "<specific point 3 — add more if needed>"
       ]
-    }}
-  }},
+    }
+  },
   "semantic_insights": [
     "<quantified insight referencing exact values — e.g. 'Liability cap reduced from $500K to $100K'>",
     "<another insight on a different clause>",
     "<which party benefits from these changes and why — name 2-3 specific reasons>"
   ],
   "recommendation": "<2-3 actionable sentences naming specific clauses to negotiate and the target outcome>"
-}}
+}"""
+        doc_excerpt = (
+            f"\nDOCUMENT 1 EXCERPT (original):\n{doc1_text[:1500]}\n\n"
+            f"DOCUMENT 2 EXCERPT (revised):\n{doc2_text[:1500]}\n"
+        )
+    else:
+        # Clause-only prompt — no insights/recommendation needed (faster, fewer tokens)
+        json_shape = """\
+{
+  "clause_details": {
+    "<clause_name exactly as written above>": {
+      "summary": "<one sentence: what changed and the business impact>",
+      "difference_points": [
+        "<specific point 1 — name exact value/term that changed>",
+        "<specific point 2 — another concrete difference>"
+      ]
+    }
+  }
+}"""
+        doc_excerpt = ""
 
-Rules:
-- clause_details key must exactly match the clause_name from the change list
-- difference_points must be specific and concrete — name exact values, dates, amounts, percentages
-- Every modified clause must have at least 2 difference_points
-- Added clauses: difference_points should describe what the new clause introduces
-- Removed clauses: difference_points should describe what protection is lost"""
+    return (
+        f"DETECTED CLAUSE CHANGES ({len(sorted_changes)} shown, sorted by severity):\n"
+        f"{changes_block}\n"
+        f"{doc_excerpt}\n"
+        f"Return ONLY this JSON:\n\n{json_shape}\n\n"
+        "Rules:\n"
+        "- clause_details key must exactly match the clause_name from the change list\n"
+        "- difference_points must be specific and concrete — name exact values, dates, amounts, percentages\n"
+        "- Every modified clause must have at least 2 difference_points\n"
+        "- Added clauses: difference_points should describe what the new clause introduces\n"
+        "- Removed clauses: difference_points should describe what protection is lost"
+    )
 
 
-async def _llm_enrichment(changes: list[dict], text1: str, text2: str) -> dict:
+async def _enrich_group(
+    changes: list[dict],
+    text1: str,
+    text2: str,
+    include_insights: bool = True,
+    label: str = "",
+) -> dict:
+    """Run one LLM enrichment call for a subset of clause changes."""
     empty = {"clause_details": {}, "semantic_insights": [], "recommendation": ""}
     if not changes:
         return empty
 
     try:
-        prompt = _build_enrichment_prompt(changes, text1, text2)
+        prompt = _build_enrichment_prompt(changes, text1, text2, include_insights)
+        max_tokens = 4000 if include_insights else 2000
 
         # Attempt 1
-        raw = await run_llm_mini(prompt, _ENRICHMENT_SYSTEM, max_output_tokens=6000)
+        raw    = await run_llm_mini(prompt, _ENRICHMENT_SYSTEM, max_output_tokens=max_tokens)
         result = extract_json_from_text(raw)
         if result and result.get("clause_details"):
             logger.info(
-                f"[comparison] LLM OK — "
+                f"[comparison{label}] LLM OK — "
                 f"clause_details={len(result.get('clause_details', {}))} "
                 f"insights={len(result.get('semantic_insights', []))}"
             )
             return result
 
         # Attempt 2 — retry with worked example
-        logger.warning("[comparison] LLM attempt 1 weak — retrying with example")
+        logger.warning(f"[comparison{label}] LLM attempt 1 weak — retrying with example")
         ex      = changes[0]
         ex_name = ex["clause_name"]
         ex_e1   = (ex["doc1"].get("excerpt") or "original text")[:60]
@@ -366,26 +395,73 @@ async def _llm_enrichment(changes: list[dict], text1: str, text2: str) -> dict:
             f'      "Original: {ex_e1[:40]} | Revised: {ex_e2[:40]}",\n'
             f'      "Impact: financial exposure increased"\n'
             f'    ]\n'
-            f'  }}}},\n'
-            '  "semantic_insights": ["Specific change with exact values.", "Which party benefits and why."],\n'
-            '  "recommendation": "Negotiate to restore [clause] before signing."\n'
-            "}\n\n"
-            "Now produce the real analysis:\n\n"
-            + prompt
+            f'  }}}}'
         )
+        if include_insights:
+            retry_prompt += (
+                ',\n'
+                '  "semantic_insights": ["Specific change with exact values.", "Which party benefits and why."],\n'
+                '  "recommendation": "Negotiate to restore [clause] before signing."\n'
+            )
+        retry_prompt += "}\n\nNow produce the real analysis:\n\n" + prompt
 
-        raw2   = await run_llm_mini(retry_prompt, _ENRICHMENT_SYSTEM, max_output_tokens=6000)
+        raw2    = await run_llm_mini(retry_prompt, _ENRICHMENT_SYSTEM, max_output_tokens=max_tokens)
         result2 = extract_json_from_text(raw2)
         if result2 and result2.get("clause_details"):
-            logger.info("[comparison] Retry succeeded")
+            logger.info(f"[comparison{label}] Retry succeeded")
             return result2
 
-        logger.error("[comparison] Both LLM enrichment attempts failed — returning empty")
+        logger.error(f"[comparison{label}] Both LLM enrichment attempts failed — returning empty")
         return empty
 
     except Exception as e:
-        logger.exception(f"[comparison] Enrichment error: {e}")
+        logger.exception(f"[comparison{label}] Enrichment error: {e}")
         return empty
+
+
+async def _llm_enrichment(changes: list[dict], text1: str, text2: str) -> dict:
+    """
+    Enrich clause changes with LLM summaries, difference_points, insights,
+    and a negotiation recommendation.
+
+    Splits changes by severity and runs two parallel LLM calls:
+      - high/medium group → clause_details + semantic_insights + recommendation
+      - low group         → clause_details only (smaller prompt, fewer tokens)
+
+    Falls back to a single call when only one severity group is present.
+    """
+    if not changes:
+        return {"clause_details": {}, "semantic_insights": [], "recommendation": ""}
+
+    high_med = [c for c in changes if c["severity"] in ("high", "medium")]
+    low      = [c for c in changes if c["severity"] == "low"]
+
+    # Only one group present — no benefit from splitting
+    if not high_med:
+        return await _enrich_group(low, text1, text2, include_insights=True, label="/low-only")
+    if not low:
+        return await _enrich_group(high_med, text1, text2, include_insights=True, label="/high-med-only")
+
+    # Two groups — run in parallel
+    logger.info(
+        f"[comparison] Parallel enrichment — "
+        f"high/med={len(high_med)} clauses | low={len(low)} clauses"
+    )
+    high_med_result, low_result = await asyncio.gather(
+        _enrich_group(high_med, text1, text2, include_insights=True,  label="/high-med"),
+        _enrich_group(low,      text1, text2, include_insights=False, label="/low"),
+    )
+
+    # Merge clause_details from both groups; insights/recommendation come from high/med call
+    merged_details = {
+        **low_result.get("clause_details", {}),
+        **high_med_result.get("clause_details", {}),  # high/med wins on key collision
+    }
+    return {
+        "clause_details":    merged_details,
+        "semantic_insights": high_med_result.get("semantic_insights", []),
+        "recommendation":    high_med_result.get("recommendation",    ""),
+    }
 
 
 # ---------------------------------------------------------------------------
