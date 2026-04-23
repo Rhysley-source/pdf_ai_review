@@ -853,17 +853,9 @@ async def compare_documents_api(
     session_id = str(uuid.uuid4())
     t_start    = time.perf_counter()
  
-    status              = "success"
-    error_msg           = None
-    duration_ms         = 0
-    total_changes       = 0
-    high_risk_changes   = 0
-    overall_risk_level  = "low"
-    similarity_percent  = ""
-    input_tokens        = 0
-    output_tokens       = 0
-    result      = {}
-    path1 = path2       = None
+    status    = "success"
+    error_msg = None
+    path1 = path2 = None
  
     logger.info(f"[{request_id}] ── COMPARE START ── files=({file1.filename}, {file2.filename})")
  
@@ -966,52 +958,13 @@ async def compare_documents_api(
         status    = "failed"
         error_msg = "HTTP error"
         raise
- 
+
     except Exception as e:
         status    = "failed"
         error_msg = str(e)
         logger.exception(f"[{request_id}] comparison error: {e}")
         raise HTTPException(status_code=500, detail="Document comparison failed.")
-    
-        # Extract metrics for DB logging
-        comp  = result.get("comparison", {})
-        total_changes      = comp.get("total_changes", 0)
-        high_risk_changes  = comp.get("high_risk_changes", 0)
-        overall_risk_level = comp.get("overall_risk_level", "low")
-        similarity_percent = comp.get("text_diff_stats", {}).get("similarity_percent", "")
- 
-    # finally:
-    #     duration_ms = int((time.perf_counter() - t_start) * 1000)
- 
-    #     # ── Step 5: Log to DB ─────────────────────────────────────────────
-    #     log_id = await log_comparison_request(
-    #         session_id=session_id,
-    #         request_id=request_id,
-    #         doc1_filename=file1.filename or "unknown",
-    #         doc2_filename=file2.filename or "unknown",
-    #         status=status,
-    #         duration_ms=duration_ms,
-    #         total_changes=total_changes,
-    #         high_risk_changes=high_risk_changes,
-    #         overall_risk_level=overall_risk_level,
-    #         similarity_percent=similarity_percent,
-    #         result_json=compare_result if status == "success" else None,
-    #         input_tokens=input_tokens,
-    #         output_tokens=output_tokens,
-    #         error_message=error_msg,
-    #     )
- 
-    #     # Cleanup temp files
-    #     for p in [path1, path2]:
-    #         if p and os.path.exists(p):
-    #             os.remove(p)
- 
-    #     logger.info(f"[{request_id}] ── COMPLETE — {duration_ms}ms ──")
- 
-    # # Inject log_id into response (DB layer returns the inserted row id)
-    # if compare_result and log_id:
-    #     compare_result["log_id"] = log_id
-    
+
     finally:
         # Always clean up temp files
         for p in [path1, path2]:

@@ -7,7 +7,6 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from pydantic import BaseModel, Field
 
 from auth import verify_api_key
-from utils.pdf_utils import extract_text_from_pdf
 from feature_modules.document_chat import ingest_document, run_chat, collection_exists
 
 logger = logging.getLogger(__name__)
