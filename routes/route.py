@@ -853,10 +853,13 @@ async def compare_documents_api(
     session_id = str(uuid.uuid4())
     t_start    = time.perf_counter()
  
-    status    = "success"
-    error_msg = None
-    path1 = path2 = None
- 
+    status             = "success"
+    error_msg          = None
+    path1 = path2      = None
+    total_changes      = 0
+    high_risk_changes  = 0
+    overall_risk_level = "low"
+
     logger.info(f"[{request_id}] ── COMPARE START ── files=({file1.filename}, {file2.filename})")
  
     try:
@@ -909,8 +912,9 @@ async def compare_documents_api(
             "clauses":       extraction2.get("key_clauses", []),
         }
 
-        # ── Step 3: Type check — if different, return early ───────────────
+        # ── Step 3: Type check — if different, log and return early ─────────
         if slug1 != slug2:
+            status  = "type_mismatch"
             elapsed = time.perf_counter() - t_start
             logger.info(
                 f"[{request_id}] ── COMPARE ABORTED — type mismatch: {slug1} vs {slug2} | {elapsed:.2f}s"
@@ -937,10 +941,15 @@ async def compare_documents_api(
             session_id=session_id,
         )
 
+        header             = comp_result["comparison"]["header"]
+        total_changes      = header["total_changes"]
+        high_risk_changes  = header["by_severity"]["high"]
+        overall_risk_level = header["overall_risk_level"]
+
         elapsed = time.perf_counter() - t_start
         logger.info(
             f"[{request_id}] ── COMPARE DONE — {elapsed:.2f}s | "
-            f"changes={comp_result['comparison']['header']['total_changes']}"
+            f"changes={total_changes}"
         )
 
         return {
@@ -966,11 +975,22 @@ async def compare_documents_api(
         raise HTTPException(status_code=500, detail="Document comparison failed.")
 
     finally:
-        # Always clean up temp files
         for p in [path1, path2]:
             if p and os.path.exists(p):
                 os.remove(p)
                 logger.debug(f"[{request_id}] temp file deleted: {p}")
 
         duration_ms = int((time.perf_counter() - t_start) * 1000)
+        await log_comparison_request(
+            session_id         = session_id,
+            request_id         = request_id,
+            doc1_filename      = file1.filename or "unknown",
+            doc2_filename      = file2.filename or "unknown",
+            status             = status,
+            duration_ms        = duration_ms,
+            total_changes      = total_changes,
+            high_risk_changes  = high_risk_changes,
+            overall_risk_level = overall_risk_level,
+            error_message      = error_msg,
+        )
         logger.info(f"[{request_id}] ── COMPLETE — {duration_ms}ms status={status} ──")

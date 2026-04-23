@@ -514,12 +514,13 @@ async def compare_documents(
         f"types_match={types_match}"
     )
 
-    high_count   = sum(1 for c in clause_changes if c["severity"] == "high")
-    medium_count = sum(1 for c in clause_changes if c["severity"] == "medium")
-    low_count    = sum(1 for c in clause_changes if c["severity"] == "low")
-    added_count  = sum(1 for c in clause_changes if c["status"] == "added")
-    removed_count= sum(1 for c in clause_changes if c["status"] == "removed")
-    modified_count=sum(1 for c in clause_changes if c["status"] == "modified")
+    risk          = _risk_score(raw_changes)
+    high_count    = sum(1 for c in clause_changes if c["severity"] == "high")
+    medium_count  = sum(1 for c in clause_changes if c["severity"] == "medium")
+    low_count     = sum(1 for c in clause_changes if c["severity"] == "low")
+    added_count   = sum(1 for c in clause_changes if c["status"] == "added")
+    removed_count = sum(1 for c in clause_changes if c["status"] == "removed")
+    modified_count= sum(1 for c in clause_changes if c["status"] == "modified")
 
     return {
         "status":      "success",
@@ -539,7 +540,9 @@ async def compare_documents(
                     "filename":      doc2_filename,
                     "document_type": doc2_type,
                 },
-                "total_changes":  len(clause_changes),
+                "total_changes":      len(clause_changes),
+                "risk_score":         risk["risk_score"],
+                "overall_risk_level": risk["overall_risk_level"],
                 "by_severity": {
                     "high":   high_count,
                     "medium": medium_count,
