@@ -10,7 +10,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as
 
 from paddleocr import PaddleOCRVL
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
+# from langchain.schema import Document
+from langchain_core.documents import Document
 
 # Suppress noisy internal PaddleOCR tensor-copy warning — harmless, not our code
 warnings.filterwarnings(
