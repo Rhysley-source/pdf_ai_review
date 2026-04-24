@@ -35,6 +35,8 @@ _MAX_COMPLETION_TOKENS_MODELS = {
     "o1", "o1-mini", "o3-mini", "o3",
 }
 
+
+ANALYSE_MAX_OUT_TOKENS = 2048   # tighter cap for analyse map+synthesis — limits reasoning depth
 TOKEN_CHUNK_SIZE    = int(os.environ.get("TOKEN_CHUNK_SIZE", "20000"))
 TOKEN_CHUNK_OVERLAP = int(os.environ.get("TOKEN_CHUNK_OVERLAP", "200"))
 MAX_OUTPUT_TOKENS   = 4096
@@ -45,6 +47,7 @@ OPENAI_STREAM_TIMEOUT_S = int(os.environ.get("OPENAI_STREAM_TIMEOUT_S", "120"))
 # ---------------------------------------------------------------------------
 # Module-level semaphore  shared across all requests on this worker
 # ---------------------------------------------------------------------------
+
 _MAP_CONCURRENCY  = int(os.environ.get("MAP_CONCURRENCY", "3"))
 _MAP_SEMAPHORE: asyncio.Semaphore | None = None
 
@@ -419,6 +422,7 @@ async def _run_inference_json(
     """
     tag    = f"[{label}] " if label else ""
     t0     = time.perf_counter()
+
     kwargs = _build_api_kwargs(
         messages,
         use_json=True,
