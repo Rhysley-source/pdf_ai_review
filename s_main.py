@@ -8,9 +8,11 @@ from fastapi.exceptions import RequestValidationError
 
 from routes.route import router
 from routes.convert_route import router as convert_router
+from routes.rag_route import router as rag_router
 from document_generation.document_generator import router as document_generate_router
 from document_validation.validation_router import router as validation_router # NEW IMPORT
 from db_files.db import init_db, close_pool
+from rag.qdrant_client_setup import initialize_collections
 
 # ---------------------------------------------------------------------------
 # Logging 123
@@ -55,6 +57,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Starting up...")
     await init_db()
+    await initialize_collections()
     yield
     await close_pool()
     logger.info("Shutting down.")
@@ -161,6 +164,7 @@ app = FastAPI(
 
 app.include_router(router)
 app.include_router(convert_router)
+app.include_router(rag_router)
 app.include_router(document_generate_router)
 app.include_router(validation_router) # NEW INCLUDE
 
