@@ -184,11 +184,17 @@ def _get_int_env(name: str, default: int) -> int:
 
 # Token budgets per step
 # Step 3 output cap:
-# default 3200 for predictable latency; set MAX_TOKENS_HTML=none (or 0) to remove cap.
-_MAX_TOKENS_HTML      = _get_optional_int_env("MAX_TOKENS_HTML", 3200)
+# default 4200 for predictable latency; set MAX_TOKENS_HTML=none (or 0) to remove cap.
+_MAX_TOKENS_HTML      = _get_optional_int_env("MAX_TOKENS_HTML", 4200)
 _MAX_TOKENS_BLUEPRINT = 4096  # Step 2: detailed pre-filled section plan — needs more room than plain JSON
 _MAX_TOKENS_JSON      = 2048  # Step 1: small JSON classification response
 _HTML_GEN_RETRIES     = _get_int_env("HTML_GEN_RETRIES", 2)  # Step 3 retry attempts
+_MAX_TOKENS_HTML_STEP_UP = _get_int_env("MAX_TOKENS_HTML_STEP_UP", 1200)
+_MAX_TOKENS_HTML_HARD_LIMIT = _get_int_env("MAX_TOKENS_HTML_HARD_LIMIT", 7200)
+_USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY = (
+    (os.environ.get("USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY", "1") or "1").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 
 
 async def _call_llm(
@@ -665,6 +671,23 @@ async def _build_template_context(analysis: dict, user_prompt: str = "") -> dict
     return _parse_blueprint_json(raw, analysis)
 
 
+def _has_meaningful_fields(fields: dict | None) -> bool:
+    """
+    Returns True when Step 1 extracted at least one non-empty field value.
+    """
+    if not isinstance(fields, dict) or not fields:
+        return False
+    for value in fields.values():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, (list, dict)) and not value:
+            continue
+        return True
+    return False
+
+
 def _analysis_summary(analysis: dict) -> dict:
     """
     Extracts the safe, user-facing fields from a Step 1 analysis result.
@@ -696,6 +719,8 @@ async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
         user_request=user_prompt,
     )
 
+    current_max_tokens = _MAX_TOKENS_HTML
+
     for attempt in range(1, _HTML_GEN_RETRIES + 1):
         if attempt == 1:
             logger.info(f"[doc-gen] Step 3: generating HTML for '{context['doc_label']}'...")
@@ -706,8 +731,9 @@ async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
             raw, finish = await _call_llm(
                 system_prompt,
                 user_prompt,
+                max_tokens=current_max_tokens,
                 temperature=0.2,
-                use_seed=True,
+                use_seed=(attempt == 1),
             )
         except Exception:
             if attempt == _HTML_GEN_RETRIES:
@@ -719,6 +745,20 @@ async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
         # Must retry regardless of whether the HTML structure looks valid,
         # because the document content itself is incomplete.
         if finish == "length":
+            if (
+                current_max_tokens is not None
+                and current_max_tokens < _MAX_TOKENS_HTML_HARD_LIMIT
+            ):
+                next_cap = min(
+                    current_max_tokens + _MAX_TOKENS_HTML_STEP_UP,
+                    _MAX_TOKENS_HTML_HARD_LIMIT,
+                )
+                if next_cap > current_max_tokens:
+                    logger.warning(
+                        f"[doc-gen] Step 3: increasing max_tokens_html "
+                        f"{current_max_tokens} -> {next_cap} for retry"
+                    )
+                    current_max_tokens = next_cap
             logger.warning(
                 f"[doc-gen] Step 3: response truncated (finish=length) on attempt "
                 f"{attempt}/{_HTML_GEN_RETRIES} — retrying"
@@ -835,7 +875,22 @@ async def generate_document_html(
         # Step 2: blueprint building (LLM)
         step_started = time.perf_counter()
         try:
-            context = await _build_template_context(analysis, user_prompt=request.user_prompt)
+            request_word_count = len(re.findall(r"[A-Za-z0-9]+", request.user_prompt))
+            has_fields = _has_meaningful_fields(analysis.get("fields"))
+            use_static_blueprint = (
+                _USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY
+                and not has_fields
+                and request_word_count <= 40
+            )
+
+            if use_static_blueprint:
+                logger.info(
+                    "[doc-gen] Step 2: skipping LLM blueprint "
+                    "(no extracted fields + short prompt) - using static template"
+                )
+                context = _static_template_context(analysis)
+            else:
+                context = await _build_template_context(analysis, user_prompt=request.user_prompt)
         except HTTPException:
             raise
         except Exception as e:
