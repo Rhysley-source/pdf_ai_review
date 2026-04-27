@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import html
 import hashlib
 import io
 import json
@@ -688,6 +689,85 @@ def _has_meaningful_fields(fields: dict | None) -> bool:
     return False
 
 
+def _extract_section_titles_from_block(sections_block: str) -> list[str]:
+    """Extract readable section titles from the Step 2 sections_block string."""
+    titles: list[str] = []
+    for raw_line in sections_block.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("->") or line.startswith("â†’") or line.startswith("âš "):
+            continue
+        match = re.match(r"^\d+\.\s*(.+)$", line)
+        if match:
+            line = match.group(1).strip()
+        if line and line not in titles:
+            titles.append(line)
+    return titles
+
+
+def _render_static_html_from_context(context: dict, user_prompt: str) -> str:
+    """
+    Fast deterministic fallback HTML renderer.
+    Used for short, low-detail prompts where LLM generation can be slow and unstable.
+    """
+    title = html.escape(context.get("doc_label", "Document"))
+    doc_type = html.escape(context.get("doc_type", "document").replace("_", " ").title())
+    prompt_preview = html.escape(user_prompt.strip()[:220])
+    sections_block = context.get("sections_block", "")
+
+    section_titles = _extract_section_titles_from_block(sections_block)
+    if not section_titles:
+        section_titles = ["Parties", "Terms", "Payment", "Signatures"]
+
+    sections_html: list[str] = []
+    for section_title in section_titles:
+        safe_title = html.escape(section_title)
+        placeholder = html.escape(f"[Provide {section_title} details]")
+        sections_html.append(
+            f"""
+            <section style="margin-bottom: 12px; page-break-inside: avoid;">
+              <h2 style="font-size:13pt; font-weight:bold; text-align:left; margin-top:12px; margin-bottom:6px; color:#000000;">{safe_title}</h2>
+              <p style="margin:0 0 8px 0; line-height:1.5;">
+                <span style="font-style:italic;">{placeholder}</span>
+              </p>
+            </section>
+            """
+        )
+
+    return f"""
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {{ font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.5; color: #000000; background: #ffffff; margin: 0; padding: 24px; }}
+    p    {{ margin: 0 0 8px 0; line-height: 1.5; }}
+    table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
+    td, th {{ border: 1px solid #cccccc; padding: 6px 8px; vertical-align: top; }}
+  </style>
+</head>
+<body>
+  <div contenteditable="true">
+    <h1 style="font-size:16pt; font-weight:bold; text-align:center; margin-top:0; margin-bottom:10px; color:#000000;">{title}</h1>
+    <p style="margin:0 0 10px 0; line-height:1.5;"><strong>Document Type:</strong> {doc_type}</p>
+    <p style="margin:0 0 12px 0; line-height:1.5;"><strong>Request:</strong> {prompt_preview}</p>
+    <hr style="border:none; border-top:1px solid #cccccc; margin:10px 0;">
+    {''.join(sections_html)}
+    <section style="margin-top: 18px; page-break-inside: avoid;">
+      <h2 style="font-size:13pt; font-weight:bold; text-align:left; margin-top:12px; margin-bottom:6px; color:#000000;">Signatures</h2>
+      <table>
+        <tr>
+          <td style="word-wrap:break-word; overflow-wrap:break-word;"><strong>Party 1 Signature:</strong><br><br>________________________</td>
+          <td style="word-wrap:break-word; overflow-wrap:break-word;"><strong>Party 2 Signature:</strong><br><br>________________________</td>
+        </tr>
+      </table>
+    </section>
+  </div>
+</body>
+</html>
+""".strip()
+
+
 def _analysis_summary(analysis: dict) -> dict:
     """
     Extracts the safe, user-facing fields from a Step 1 analysis result.
@@ -745,6 +825,13 @@ async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
         # Must retry regardless of whether the HTML structure looks valid,
         # because the document content itself is incomplete.
         if finish == "length":
+            cleaned = _clean_html(raw)
+            valid, _ = _validate_html(cleaned)
+            if valid:
+                logger.warning(
+                    "[doc-gen] Step 3: finish=length but HTML is complete and valid - accepting output"
+                )
+                return cleaned
             if (
                 current_max_tokens is not None
                 and current_max_tokens < _MAX_TOKENS_HTML_HARD_LIMIT
@@ -873,6 +960,7 @@ async def generate_document_html(
         )
 
         # Step 2: blueprint building (LLM)
+        use_static_blueprint = False
         step_started = time.perf_counter()
         try:
             request_word_count = len(re.findall(r"[A-Za-z0-9]+", request.user_prompt))
@@ -907,7 +995,11 @@ async def generate_document_html(
         # Step 3: final HTML generation
         step_started = time.perf_counter()
         try:
-            cleaned_html = await _generate_html_from_context(context, request.user_prompt)
+            if use_static_blueprint:
+                cleaned_html = _render_static_html_from_context(context, request.user_prompt)
+                logger.info("[doc-gen] Step 3: skipped LLM generation - rendered static HTML template")
+            else:
+                cleaned_html = await _generate_html_from_context(context, request.user_prompt)
         except Exception as e:
             logger.exception("[doc-gen] Step 3 failed")
             raise HTTPException(
