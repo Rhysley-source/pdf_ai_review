@@ -192,7 +192,7 @@ _MAX_TOKENS_JSON      = 2048  # Step 1: small JSON classification response
 _HTML_GEN_RETRIES     = _get_int_env("HTML_GEN_RETRIES", 2)  # Step 3 retry attempts
 _MAX_TOKENS_HTML_STEP_UP = _get_int_env("MAX_TOKENS_HTML_STEP_UP", 1200)
 _MAX_TOKENS_HTML_HARD_LIMIT = _get_int_env("MAX_TOKENS_HTML_HARD_LIMIT", 7200)
-_COMPACT_HTML_MAX_TOKENS = _get_int_env("COMPACT_HTML_MAX_TOKENS", 1800)
+_COMPACT_HTML_MAX_TOKENS = _get_int_env("COMPACT_HTML_MAX_TOKENS", 2400)
 _COMPACT_HTML_RETRIES = _get_int_env("COMPACT_HTML_RETRIES", 2)
 _USE_STATIC_BLUEPRINT_FOR_SIMPLE_PROMPTS = (
     (os.environ.get("USE_STATIC_BLUEPRINT_FOR_SIMPLE_PROMPTS", "1") or "1").strip().lower()
@@ -202,10 +202,10 @@ _ENABLE_HEURISTIC_ANALYSIS = (
     (os.environ.get("ENABLE_HEURISTIC_ANALYSIS", "1") or "1").strip().lower()
     in {"1", "true", "yes", "on"}
 )
-_SIMPLE_PROMPT_WORD_LIMIT = _get_int_env("SIMPLE_PROMPT_WORD_LIMIT", 48)
-_SIMPLE_PROMPT_FIELD_LIMIT = _get_int_env("SIMPLE_PROMPT_FIELD_LIMIT", 6)
-_COMPACT_PROMPT_WORD_LIMIT = _get_int_env("COMPACT_PROMPT_WORD_LIMIT", 70)
-_COMPACT_PROMPT_FIELD_LIMIT = _get_int_env("COMPACT_PROMPT_FIELD_LIMIT", 10)
+_SIMPLE_PROMPT_WORD_LIMIT = _get_int_env("SIMPLE_PROMPT_WORD_LIMIT", 32)
+_SIMPLE_PROMPT_FIELD_LIMIT = _get_int_env("SIMPLE_PROMPT_FIELD_LIMIT", 4)
+_COMPACT_PROMPT_WORD_LIMIT = _get_int_env("COMPACT_PROMPT_WORD_LIMIT", 36)
+_COMPACT_PROMPT_FIELD_LIMIT = _get_int_env("COMPACT_PROMPT_FIELD_LIMIT", 6)
 
 
 async def _call_llm(
@@ -949,8 +949,8 @@ async def _generate_html_from_context(
         sections_block = context.get("sections_block", "")
         compact_titles = _extract_section_titles_from_block(sections_block)
         if compact_titles:
-            if len(compact_titles) > 6:
-                compact_titles = compact_titles[:6] + ["Additional Terms"]
+            if len(compact_titles) > 8:
+                compact_titles = compact_titles[:8] + ["Additional Terms and Conditions"]
             sections_block = "\n".join(
                 f"{i}. {title}" for i, title in enumerate(compact_titles, 1)
             )
@@ -974,7 +974,7 @@ Rules:
 - Return ONLY HTML from <html> to </html>.
 - Include <head> with one embedded <style> block and <body>.
 - Keep content inside one outer <div contenteditable="true">.
-- Keep output concise and complete (about 300-500 words).
+- Keep output concise and complete (about 600-900 words).
 - If details are missing, use specific placeholders like [Landlord Name], [Property Address], [Start Date].
 - Use clean print-friendly formatting (Arial, white background, simple tables where needed).
 - Do not use markdown fences.
