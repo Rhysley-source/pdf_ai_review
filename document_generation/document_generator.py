@@ -711,6 +711,22 @@ def _has_meaningful_fields(fields: dict | None) -> bool:
     return False
 
 
+def _count_meaningful_fields(fields: dict | None) -> int:
+    """Returns how many extracted fields have a non-empty value."""
+    if not isinstance(fields, dict) or not fields:
+        return 0
+    count = 0
+    for value in fields.values():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, (list, dict)) and not value:
+            continue
+        count += 1
+    return count
+
+
 def _extract_section_titles_from_block(sections_block: str) -> list[str]:
     """Extract readable section titles from the Step 2 sections_block string."""
     titles: list[str] = []
@@ -819,6 +835,14 @@ async def _generate_html_from_context(
     and reduce truncation risk.
     """
     if compact_mode:
+        sections_block = context.get("sections_block", "")
+        if len(sections_block) > 1200:
+            compact_titles = _extract_section_titles_from_block(sections_block)
+            if compact_titles:
+                sections_block = "\n".join(
+                    f"{i}. {title}" for i, title in enumerate(compact_titles, 1)
+                )
+
         # Short prompts without extracted fields can still trigger huge output
         # with the full prompt. Use a lighter prompt to keep responses complete.
         system_prompt = f"""You are an expert legal document HTML generator.
@@ -829,7 +853,7 @@ Tone: {context.get("tone", "professional")}
 Layout Notes: {context.get("layout_notes", "Standard document layout")}
 
 Sections to include in this order:
-{context.get("sections_block", "")}
+{sections_block}
 
 User request:
 {user_prompt}
@@ -908,6 +932,18 @@ Rules:
                         f"{current_max_tokens} -> {next_cap} for retry"
                     )
                     current_max_tokens = next_cap
+
+            if not compact_mode and attempt == 1:
+                logger.warning(
+                    "[doc-gen] Step 3: full-generation truncated - switching to compact fallback"
+                )
+                compact_html = await _generate_html_from_context(
+                    context,
+                    user_prompt,
+                    compact_mode=True,
+                )
+                if compact_html.strip():
+                    return compact_html
 
             if attempt < retries:
                 logger.warning(
@@ -1040,9 +1076,12 @@ async def generate_document_html(
 
         # Step 2: blueprint building (LLM)
         use_static_blueprint = False
+        use_compact_generation = False
+        request_word_count = len(re.findall(r"[A-Za-z0-9]+", request.user_prompt))
+        meaningful_field_count = _count_meaningful_fields(analysis.get("fields"))
+
         step_started = time.perf_counter()
         try:
-            request_word_count = len(re.findall(r"[A-Za-z0-9]+", request.user_prompt))
             has_fields = _has_meaningful_fields(analysis.get("fields"))
             use_static_blueprint = (
                 _USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY
@@ -1056,8 +1095,14 @@ async def generate_document_html(
                     "(no extracted fields + short prompt) - using static blueprint context"
                 )
                 context = _static_template_context(analysis)
+                use_compact_generation = True
             else:
                 context = await _build_template_context(analysis, user_prompt=request.user_prompt)
+
+            # For short prompts with only a few explicit values, compact generation
+            # avoids long-token full generation while still using OpenAI output.
+            if request_word_count <= 28 and meaningful_field_count <= 5:
+                use_compact_generation = True
         except HTTPException:
             raise
         except Exception as e:
@@ -1074,8 +1119,8 @@ async def generate_document_html(
         # Step 3: final HTML generation
         step_started = time.perf_counter()
         try:
-            if use_static_blueprint:
-                logger.info("[doc-gen] Step 3: using compact OpenAI generation (static blueprint context)")
+            if use_compact_generation:
+                logger.info("[doc-gen] Step 3: using compact OpenAI generation")
                 cleaned_html = await _generate_html_from_context(
                     context,
                     request.user_prompt,
