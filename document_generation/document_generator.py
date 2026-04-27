@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import time
 import uuid
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -144,11 +145,50 @@ _MAX_COMPLETION_TOKENS_MODELS = {
     "o1", "o1-mini", "o3-mini", "o3",
 }
 
+
+def _get_optional_int_env(name: str, default: int | None) -> int | None:
+    """
+    Parses an optional integer environment variable.
+    Returns `default` when unset/invalid.
+    Returns None when set to "none" or "0" (explicitly disabling the cap).
+    """
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"none", "0"}:
+        return None
+    try:
+        value = int(raw)
+        if value <= 0:
+            return default
+        return value
+    except ValueError:
+        logger.warning(f"[doc-gen] Invalid {name}='{raw}' - using default={default}")
+        return default
+
+
+def _get_int_env(name: str, default: int) -> int:
+    """Parses an integer environment variable with a safe fallback."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+        if value <= 0:
+            return default
+        return value
+    except ValueError:
+        logger.warning(f"[doc-gen] Invalid {name}='{raw}' - using default={default}")
+        return default
+
+
 # Token budgets per step
-_MAX_TOKENS_HTML      = None  # Step 3: no cap — documents can be any size; model uses its own maximum
+# Step 3 output cap:
+# default 3200 for predictable latency; set MAX_TOKENS_HTML=none (or 0) to remove cap.
+_MAX_TOKENS_HTML      = _get_optional_int_env("MAX_TOKENS_HTML", 3200)
 _MAX_TOKENS_BLUEPRINT = 4096  # Step 2: detailed pre-filled section plan — needs more room than plain JSON
 _MAX_TOKENS_JSON      = 2048  # Step 1: small JSON classification response
-_HTML_GEN_RETRIES     = 3     # Step 3 retry attempts on empty/null response
+_HTML_GEN_RETRIES     = _get_int_env("HTML_GEN_RETRIES", 2)  # Step 3 retry attempts
 
 
 async def _call_llm(
@@ -185,7 +225,7 @@ async def _call_llm(
         kwargs["temperature"] = temperature if temperature is not None else 0
 
     # Token limit — omitted when None so the model uses its own built-in maximum.
-    # Steps 1+2 always pass an explicit limit; Step 3 (HTML generation) passes None.
+    # Steps 1+2 always pass explicit limits; Step 3 uses _MAX_TOKENS_HTML.
     if max_tokens is not None:
         if model in _MAX_COMPLETION_TOKENS_MODELS:
             kwargs["max_completion_tokens"] = max_tokens
@@ -768,9 +808,15 @@ async def generate_document_html(
         raise HTTPException(status_code=422, detail=_err_invalid_prompt(request.user_prompt))
 
     doc_id = request.document_id or str(uuid.uuid4())
+    request_started = time.perf_counter()
+    logger.info(
+        f"[doc-gen] /generate-html start doc_id={doc_id} "
+        f"max_tokens_html={_MAX_TOKENS_HTML} retries={_HTML_GEN_RETRIES}"
+    )
 
     try:
         # Step 1: query analysis
+        step_started = time.perf_counter()
         try:
             analysis = await _analyze_query(request.user_prompt)
         except HTTPException:
@@ -781,8 +827,13 @@ async def generate_document_html(
                 status_code=502,
                 detail=_err_model_failed("Query Analysis", request.user_prompt, str(e)),
             )
+        logger.info(
+            f"[doc-gen] Step 1 complete in {time.perf_counter() - step_started:.2f}s "
+            f"doc_type={analysis.get('doc_type', 'other')}"
+        )
 
         # Step 2: blueprint building (LLM)
+        step_started = time.perf_counter()
         try:
             context = await _build_template_context(analysis, user_prompt=request.user_prompt)
         except HTTPException:
@@ -793,8 +844,13 @@ async def generate_document_html(
                 status_code=502,
                 detail=_err_model_failed("Blueprint Building", request.user_prompt, str(e)),
             )
+        logger.info(
+            f"[doc-gen] Step 2 complete in {time.perf_counter() - step_started:.2f}s "
+            f"doc_label='{context.get('doc_label', 'Document')}'"
+        )
 
         # Step 3: final HTML generation
+        step_started = time.perf_counter()
         try:
             cleaned_html = await _generate_html_from_context(context, request.user_prompt)
         except Exception as e:
@@ -803,6 +859,7 @@ async def generate_document_html(
                 status_code=502,
                 detail=_err_model_failed("HTML Generation", request.user_prompt, str(e)),
             )
+        logger.info(f"[doc-gen] Step 3 complete in {time.perf_counter() - step_started:.2f}s")
 
         valid, reason = _validate_html(cleaned_html)
         if not valid:
@@ -824,12 +881,21 @@ async def generate_document_html(
                 },
             )
 
+        total_s = time.perf_counter() - request_started
+        logger.info(f"[doc-gen] /generate-html success doc_id={doc_id} total={total_s:.2f}s")
         return HTMLResponse(content=cleaned_html, headers={"X-Document-Id": doc_id})
 
-    except HTTPException:
+    except HTTPException as exc:
+        logger.warning(
+            f"[doc-gen] /generate-html failed doc_id={doc_id} "
+            f"status={exc.status_code} total={time.perf_counter() - request_started:.2f}s"
+        )
         raise
     except Exception as e:
-        logger.exception("[doc-gen] Unexpected error in /generate-html")
+        logger.exception(
+            f"[doc-gen] Unexpected error in /generate-html after "
+            f"{time.perf_counter() - request_started:.2f}s"
+        )
         raise HTTPException(
             status_code=500,
             detail={
