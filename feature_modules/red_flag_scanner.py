@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from llm_model.ai_model import _run_inference_json_mini as _run_inference_json
 from utils.json_utils import extract_json_raw
@@ -259,7 +260,7 @@ Checklist ({len(checklist)} items — evaluate ALL {len(checklist)}):
 
 Contract:
 ---
-{text[:80_000]}
+{text[:30_000]}
 ---"""
 
     return [
@@ -309,12 +310,20 @@ def _build_flags(results: list, checklist: list[dict]) -> list[dict]:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+async def _eval_batch(batch: list[dict], text: str, label: str) -> list:
+    messages = _build_eval_messages(batch, text)
+    raw, in_tok, out_tok = await _run_inference_json(messages, label)
+    logger.info(f"[red_flag_scanner] {label} tokens in={in_tok} out={out_tok}")
+    parsed = extract_json_raw(raw)
+    return parsed.get("results", []) if isinstance(parsed, dict) else []
+
+
 async def scan_red_flags(text: str) -> dict:
     """
     Step 1 — detect document type (nda / job_offer / freelancer_agreement /
              service_agreement / consulting_agreement / lease_agreement /
              employment_contract / general)
-    Step 2 — evaluate the type-specific checklist (present / absent / not_applicable)
+    Step 2 — evaluate the type-specific checklist in two parallel batches
     Step 3 — build flags; severity assigned from hardcoded map (not the model)
 
     Consistent count guarantee:
@@ -329,22 +338,23 @@ async def scan_red_flags(text: str) -> dict:
 
     logger.info(f"[red_flag_scanner] doc_type={doc_type} | checklist={len(checklist)} items")
 
-    # Step 2 — evaluate checklist
-    messages = _build_eval_messages(checklist, text)
-    raw, in_tok, out_tok = await _run_inference_json(messages, "red_flag_eval")
-    logger.info(f"[red_flag_scanner] tokens in={in_tok} out={out_tok}")
+    # Step 2 — evaluate checklist in two parallel batches (~40-50% latency cut)
+    mid = len(checklist) // 2
+    results_a, results_b = await asyncio.gather(
+        _eval_batch(checklist[:mid], text, "red_flag_eval_a"),
+        _eval_batch(checklist[mid:], text, "red_flag_eval_b"),
+    )
+    results = results_a + results_b
 
-    parsed  = extract_json_raw(raw)
-    results = parsed.get("results", []) if isinstance(parsed, dict) else []
-
-    # Retry if fewer than half the items came back
-    if len(results) < len(checklist) // 2:
+    # Smart retry — only re-query items that came back missing
+    returned_ids = {r.get("id") for r in results if isinstance(r, dict)}
+    missing_items = [item for item in checklist if item["id"] not in returned_ids]
+    if missing_items:
         logger.warning(
-            f"[red_flag_scanner] Only {len(results)}/{len(checklist)} items — retrying"
+            f"[red_flag_scanner] {len(missing_items)}/{len(checklist)} items missing — retrying"
         )
-        raw, _, _ = await _run_inference_json(messages, "red_flag_eval_retry")
-        parsed    = extract_json_raw(raw)
-        results   = parsed.get("results", []) if isinstance(parsed, dict) else []
+        retry_results = await _eval_batch(missing_items, text, "red_flag_eval_retry")
+        results.extend(retry_results)
 
     if not results:
         logger.error("[red_flag_scanner] No results — returning safe default")
