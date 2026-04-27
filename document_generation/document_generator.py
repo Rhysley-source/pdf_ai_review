@@ -600,11 +600,17 @@ def _parse_blueprint_json(raw: str, analysis: dict) -> dict:
         logger.warning("[doc-gen] Step 2: empty sections in blueprint — falling back to static template")
         return _static_template_context(analysis)
 
+    # Build the sections_block string for Step 3 — include missing_fields so
+    # Step 3 knows exactly which placeholders to render visibly in the document.
     lines = []
     for i, sec in enumerate(sections, 1):
-        title        = sec.get("title", f"Section {i}")
-        content_hint = sec.get("content_hint", "")
-        lines.append(f"{i}. {title}\n   → {content_hint}")
+        title          = sec.get("title", f"Section {i}")
+        content_hint   = sec.get("content_hint", "")
+        missing        = sec.get("missing_fields", [])
+        entry          = f"{i}. {title}\n   → {content_hint}"
+        if missing:
+            entry += f"\n   ⚠ Missing fields (use visible placeholders): {', '.join(missing)}"
+        lines.append(entry)
     sections_block = "\n\n".join(lines)
 
     # document_title from blueprint overrides the generic doc_label for the
@@ -735,7 +741,11 @@ async def _analyze_and_build(user_prompt: str) -> dict:
     for i, sec in enumerate(sections, 1):
         title        = sec.get("title", f"Section {i}")
         content_hint = sec.get("content_hint", "")
-        lines.append(f"{i}. {title}\n   → {content_hint}")
+        missing      = sec.get("missing_fields", [])
+        entry        = f"{i}. {title}\n   → {content_hint}"
+        if missing:
+            entry += f"\n   ⚠ Missing fields (use visible placeholders): {', '.join(missing)}"
+        lines.append(entry)
 
     doc_label      = parsed.get("doc_label", "Document")
     document_title = (parsed.get("document_title") or "").strip() or doc_label
@@ -965,7 +975,7 @@ Rules:
 - Include <head> with one embedded <style> block and <body>.
 - Keep content inside one outer <div contenteditable="true">.
 - Keep output concise and complete (about 500-800 words).
-- Write complete, realistic content for every section — never use placeholders or brackets.
+- If details are missing, use specific placeholders like [Landlord Name], [Property Address], [Start Date].
 - Use clean print-friendly formatting (Arial, white background, simple tables where needed).
 - Do not use markdown fences.
 """
