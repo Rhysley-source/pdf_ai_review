@@ -611,6 +611,63 @@ Return ONLY this JSON — no markdown, no explanation:
 
 
 # ---------------------------------------------------------------------------
+# COMBINED Step 1+2 — Analysis + Blueprint in a single fast-model call.
+# Replaces the sequential _analyze_query → _build_template_context round-trips.
+# ---------------------------------------------------------------------------
+
+COMBINED_ANALYSIS_BLUEPRINT_PROMPT = SimulatedPromptTemplate(
+    template="""You are a document analysis and blueprint specialist. Read the user's request and return ONLY a single valid JSON object — no markdown, no backticks, no explanation.
+
+In one pass you must:
+1. Detect whether the request is asking to generate, create, or draft a document.
+2. If yes, classify the document type, extract all field values, and build a complete pre-filled section blueprint.
+
+Required JSON keys:
+  "is_document_request" : true | false
+  "doc_type"  : exactly one of: invoice | contract | employment | nda | lease | resume |
+                certificate | report | proposal | purchase_order | letter | other
+                (use "other" when is_document_request is false)
+  "doc_label" : short human-readable name, max 6 words (e.g. "Tax Invoice", "Service Agreement")
+                (use "" when is_document_request is false)
+  "document_title" : exact title to display at the top of the document (e.g. "TAX INVOICE", "RENT AGREEMENT")
+                     (use "" when is_document_request is false)
+  "sections"  : array of section objects — see rules below (use [] when is_document_request is false)
+  "tone"      : "formal" | "professional" | "friendly" | "technical" (use "" when is_document_request is false)
+  "layout_notes" : specific layout instruction describing table structures, column arrangements,
+                   and signature block layout (use "" when is_document_request is false)
+
+Standard sections by document type:
+  invoice        : Invoice Header (number, date, due date) | Bill From | Bill To | Line Items Table | Subtotal/Tax/Total | Payment Instructions | Notes/Terms
+  contract       : Parties | Recitals | Scope of Work | Term and Renewal | Fees and Payment | Intellectual Property | Confidentiality | Limitation of Liability | Termination | Governing Law | General Provisions | Signature Block
+  employment     : Date and Addressee | Offer of Employment | Job Title and Department | Compensation and Benefits | Start Date and Work Location | Probation Period | Notice Period | Confidentiality and IP | Code of Conduct | Acceptance Deadline | Signature Block
+  nda            : Parties and Recitals | Definitions | Exclusions | Obligations of Receiving Party | Permitted Disclosures | Term and Termination | Return of Materials | Remedies | Governing Law | Signature Block
+  lease          : Parties | Property Description | Lease Term | Monthly Rent and Due Date | Security Deposit | Utilities and Maintenance | Permitted Use and Restrictions | Termination and Notice | Move-out Conditions | Governing Law | Signature Block with Witness Lines
+  resume         : Header (name, email, phone, location, LinkedIn) | Professional Summary | Work Experience | Education | Skills | Certifications | Projects
+  certificate    : Certificate Title | Awarded To | Body Text | Date of Award | Issuer Name and Title | Signature Line
+  report         : Title and Metadata | Executive Summary | Introduction | Methodology | Findings/Analysis | Conclusions | Recommendations | Appendices
+  proposal       : Cover Page | Executive Summary | Problem Statement | Proposed Solution | Scope of Work | Timeline and Milestones | Pricing/Budget | About Us | Terms and Conditions | Call to Action
+  purchase_order : PO Header | Vendor Details | Line Items Table | Delivery Details | Payment Terms | Special Instructions | Authorized Signature
+  letter         : Sender Details and Date | Recipient Name and Address | Subject Line | Salutation | Body | Complimentary Close | Signature Block
+  other          : Document Title | Parties | Introduction/Purpose | Main Content | Terms and Conditions | Closing | Signature Block
+
+Section object structure:
+  {
+    "title": "<section heading>",
+    "content_hint": "<complete pre-filled description — embed ALL known values: names, amounts, dates, addresses, durations. Mark every missing required value as a bracketed placeholder using the EXACT field label, e.g. [Email Address], [Phone Number], [Job Title]. NEVER use generic [Field Name] or [Client Name].>",
+    "missing_fields": ["<field names not provided in the request>"]
+  }
+
+Rules:
+1. Include EVERY standard section for the detected doc type PLUS any extra sections the user explicitly requested.
+2. content_hint must be fully pre-filled with actual values — not "value goes here".
+3. layout_notes must describe the exact table/column structure (not just "standard layout").
+4. Extract ALL details from the request: names, companies, dates, amounts, roles, addresses, durations, quantities.
+5. Return ONLY raw JSON — no markdown fences, no explanation, no wrapper text.""",
+    input_variables=[],
+)
+
+
+# ---------------------------------------------------------------------------
 # Intent check prompt — kept for backward compatibility (currently unused).
 # ---------------------------------------------------------------------------
 

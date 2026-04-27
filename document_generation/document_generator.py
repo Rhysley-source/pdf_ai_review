@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from .prompt_templates import (
     QUERY_ANALYSIS_PROMPT,
     TEMPLATE_BUILD_PROMPT,
+    COMBINED_ANALYSIS_BLUEPRINT_PROMPT,
     DOCUMENT_GENERATION_V2_PROMPT,
     REGENERATION_INTENT_PROMPT,
     SECTION_TEMPLATES,
@@ -146,8 +147,9 @@ _MAX_COMPLETION_TOKENS_MODELS = {
 
 # Token budgets per step
 _MAX_TOKENS_HTML      = None  # Step 3: no cap — documents can be any size; model uses its own maximum
-_MAX_TOKENS_BLUEPRINT = 4096  # Step 2: detailed pre-filled section plan — needs more room than plain JSON
-_MAX_TOKENS_JSON      = 2048  # Step 1: small JSON classification response
+_MAX_TOKENS_COMBINED  = 6144  # Steps 1+2 combined: analysis JSON + full blueprint sections
+_MAX_TOKENS_BLUEPRINT = 4096  # Step 2 (legacy, kept for fallback use)
+_MAX_TOKENS_JSON      = 2048  # Step 1 (legacy, kept for fallback use)
 _HTML_GEN_RETRIES     = 3     # Step 3 retry attempts on empty/null response
 
 
@@ -625,6 +627,83 @@ async def _build_template_context(analysis: dict, user_prompt: str = "") -> dict
     return _parse_blueprint_json(raw, analysis)
 
 
+def _parse_combined_json(raw: str, user_prompt: str) -> dict:
+    """
+    Parses the combined Steps 1+2 response into a context dict ready for Step 3.
+    Raises HTTP 422 if not a document request.
+    Falls back to static template on JSON parse failure or empty sections.
+    """
+    cleaned = raw.strip()
+    if "```" in cleaned:
+        cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        logger.warning("[doc-gen] Combined step: JSON parse failed — falling back to static template")
+        return _static_template_context({"doc_type": "other", "doc_label": "Document", "fields": {}})
+
+    if not parsed.get("is_document_request", False):
+        raise HTTPException(
+            status_code=422,
+            detail=_err_not_document_request(user_prompt),
+        )
+
+    doc_type = parsed.get("doc_type", "other")
+    if doc_type not in SECTION_TEMPLATES:
+        doc_type = "other"
+
+    sections = parsed.get("sections", [])
+    if not isinstance(sections, list) or not sections:
+        logger.warning("[doc-gen] Combined step: empty sections — falling back to static template")
+        return _static_template_context({
+            "doc_type": doc_type,
+            "doc_label": parsed.get("doc_label", "Document"),
+            "fields": {},
+        })
+
+    lines = []
+    for i, sec in enumerate(sections, 1):
+        title        = sec.get("title", f"Section {i}")
+        content_hint = sec.get("content_hint", "")
+        missing      = sec.get("missing_fields", [])
+        entry        = f"{i}. {title}\n   → {content_hint}"
+        if missing:
+            entry += f"\n   ⚠ Missing fields (use visible placeholders): {', '.join(missing)}"
+        lines.append(entry)
+    sections_block = "\n\n".join(lines)
+
+    doc_label      = parsed.get("doc_label", "Document")
+    document_title = (parsed.get("document_title") or "").strip() or doc_label
+
+    return {
+        "doc_type":       doc_type,
+        "doc_label":      document_title,
+        "tone":           parsed.get("tone", "professional"),
+        "layout_notes":   parsed.get("layout_notes", "Standard document layout."),
+        "sections_block": sections_block,
+    }
+
+
+async def _analyze_and_build_blueprint(user_prompt: str) -> dict:
+    """
+    Combined Steps 1+2: single fast-model call that detects doc type,
+    extracts fields, and builds a pre-filled section blueprint.
+    Saves one LLM round-trip vs. calling _analyze_query + _build_template_context separately.
+    """
+    logger.info("[doc-gen] Steps 1+2 (combined): analysing and building blueprint (fast model)...")
+    raw, _ = await _call_llm(
+        COMBINED_ANALYSIS_BLUEPRINT_PROMPT.template,
+        user_prompt,
+        model=_FAST_MODEL,
+        max_tokens=_MAX_TOKENS_COMBINED,
+        temperature=0,
+        use_seed=True,
+    )
+    logger.info(f"[doc-gen] Steps 1+2 raw output: {raw[:300]}")
+    return _parse_combined_json(raw, user_prompt)
+
+
 def _analysis_summary(analysis: dict) -> dict:
     """
     Extracts the safe, user-facing fields from a Step 1 analysis result.
@@ -759,10 +838,9 @@ async def generate_document_html(
     _: None = Depends(verify_api_key),
 ):
     """
-    3-step pipeline:
-      Step 1 (LLM)    — detect document type + extract field values from user_prompt
-      Step 2 (Python) — select type-specific section template, merge extracted fields
-      Step 3 (LLM)    — generate final HTML using the enriched context
+    2-step pipeline:
+      Step 1+2 (LLM, fast model) — detect doc type, extract fields, build pre-filled blueprint (single call)
+      Step 3   (LLM, full model) — generate final HTML from the blueprint
     """
     if _is_gibberish(request.user_prompt):
         raise HTTPException(status_code=422, detail=_err_invalid_prompt(request.user_prompt))
@@ -770,28 +848,16 @@ async def generate_document_html(
     doc_id = request.document_id or str(uuid.uuid4())
 
     try:
-        # Step 1: query analysis
+        # Steps 1+2 combined: query analysis + blueprint in one fast-model call
         try:
-            analysis = await _analyze_query(request.user_prompt)
+            context = await _analyze_and_build_blueprint(request.user_prompt)
         except HTTPException:
             raise
         except Exception as e:
-            logger.exception("[doc-gen] Step 1 failed")
+            logger.exception("[doc-gen] Steps 1+2 failed")
             raise HTTPException(
                 status_code=502,
-                detail=_err_model_failed("Query Analysis", request.user_prompt, str(e)),
-            )
-
-        # Step 2: blueprint building (LLM)
-        try:
-            context = await _build_template_context(analysis, user_prompt=request.user_prompt)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("[doc-gen] Step 2 failed")
-            raise HTTPException(
-                status_code=502,
-                detail=_err_model_failed("Blueprint Building", request.user_prompt, str(e)),
+                detail=_err_model_failed("Query Analysis and Blueprint", request.user_prompt, str(e)),
             )
 
         # Step 3: final HTML generation
@@ -873,25 +939,14 @@ async def regenerate_document_html(
         logger.info("[doc-gen] Regeneration intent=new_document — running generation pipeline")
 
         try:
-            analysis = await _analyze_query(request.modification_query)
+            context = await _analyze_and_build_blueprint(request.modification_query)
         except HTTPException:
             raise
         except Exception as e:
-            logger.exception("[doc-gen] Step 1 failed during regeneration→generate")
+            logger.exception("[doc-gen] Steps 1+2 failed during regeneration→generate")
             raise HTTPException(
                 status_code=502,
-                detail=_err_model_failed("Query Analysis", request.modification_query, str(e)),
-            )
-
-        try:
-            context = await _build_template_context(analysis, user_prompt=request.modification_query)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("[doc-gen] Step 2 failed during regeneration→generate")
-            raise HTTPException(
-                status_code=502,
-                detail=_err_model_failed("Blueprint Building", request.modification_query, str(e)),
+                detail=_err_model_failed("Query Analysis and Blueprint", request.modification_query, str(e)),
             )
 
         try:
