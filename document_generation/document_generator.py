@@ -194,10 +194,18 @@ _MAX_TOKENS_HTML_STEP_UP = _get_int_env("MAX_TOKENS_HTML_STEP_UP", 1200)
 _MAX_TOKENS_HTML_HARD_LIMIT = _get_int_env("MAX_TOKENS_HTML_HARD_LIMIT", 7200)
 _COMPACT_HTML_MAX_TOKENS = _get_int_env("COMPACT_HTML_MAX_TOKENS", 1800)
 _COMPACT_HTML_RETRIES = _get_int_env("COMPACT_HTML_RETRIES", 2)
-_USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY = (
-    (os.environ.get("USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY", "1") or "1").strip().lower()
+_USE_STATIC_BLUEPRINT_FOR_SIMPLE_PROMPTS = (
+    (os.environ.get("USE_STATIC_BLUEPRINT_FOR_SIMPLE_PROMPTS", "1") or "1").strip().lower()
     in {"1", "true", "yes", "on"}
 )
+_ENABLE_HEURISTIC_ANALYSIS = (
+    (os.environ.get("ENABLE_HEURISTIC_ANALYSIS", "1") or "1").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+_SIMPLE_PROMPT_WORD_LIMIT = _get_int_env("SIMPLE_PROMPT_WORD_LIMIT", 48)
+_SIMPLE_PROMPT_FIELD_LIMIT = _get_int_env("SIMPLE_PROMPT_FIELD_LIMIT", 6)
+_COMPACT_PROMPT_WORD_LIMIT = _get_int_env("COMPACT_PROMPT_WORD_LIMIT", 70)
+_COMPACT_PROMPT_FIELD_LIMIT = _get_int_env("COMPACT_PROMPT_FIELD_LIMIT", 10)
 
 
 async def _call_llm(
@@ -562,12 +570,115 @@ def _parse_analysis_json(raw: str) -> dict:
     return parsed
 
 
-async def _analyze_query(user_prompt: str) -> dict:
-    """Step 1 — fast LLM call to detect document type and extract field values.
-    Uses the fast model (JSON classification only).
-    Raises HTTP 422 immediately if the query is not a document generation request.
-    Always calls the LLM — no caching.
+def _detect_doc_type_from_text(text: str) -> tuple[str, str]:
+    """Heuristic doc type classifier for short, explicit generation prompts."""
+    lower = text.lower()
+
+    checks: list[tuple[str, tuple[str, ...], str]] = [
+        ("employment", ("offer letter", "appointment letter", "employment letter", "employment contract"), "Job Offer Letter"),
+        ("lease", ("rent agreement", "lease agreement", "tenancy agreement", "leave and licence"), "Rent Agreement"),
+        ("nda", ("nda", "non-disclosure", "confidentiality agreement"), "Non-Disclosure Agreement"),
+        ("purchase_order", ("purchase order", " procurement order", " po "), "Purchase Order"),
+        ("invoice", ("invoice", "tax invoice", "billing invoice"), "Invoice"),
+        ("proposal", ("proposal", "business proposal", "project proposal"), "Business Proposal"),
+        ("resume", ("resume", "cv", "curriculum vitae"), "Resume"),
+        ("certificate", ("certificate", "completion certificate"), "Certificate"),
+        ("report", ("report", "analysis report", "status report"), "Report"),
+        ("contract", ("contract", "service agreement", "agreement"), "Service Agreement"),
+        ("letter", ("letter", "recommendation letter", "cover letter", "notice letter"), "Formal Letter"),
+    ]
+
+    for doc_type, keywords, label in checks:
+        if any(k in lower for k in keywords):
+            return doc_type, label
+    return "other", ""
+
+
+def _extract_heuristic_fields(user_prompt: str, doc_type: str) -> dict:
+    """Extracts common explicit values using lightweight regex patterns."""
+    fields: dict = {}
+
+    patterns = {
+        "candidate_name": r"(?:candidate name(?:\s+is)?|candidate)\s*[:\-]?\s*([A-Za-z][A-Za-z .'-]{1,60})",
+        "company_name": r"(?:company name(?:\s+is)?|company)\s*[:\-]?\s*([A-Za-z][A-Za-z0-9 .,&'()-]{1,80})",
+        "job_title": r"(?:role|position|job title)\s*[:\-]?\s*([A-Za-z][A-Za-z0-9 /&()-]{1,50})",
+        "landlord_name": r"(?:landlord)\s*[:\-]?\s*([A-Za-z][A-Za-z .'-]{1,60})",
+        "tenant_name": r"(?:tenant)\s*[:\-]?\s*([A-Za-z][A-Za-z .'-]{1,60})",
+        "client_name": r"(?:client)\s*[:\-]?\s*([A-Za-z][A-Za-z0-9 .,&'()-]{1,80})",
+        "vendor_name": r"(?:vendor)\s*[:\-]?\s*([A-Za-z][A-Za-z0-9 .,&'()-]{1,80})",
+    }
+
+    prompt = user_prompt.strip()
+    for key, pattern in patterns.items():
+        m = re.search(pattern, prompt, flags=re.IGNORECASE)
+        if m:
+            value = m.group(1).strip(" ,.-")
+            if value:
+                fields[key] = value
+
+    # Common short-form extraction for employment prompts:
+    if doc_type == "employment":
+        if "job_title" not in fields:
+            m = re.search(
+                r"(?:for|as)\s+(?:an?\s+)?([A-Za-z][A-Za-z0-9 /&()-]{2,40})",
+                prompt,
+                flags=re.IGNORECASE,
+            )
+            if m:
+                title = m.group(1).strip(" ,.-")
+                if title:
+                    fields["job_title"] = title
+
+        if "candidate_name" not in fields:
+            m = re.search(r"candidate name\s*(?:is)?\s*([A-Za-z][A-Za-z .'-]{1,60})", prompt, flags=re.IGNORECASE)
+            if m:
+                fields["candidate_name"] = m.group(1).strip(" ,.-")
+
+    return fields
+
+
+def _quick_analyze_query(user_prompt: str) -> dict | None:
     """
+    Fast heuristic analysis for short, explicit generation requests.
+    Returns None when heuristic confidence is low.
+    """
+    lower = user_prompt.lower().strip()
+    if len(lower) < 8:
+        return None
+
+    request_verbs = ("generate", "create", "draft", "make", "write", "prepare")
+    if not any(v in lower for v in request_verbs):
+        return None
+
+    doc_type, doc_label = _detect_doc_type_from_text(lower)
+    if doc_type == "other":
+        return None
+
+    fields = _extract_heuristic_fields(user_prompt, doc_type)
+    return {
+        "is_document_request": True,
+        "doc_type": doc_type,
+        "doc_label": doc_label or doc_type.replace("_", " ").title(),
+        "fields": fields,
+        "_user_prompt": user_prompt,
+        "_analysis_source": "heuristic",
+    }
+
+
+async def _analyze_query(user_prompt: str) -> dict:
+    """Step 1 — detect document type + extract field values.
+    Uses a heuristic fast-path first, then falls back to fast LLM JSON classification.
+    Raises HTTP 422 immediately if the query is not a document generation request.
+    """
+    if _ENABLE_HEURISTIC_ANALYSIS:
+        heuristic = _quick_analyze_query(user_prompt)
+        if heuristic:
+            logger.info(
+                f"[doc-gen] Step 1: heuristic analysis hit "
+                f"doc_type={heuristic.get('doc_type')} fields={len(heuristic.get('fields', {}))}"
+            )
+            return heuristic
+
     logger.info("[doc-gen] Step 1: analysing query (fast model)...")
     raw      = await _call_llm_fast(QUERY_ANALYSIS_PROMPT.template, user_prompt)
     logger.info(f"[doc-gen] Step 1 raw output: {raw[:300]}")
@@ -836,12 +947,13 @@ async def _generate_html_from_context(
     """
     if compact_mode:
         sections_block = context.get("sections_block", "")
-        if len(sections_block) > 1200:
-            compact_titles = _extract_section_titles_from_block(sections_block)
-            if compact_titles:
-                sections_block = "\n".join(
-                    f"{i}. {title}" for i, title in enumerate(compact_titles, 1)
-                )
+        compact_titles = _extract_section_titles_from_block(sections_block)
+        if compact_titles:
+            if len(compact_titles) > 6:
+                compact_titles = compact_titles[:6] + ["Additional Terms"]
+            sections_block = "\n".join(
+                f"{i}. {title}" for i, title in enumerate(compact_titles, 1)
+            )
 
         # Short prompts without extracted fields can still trigger huge output
         # with the full prompt. Use a lighter prompt to keep responses complete.
@@ -862,7 +974,7 @@ Rules:
 - Return ONLY HTML from <html> to </html>.
 - Include <head> with one embedded <style> block and <body>.
 - Keep content inside one outer <div contenteditable="true">.
-- Keep output concise and complete (about 500-800 words).
+- Keep output concise and complete (about 300-500 words).
 - If details are missing, use specific placeholders like [Landlord Name], [Property Address], [Start Date].
 - Use clean print-friendly formatting (Arial, white background, simple tables where needed).
 - Do not use markdown fences.
@@ -1082,17 +1194,17 @@ async def generate_document_html(
 
         step_started = time.perf_counter()
         try:
-            has_fields = _has_meaningful_fields(analysis.get("fields"))
             use_static_blueprint = (
-                _USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY
-                and not has_fields
-                and request_word_count <= 40
+                _USE_STATIC_BLUEPRINT_FOR_SIMPLE_PROMPTS
+                and request_word_count <= _SIMPLE_PROMPT_WORD_LIMIT
+                and meaningful_field_count <= _SIMPLE_PROMPT_FIELD_LIMIT
             )
 
             if use_static_blueprint:
                 logger.info(
                     "[doc-gen] Step 2: skipping LLM blueprint "
-                    "(no extracted fields + short prompt) - using static blueprint context"
+                    f"(simple prompt: words={request_word_count}, "
+                    f"fields={meaningful_field_count}) - using static blueprint context"
                 )
                 context = _static_template_context(analysis)
                 use_compact_generation = True
@@ -1101,7 +1213,10 @@ async def generate_document_html(
 
             # For short prompts with only a few explicit values, compact generation
             # avoids long-token full generation while still using OpenAI output.
-            if request_word_count <= 28 and meaningful_field_count <= 5:
+            if (
+                request_word_count <= _COMPACT_PROMPT_WORD_LIMIT
+                and meaningful_field_count <= _COMPACT_PROMPT_FIELD_LIMIT
+            ):
                 use_compact_generation = True
         except HTTPException:
             raise
