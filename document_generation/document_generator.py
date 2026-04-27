@@ -600,17 +600,11 @@ def _parse_blueprint_json(raw: str, analysis: dict) -> dict:
         logger.warning("[doc-gen] Step 2: empty sections in blueprint — falling back to static template")
         return _static_template_context(analysis)
 
-    # Build the sections_block string for Step 3 — include missing_fields so
-    # Step 3 knows exactly which placeholders to render visibly in the document.
     lines = []
     for i, sec in enumerate(sections, 1):
-        title          = sec.get("title", f"Section {i}")
-        content_hint   = sec.get("content_hint", "")
-        missing        = sec.get("missing_fields", [])
-        entry          = f"{i}. {title}\n   → {content_hint}"
-        if missing:
-            entry += f"\n   ⚠ Missing fields (use visible placeholders): {', '.join(missing)}"
-        lines.append(entry)
+        title        = sec.get("title", f"Section {i}")
+        content_hint = sec.get("content_hint", "")
+        lines.append(f"{i}. {title}\n   → {content_hint}")
     sections_block = "\n\n".join(lines)
 
     # document_title from blueprint overrides the generic doc_label for the
@@ -741,11 +735,7 @@ async def _analyze_and_build(user_prompt: str) -> dict:
     for i, sec in enumerate(sections, 1):
         title        = sec.get("title", f"Section {i}")
         content_hint = sec.get("content_hint", "")
-        missing      = sec.get("missing_fields", [])
-        entry        = f"{i}. {title}\n   → {content_hint}"
-        if missing:
-            entry += f"\n   ⚠ Missing fields (use visible placeholders): {', '.join(missing)}"
-        lines.append(entry)
+        lines.append(f"{i}. {title}\n   → {content_hint}")
 
     doc_label      = parsed.get("doc_label", "Document")
     document_title = (parsed.get("document_title") or "").strip() or doc_label
@@ -857,6 +847,83 @@ def _analysis_summary(analysis: dict) -> dict:
     }
 
 
+async def _stream_html_from_context(
+    context: dict,
+    user_prompt: str,
+    doc_id: str,
+):
+    """
+    Async generator for Step 3 — streams raw HTML chunks from OpenAI directly to
+    the client. Buffers the prefix until <html is found so markdown fences are
+    dropped before the first byte reaches the frontend. After the stream ends,
+    cleans and saves the full document to storage.
+    """
+    system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
+        **context,
+        user_request=user_prompt,
+    )
+    model = os.environ.get("MODEL_NAME", _MODEL)
+
+    kwargs: dict = {
+        "model":    model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+        "stream": True,
+    }
+    if model not in _FIXED_TEMPERATURE_MODELS:
+        kwargs["temperature"] = 0.2
+    if _MAX_TOKENS_HTML is not None:
+        if model in _MAX_COMPLETION_TOKENS_MODELS:
+            kwargs["max_completion_tokens"] = _MAX_TOKENS_HTML
+        else:
+            kwargs["max_tokens"] = _MAX_TOKENS_HTML
+
+    accumulated: list[str] = []
+    prefix_buf = ""
+    html_started = False
+
+    try:
+        stream = await _CLIENT.chat.completions.create(**kwargs)
+        async for chunk in stream:
+            delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
+            if not delta:
+                continue
+            accumulated.append(delta)
+
+            if not html_started:
+                prefix_buf += delta
+                idx = prefix_buf.lower().find("<html")
+                if idx != -1:
+                    html_started = True
+                    yield prefix_buf[idx:].encode()
+                    prefix_buf = ""
+            else:
+                yield delta.encode()
+
+        # If the model never emitted <html (shouldn't happen), yield what we have
+        if not html_started and prefix_buf:
+            yield prefix_buf.encode()
+
+    except Exception:
+        logger.exception("[doc-gen] Step 3 stream failed")
+        return
+
+    # Post-stream: clean, validate, save
+    full_raw = "".join(accumulated)
+    cleaned_html = _repair_truncated_html(_clean_html(full_raw))
+    valid, reason = _validate_html(cleaned_html)
+    if valid:
+        try:
+            await asyncio.to_thread(_save_document, doc_id, cleaned_html)
+            logger.info(f"[doc-gen] Step 3 stream: saved doc_id={doc_id}")
+        except Exception:
+            logger.exception("[doc-gen] Step 3 stream: storage write failed")
+    else:
+        logger.warning(f"[doc-gen] Step 3 stream: HTML invalid after completion — {reason}")
+
+
 async def _generate_html_from_context(
     context: dict,
     user_prompt: str,
@@ -898,7 +965,7 @@ Rules:
 - Include <head> with one embedded <style> block and <body>.
 - Keep content inside one outer <div contenteditable="true">.
 - Keep output concise and complete (about 500-800 words).
-- If details are missing, use specific placeholders like [Landlord Name], [Property Address], [Start Date].
+- Write complete, realistic content for every section — never use placeholders or brackets.
 - Use clean print-friendly formatting (Arial, white background, simple tables where needed).
 - Do not use markdown fences.
 """
@@ -1042,7 +1109,7 @@ async def _check_regeneration_intent(modification_query: str, existing_html: str
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@router.post("/generate-html", response_class=HTMLResponse)
+@router.post("/generate-html")
 async def generate_document_html(
     request: DocumentGenerationRequest,
     _: None = Depends(verify_api_key),
@@ -1081,41 +1148,12 @@ async def generate_document_html(
             f"doc_label='{context.get('doc_label', 'Document')}'"
         )
 
-        # Step 3: final HTML generation
-        step_started = time.perf_counter()
-        try:
-            cleaned_html = await _generate_html_from_context(context, request.user_prompt)
-        except Exception as e:
-            logger.exception("[doc-gen] Step 3 failed")
-            raise HTTPException(
-                status_code=502,
-                detail=_err_model_failed("HTML Generation", request.user_prompt, str(e)),
-            )
-        logger.info(f"[doc-gen] Step 3 complete in {time.perf_counter() - step_started:.2f}s")
-
-        valid, reason = _validate_html(cleaned_html)
-        if not valid:
-            logger.error(f"[doc-gen] All retries exhausted — final HTML invalid: {reason}")
-            raise HTTPException(
-                status_code=500,
-                detail=_err_empty_output(request.user_prompt),
-            )
-
-        try:
-            await asyncio.to_thread(_save_document, doc_id, cleaned_html)
-        except Exception as e:
-            logger.exception("[doc-gen] Storage write failed")
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "error":   "storage_failed",
-                    "message": "Your document was generated but could not be saved. Please try again.",
-                },
-            )
-
-        total_s = time.perf_counter() - request_started
-        logger.info(f"[doc-gen] /generate-html success doc_id={doc_id} total={total_s:.2f}s")
-        return HTMLResponse(content=cleaned_html, headers={"X-Document-Id": doc_id})
+        logger.info(f"[doc-gen] /generate-html starting stream doc_id={doc_id}")
+        return StreamingResponse(
+            _stream_html_from_context(context, request.user_prompt, doc_id),
+            media_type="text/html",
+            headers={"X-Document-Id": doc_id},
+        )
 
     except HTTPException as exc:
         logger.warning(

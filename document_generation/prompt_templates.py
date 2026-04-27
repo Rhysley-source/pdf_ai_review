@@ -419,7 +419,7 @@ def build_generation_context(analysis: dict, section_template: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 TEMPLATE_BUILD_PROMPT = SimulatedPromptTemplate(
-    template="""You are a document blueprint specialist. Your job is to produce a detailed, fully pre-filled section plan for a "{doc_label}" document so that a document generator can produce the complete document without any guesswork.
+    template="""You are a document blueprint specialist. Your job is to produce a detailed, fully written section plan for a "{doc_label}" document so that a document generator can produce the complete document without any guesswork.
 
 Document Type  : {doc_label} ({doc_type})
 
@@ -439,8 +439,7 @@ YOUR TASK — return ONLY a valid JSON object with exactly these keys:
   "sections": [
     {{
       "title": "<section heading>",
-      "content_hint": "<complete, detailed description of exactly what to write in this section. Embed ALL known values directly — names, amounts, dates, addresses, durations. Mark every missing required value as [Field Name]. Be specific enough that no further instructions are needed.>",
-      "missing_fields": ["<name of each required field not found in the request>"]
+      "content_hint": "<complete, detailed description of exactly what to write in this section. Embed ALL known values directly — names, amounts, dates, addresses, durations. For any detail not provided by the user, write realistic and complete content appropriate for this document type — do NOT use placeholders or ask for missing information.>"
     }}
   ],
   "tone": "<formal | professional | friendly | technical — pick the best fit for this document type>",
@@ -450,8 +449,8 @@ YOUR TASK — return ONLY a valid JSON object with exactly these keys:
 Rules:
 1. Include EVERY section needed for a complete, legally sound {doc_label} — do not omit any standard section.
 2. Also include any EXTRA sections the user specifically requested (e.g. penalty clauses, witness sections, special terms).
-3. content_hint must be fully pre-filled with actual values — e.g. write "Monthly Rent: ₹18,000 (Rupees Eighteen Thousand)" not "monthly rent goes here".
-4. For every field that is missing from the request, add it to missing_fields and use a placeholder whose text is the ACTUAL field label in brackets — e.g. [Email Address], [Phone Number], [Job Title], [Company Name]. NEVER use [Client Name], [Field Name], or any other generic label for a field that has its own name.
+3. content_hint must be fully written with actual or realistic content — e.g. write "Monthly Rent: ₹18,000 (Rupees Eighteen Thousand)" not "monthly rent goes here".
+4. Never use placeholders, brackets, or ask for missing information — generate complete, realistic content for every field.
 5. layout_notes must describe the exact table/structure needed (not just "standard layout").
 6. Return ONLY raw JSON. No markdown, no backticks, no explanation.""",
     input_variables=["doc_type", "doc_label", "extracted_fields", "required_sections", "user_request"],
@@ -498,13 +497,12 @@ other          : Document Title | Parties/Participants | Introduction/Purpose | 
 Each section object:
 {{
   "title": "<section heading>",
-  "content_hint": "<complete description of what to write — embed ALL known values: names, amounts, dates, addresses. Use [Field Name] for missing required values.>",
-  "missing_fields": ["<name of each required field not found in the request>"]
+  "content_hint": "<complete, detailed description of what to write — embed ALL known values: names, amounts, dates, addresses. For any detail not provided, write realistic and complete content appropriate for this document type. Never use placeholders or brackets.>"
 }}
 
 Rules:
-1. content_hint must embed actual values — write "Monthly Rent: ₹18,000" not "monthly rent goes here".
-2. For missing fields use specific labels like [Email Address], [Phone Number] — never generic [Field Name].
+1. content_hint must be fully written — write "Monthly Rent: ₹18,000" not "monthly rent goes here".
+2. Never use placeholders, brackets, or ask for missing information — generate complete realistic content.
 3. Include ALL standard sections for the doc_type plus any extra sections the user requested.
 4. When is_document_request is false, omit document_title, sections, tone, layout_notes entirely.
 5. Return ONLY raw JSON.
@@ -516,7 +514,7 @@ Example output (document request):
   "doc_label": "Web Development Invoice",
   "fields": {{"vendor_name": "Acme Corp", "client_name": "Beta Ltd", "amount": "2000 USD", "due_date": null}},
   "document_title": "TAX INVOICE",
-  "sections": [{{"title": "Invoice Header", "content_hint": "Invoice #[Invoice Number], Date: [Invoice Date], Due: [Due Date]", "missing_fields": ["Invoice Number", "Invoice Date", "Due Date"]}}],
+  "sections": [{{"title": "Invoice Header", "content_hint": "Invoice #INV-001, Date: 27 April 2026, Due: 11 May 2026"}}],
   "tone": "professional",
   "layout_notes": "Two-column header table. Line items table with borders. Total section right-aligned."
 }}
@@ -555,7 +553,7 @@ Original User Request:
 - Include <html>, <head> with ONE embedded <style> block, and <body>.
 - Add contenteditable="true" to the outermost content div inside <body>.
 - Render every blueprint section in order using its content_hint as the source.
-- Wherever the blueprint shows a [Placeholder], render it as a styled span using the EXACT placeholder text from the blueprint — e.g. if the blueprint says [Email Address] write <span style="font-style:italic;">[Email Address]</span>, if it says [Phone Number] write <span style="font-style:italic;">[Phone Number]</span>. NEVER replace every placeholder with [Client Name] — each placeholder must show its own specific field name.
+- Write complete, detailed, realistic content for every section — never use placeholders, brackets, or leave any field blank.
 - Do NOT include markdown backticks, explanations, or any text outside the HTML.
 
 ━━━ DESIGN RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
