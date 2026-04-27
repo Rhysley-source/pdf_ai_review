@@ -192,6 +192,8 @@ _MAX_TOKENS_JSON      = 2048  # Step 1: small JSON classification response
 _HTML_GEN_RETRIES     = _get_int_env("HTML_GEN_RETRIES", 2)  # Step 3 retry attempts
 _MAX_TOKENS_HTML_STEP_UP = _get_int_env("MAX_TOKENS_HTML_STEP_UP", 1200)
 _MAX_TOKENS_HTML_HARD_LIMIT = _get_int_env("MAX_TOKENS_HTML_HARD_LIMIT", 7200)
+_COMPACT_HTML_MAX_TOKENS = _get_int_env("COMPACT_HTML_MAX_TOKENS", 2600)
+_COMPACT_HTML_RETRIES = _get_int_env("COMPACT_HTML_RETRIES", 1)
 _USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY = (
     (os.environ.get("USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY", "1") or "1").strip().lower()
     in {"1", "true", "yes", "on"}
@@ -784,46 +786,63 @@ def _analysis_summary(analysis: dict) -> dict:
     }
 
 
-async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
+async def _generate_html_from_context(
+    context: dict,
+    user_prompt: str,
+    compact_mode: bool = False,
+) -> str:
     """
-    Step 3 — final LLM call using the enriched blueprint context.
-    Retries up to _HTML_GEN_RETRIES times on truncated or invalid response.
+    Step 3 - final LLM call using the enriched blueprint context.
+    Retries on truncated or invalid response.
 
-    Deterministic by design:
-      - temperature=0.2 + use_seed=True → consistent output with minimal variation
-      - seed derived from SHA-256(system_prompt + user_prompt)
-    Same query → same blueprint (Step 2 temperature=0) → same seed → stable HTML.
+    compact_mode is used for short, low-detail prompts to keep output concise
+    and reduce truncation risk.
     """
     system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
         **context,
         user_request=user_prompt,
     )
 
-    current_max_tokens = _MAX_TOKENS_HTML
+    if compact_mode:
+        system_prompt += """
 
-    for attempt in range(1, _HTML_GEN_RETRIES + 1):
+COMPACT OUTPUT MODE (mandatory):
+- Produce a concise, practical draft only (target: about 700-900 words total).
+- Keep each section short and avoid repetitive legal boilerplate.
+- Do not duplicate clauses across sections.
+- Keep placeholders where details are missing, but only where needed.
+"""
+        current_max_tokens = _COMPACT_HTML_MAX_TOKENS
+        retries = max(1, _COMPACT_HTML_RETRIES)
+    else:
+        current_max_tokens = _MAX_TOKENS_HTML
+        retries = _HTML_GEN_RETRIES
+
+    for attempt in range(1, retries + 1):
         if attempt == 1:
-            logger.info(f"[doc-gen] Step 3: generating HTML for '{context['doc_label']}'...")
+            logger.info(
+                f"[doc-gen] Step 3: generating HTML for '{context['doc_label']}'"
+                f"{' (compact)' if compact_mode else ''}..."
+            )
         else:
-            logger.warning(f"[doc-gen] Step 3: retry {attempt}/{_HTML_GEN_RETRIES}")
+            logger.warning(f"[doc-gen] Step 3: retry {attempt}/{retries}")
 
         try:
             raw, finish = await _call_llm(
                 system_prompt,
                 user_prompt,
                 max_tokens=current_max_tokens,
-                temperature=0.2,
+                temperature=0.1 if compact_mode else 0.2,
                 use_seed=(attempt == 1),
             )
         except Exception:
-            if attempt == _HTML_GEN_RETRIES:
+            if attempt == retries:
                 raise
-            logger.warning(f"[doc-gen] Step 3: LLM call failed on attempt {attempt} — retrying")
+            logger.warning(f"[doc-gen] Step 3: LLM call failed on attempt {attempt} - retrying")
             continue
 
-        # Truncated response — model ran out of output tokens mid-generation.
-        # Must retry regardless of whether the HTML structure looks valid,
-        # because the document content itself is incomplete.
+        # If model reports truncation but produced a complete valid HTML document,
+        # accept it to avoid unnecessary retries.
         if finish == "length":
             cleaned = _clean_html(raw)
             valid, _ = _validate_html(cleaned)
@@ -832,6 +851,7 @@ async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
                     "[doc-gen] Step 3: finish=length but HTML is complete and valid - accepting output"
                 )
                 return cleaned
+
             if (
                 current_max_tokens is not None
                 and current_max_tokens < _MAX_TOKENS_HTML_HARD_LIMIT
@@ -846,24 +866,24 @@ async def _generate_html_from_context(context: dict, user_prompt: str) -> str:
                         f"{current_max_tokens} -> {next_cap} for retry"
                     )
                     current_max_tokens = next_cap
+
             logger.warning(
                 f"[doc-gen] Step 3: response truncated (finish=length) on attempt "
-                f"{attempt}/{_HTML_GEN_RETRIES} — retrying"
+                f"{attempt}/{retries} - retrying"
             )
             continue
 
-        cleaned         = _clean_html(raw)
-        valid, reason   = _validate_html(cleaned)
-
+        cleaned = _clean_html(raw)
+        valid, reason = _validate_html(cleaned)
         if valid:
             return cleaned
 
         logger.warning(
-            f"[doc-gen] Step 3: invalid HTML on attempt {attempt}/{_HTML_GEN_RETRIES} "
-            f"— {reason} (finish={finish})"
+            f"[doc-gen] Step 3: invalid HTML on attempt {attempt}/{retries} "
+            f"- {reason} (finish={finish})"
         )
 
-    return ""  # all attempts exhausted — caller raises HTTPException
+    return ""  # all attempts exhausted - caller raises HTTPException
 
 
 # ---------------------------------------------------------------------------
@@ -974,7 +994,7 @@ async def generate_document_html(
             if use_static_blueprint:
                 logger.info(
                     "[doc-gen] Step 2: skipping LLM blueprint "
-                    "(no extracted fields + short prompt) - using static template"
+                    "(no extracted fields + short prompt) - using static blueprint context"
                 )
                 context = _static_template_context(analysis)
             else:
@@ -996,8 +1016,12 @@ async def generate_document_html(
         step_started = time.perf_counter()
         try:
             if use_static_blueprint:
-                cleaned_html = _render_static_html_from_context(context, request.user_prompt)
-                logger.info("[doc-gen] Step 3: skipped LLM generation - rendered static HTML template")
+                logger.info("[doc-gen] Step 3: using compact OpenAI generation (static blueprint context)")
+                cleaned_html = await _generate_html_from_context(
+                    context,
+                    request.user_prompt,
+                    compact_mode=True,
+                )
             else:
                 cleaned_html = await _generate_html_from_context(context, request.user_prompt)
         except Exception as e:
