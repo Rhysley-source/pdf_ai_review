@@ -192,8 +192,8 @@ _MAX_TOKENS_JSON      = 2048  # Step 1: small JSON classification response
 _HTML_GEN_RETRIES     = _get_int_env("HTML_GEN_RETRIES", 2)  # Step 3 retry attempts
 _MAX_TOKENS_HTML_STEP_UP = _get_int_env("MAX_TOKENS_HTML_STEP_UP", 1200)
 _MAX_TOKENS_HTML_HARD_LIMIT = _get_int_env("MAX_TOKENS_HTML_HARD_LIMIT", 7200)
-_COMPACT_HTML_MAX_TOKENS = _get_int_env("COMPACT_HTML_MAX_TOKENS", 2600)
-_COMPACT_HTML_RETRIES = _get_int_env("COMPACT_HTML_RETRIES", 1)
+_COMPACT_HTML_MAX_TOKENS = _get_int_env("COMPACT_HTML_MAX_TOKENS", 3200)
+_COMPACT_HTML_RETRIES = _get_int_env("COMPACT_HTML_RETRIES", 2)
 _USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY = (
     (os.environ.get("USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY", "1") or "1").strip().lower()
     in {"1", "true", "yes", "on"}
@@ -798,23 +798,38 @@ async def _generate_html_from_context(
     compact_mode is used for short, low-detail prompts to keep output concise
     and reduce truncation risk.
     """
-    system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
-        **context,
-        user_request=user_prompt,
-    )
-
     if compact_mode:
-        system_prompt += """
+        # Short prompts without extracted fields can still trigger huge output
+        # with the full prompt. Use a lighter prompt to keep responses complete.
+        system_prompt = f"""You are an expert legal document HTML generator.
+Generate one complete HTML document only.
 
-COMPACT OUTPUT MODE (mandatory):
-- Produce a concise, practical draft only (target: about 700-900 words total).
-- Keep each section short and avoid repetitive legal boilerplate.
-- Do not duplicate clauses across sections.
-- Keep placeholders where details are missing, but only where needed.
+Document Type: {context.get("doc_label", "Document")} ({context.get("doc_type", "other")})
+Tone: {context.get("tone", "professional")}
+Layout Notes: {context.get("layout_notes", "Standard document layout")}
+
+Sections to include in this order:
+{context.get("sections_block", "")}
+
+User request:
+{user_prompt}
+
+Rules:
+- Return ONLY HTML from <html> to </html>.
+- Include <head> with one embedded <style> block and <body>.
+- Keep content inside one outer <div contenteditable="true">.
+- Keep output concise and complete (about 500-800 words).
+- If details are missing, use specific placeholders like [Landlord Name], [Property Address], [Start Date].
+- Use clean print-friendly formatting (Arial, white background, simple tables where needed).
+- Do not use markdown fences.
 """
         current_max_tokens = _COMPACT_HTML_MAX_TOKENS
         retries = max(1, _COMPACT_HTML_RETRIES)
     else:
+        system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
+            **context,
+            user_request=user_prompt,
+        )
         current_max_tokens = _MAX_TOKENS_HTML
         retries = _HTML_GEN_RETRIES
 
@@ -867,10 +882,16 @@ COMPACT OUTPUT MODE (mandatory):
                     )
                     current_max_tokens = next_cap
 
-            logger.warning(
-                f"[doc-gen] Step 3: response truncated (finish=length) on attempt "
-                f"{attempt}/{retries} - retrying"
-            )
+            if attempt < retries:
+                logger.warning(
+                    f"[doc-gen] Step 3: response truncated (finish=length) on attempt "
+                    f"{attempt}/{retries} - retrying"
+                )
+            else:
+                logger.warning(
+                    f"[doc-gen] Step 3: response truncated (finish=length) on final attempt "
+                    f"{attempt}/{retries}"
+                )
             continue
 
         cleaned = _clean_html(raw)
