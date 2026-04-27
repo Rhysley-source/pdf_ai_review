@@ -459,6 +459,80 @@ Rules:
 
 
 # ---------------------------------------------------------------------------
+# COMBINED STEP 1+2 — Single-call Analysis + Blueprint Prompt
+# Replaces two sequential LLM calls with one, cutting one full round-trip.
+# Returns a single JSON with classification, field extraction, AND blueprint.
+# ---------------------------------------------------------------------------
+
+COMBINED_ANALYSIS_BLUEPRINT_PROMPT = SimulatedPromptTemplate(
+    template="""You are a document analysis and blueprint specialist. In a single pass, classify the user request, extract all field values, and produce a fully pre-filled document blueprint.
+
+Return ONLY a valid JSON object — no markdown, no backticks, no explanation.
+
+━━━ CLASSIFICATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"is_document_request" : true if the user wants to generate/create/draft any document. false otherwise.
+"doc_type"  : one of: invoice, contract, employment, nda, lease, resume, certificate, report, proposal, purchase_order, letter, other
+"doc_label" : short human-readable name (max 6 words). e.g. "Rent Agreement", "Tax Invoice", "Job Offer Letter"
+"fields"    : flat JSON of ALL details extracted. snake_case keys. null for anything not mentioned. Set to {{}} if not a document request.
+
+━━━ SECTION REQUIREMENTS BY DOC TYPE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+invoice        : Invoice Header | Bill From | Bill To | Line Items Table | Subtotal/Tax/Total | Payment Instructions | Notes/Terms
+contract       : Parties | Recitals/Background | Scope of Work | Term and Renewal | Fees and Payment | Intellectual Property | Confidentiality | Limitation of Liability | Termination | Governing Law | General Provisions | Signature Block
+employment     : Date and Addressee | Offer of Employment | Job Title/Department | Compensation/Benefits | Start Date/Work Location | Probation Period | Notice Period | Confidentiality/IP | Code of Conduct | Acceptance Deadline | Signature Block
+nda            : Parties and Recitals | Definitions | Exclusions | Obligations | Permitted Disclosures | Term/Termination | Return of Materials | Remedies | Governing Law | Signature Block
+lease          : Parties (Landlord/Tenant) | Property Description | Lease Term | Monthly Rent/Due Date | Security Deposit | Utilities/Maintenance | Permitted Use/Restrictions | Termination/Notice Period | Move-out Conditions | Governing Law | Signature Block with Witness Lines
+resume         : Header (name/email/phone/location/LinkedIn) | Professional Summary | Work Experience | Education | Skills | Certifications | Projects
+certificate    : Certificate Title | Awarded To | Body Text | Date of Award | Issuer Name/Title | Signature Line
+report         : Title/Metadata | Executive Summary | Introduction/Background | Methodology | Findings/Analysis | Conclusions | Recommendations | Appendices
+proposal       : Cover Page | Executive Summary | Problem Statement | Proposed Solution | Scope of Work | Timeline/Milestones | Pricing/Budget | About Us/Team | Terms and Conditions | Call to Action
+purchase_order : PO Header | Vendor Details | Line Items Table | Delivery Details | Payment Terms | Special Instructions | Authorized Signature
+letter         : Sender Details/Date | Recipient Name/Address | Subject Line | Salutation | Body | Complimentary Close | Signature Block
+other          : Document Title | Parties/Participants | Introduction/Purpose | Main Content | Terms/Conditions | Closing/Conclusion | Signature Block
+
+━━━ BLUEPRINT (only when is_document_request = true) ━━━━━━━━━━━━━━
+"document_title" : exact title to display at top of document (e.g. "RENT AGREEMENT", "TAX INVOICE")
+"sections"       : array of section objects using the required sections for the detected doc_type, plus any extra sections the user requested
+"tone"           : formal | professional | friendly | technical — best fit for this document type
+"layout_notes"   : specific layout instruction describing tables/columns/structure needed
+
+Each section object:
+{{
+  "title": "<section heading>",
+  "content_hint": "<complete description of what to write — embed ALL known values: names, amounts, dates, addresses. Use [Field Name] for missing required values.>",
+  "missing_fields": ["<name of each required field not found in the request>"]
+}}
+
+Rules:
+1. content_hint must embed actual values — write "Monthly Rent: ₹18,000" not "monthly rent goes here".
+2. For missing fields use specific labels like [Email Address], [Phone Number] — never generic [Field Name].
+3. Include ALL standard sections for the doc_type plus any extra sections the user requested.
+4. When is_document_request is false, omit document_title, sections, tone, layout_notes entirely.
+5. Return ONLY raw JSON.
+
+Example output (document request):
+{{
+  "is_document_request": true,
+  "doc_type": "invoice",
+  "doc_label": "Web Development Invoice",
+  "fields": {{"vendor_name": "Acme Corp", "client_name": "Beta Ltd", "amount": "2000 USD", "due_date": null}},
+  "document_title": "TAX INVOICE",
+  "sections": [{{"title": "Invoice Header", "content_hint": "Invoice #[Invoice Number], Date: [Invoice Date], Due: [Due Date]", "missing_fields": ["Invoice Number", "Invoice Date", "Due Date"]}}],
+  "tone": "professional",
+  "layout_notes": "Two-column header table. Line items table with borders. Total section right-aligned."
+}}
+
+Example output (non-document request):
+{{
+  "is_document_request": false,
+  "doc_type": "other",
+  "doc_label": "",
+  "fields": {{}}
+}}""",
+    input_variables=[],
+)
+
+
+# ---------------------------------------------------------------------------
 # STEP 3 — Final Document Generation Prompt
 # Uses the enriched context from Steps 1 & 2 for precise HTML generation.
 # ---------------------------------------------------------------------------

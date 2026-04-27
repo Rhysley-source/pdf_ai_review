@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from .prompt_templates import (
     QUERY_ANALYSIS_PROMPT,
     TEMPLATE_BUILD_PROMPT,
+    COMBINED_ANALYSIS_BLUEPRINT_PROMPT,
     DOCUMENT_GENERATION_V2_PROMPT,
     REGENERATION_INTENT_PROMPT,
     SECTION_TEMPLATES,
@@ -184,20 +185,15 @@ def _get_int_env(name: str, default: int) -> int:
 
 
 # Token budgets per step
-# Step 3 output cap:
-# default 4200 for predictable latency; set MAX_TOKENS_HTML=none (or 0) to remove cap.
-_MAX_TOKENS_HTML      = _get_optional_int_env("MAX_TOKENS_HTML", 4200)
+# Step 3 output cap: None = no cap (model outputs full response).
+# Set MAX_TOKENS_HTML env var to a positive integer to re-enable a cap.
+_MAX_TOKENS_HTML      = _get_optional_int_env("MAX_TOKENS_HTML", None)
 _MAX_TOKENS_BLUEPRINT = 2048  # Step 2: detailed pre-filled section plan — needs more room than plain JSON
-_MAX_TOKENS_JSON      = 2048  # Step 1: small JSON classification response
+_MAX_TOKENS_JSON      = 512   # Step 1: small JSON classification response — output is always compact
+_MAX_TOKENS_COMBINED  = 2048  # Combined Step 1+2: full blueprint output
 _HTML_GEN_RETRIES     = _get_int_env("HTML_GEN_RETRIES", 2)  # Step 3 retry attempts
-_MAX_TOKENS_HTML_STEP_UP = _get_int_env("MAX_TOKENS_HTML_STEP_UP", 1200)
-_MAX_TOKENS_HTML_HARD_LIMIT = _get_int_env("MAX_TOKENS_HTML_HARD_LIMIT", 7200)
 _COMPACT_HTML_MAX_TOKENS = _get_int_env("COMPACT_HTML_MAX_TOKENS", 1800)
 _COMPACT_HTML_RETRIES = _get_int_env("COMPACT_HTML_RETRIES", 2)
-_USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY = (
-    (os.environ.get("USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY", "1") or "1").strip().lower()
-    in {"1", "true", "yes", "on"}
-)
 
 
 async def _call_llm(
@@ -694,37 +690,76 @@ async def _build_template_context(analysis: dict, user_prompt: str = "") -> dict
     return _parse_blueprint_json(raw, analysis)
 
 
-def _has_meaningful_fields(fields: dict | None) -> bool:
+async def _analyze_and_build(user_prompt: str) -> dict:
     """
-    Returns True when Step 1 extracted at least one non-empty field value.
+    Combined Step 1+2 — single LLM call that classifies the request, extracts
+    fields, and builds the document blueprint in one round-trip.
+
+    Returns a context dict ready for _generate_html_from_context (same shape as
+    _build_template_context). Raises HTTP 422 for non-document requests.
+    Falls back to static template on JSON parse failure.
     """
-    if not isinstance(fields, dict) or not fields:
-        return False
-    for value in fields.values():
-        if value is None:
-            continue
-        if isinstance(value, str) and not value.strip():
-            continue
-        if isinstance(value, (list, dict)) and not value:
-            continue
-        return True
-    return False
+    logger.info("[doc-gen] Steps 1+2 (combined): analysing and building blueprint...")
+    raw, _ = await _call_llm(
+        COMBINED_ANALYSIS_BLUEPRINT_PROMPT.template,
+        user_prompt,
+        model=_FAST_MODEL,
+        max_tokens=_MAX_TOKENS_COMBINED,
+        temperature=0,
+        use_seed=True,
+    )
+    logger.info(f"[doc-gen] Steps 1+2 combined raw output: {raw[:300]}")
+
+    cleaned = raw.strip()
+    if "```" in cleaned:
+        cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        logger.warning("[doc-gen] Steps 1+2 combined: parse failed — falling back to two-step flow")
+        analysis = await _analyze_query(user_prompt)
+        return await _build_template_context(analysis, user_prompt=user_prompt)
+
+    if not parsed.get("is_document_request", False):
+        raise HTTPException(
+            status_code=422,
+            detail=_err_not_document_request(user_prompt),
+        )
+
+    sections = parsed.get("sections", [])
+    if not isinstance(sections, list) or not sections:
+        logger.warning("[doc-gen] Steps 1+2 combined: empty sections — falling back to static template")
+        analysis = {
+            "doc_type":  parsed.get("doc_type", "other"),
+            "doc_label": parsed.get("doc_label", "Document"),
+            "fields":    parsed.get("fields") or {},
+        }
+        return _static_template_context(analysis)
+
+    lines = []
+    for i, sec in enumerate(sections, 1):
+        title        = sec.get("title", f"Section {i}")
+        content_hint = sec.get("content_hint", "")
+        missing      = sec.get("missing_fields", [])
+        entry        = f"{i}. {title}\n   → {content_hint}"
+        if missing:
+            entry += f"\n   ⚠ Missing fields (use visible placeholders): {', '.join(missing)}"
+        lines.append(entry)
+
+    doc_label      = parsed.get("doc_label", "Document")
+    document_title = (parsed.get("document_title") or "").strip() or doc_label
+
+    return {
+        "doc_type":       parsed.get("doc_type", "other"),
+        "doc_label":      document_title,
+        "tone":           parsed.get("tone", "professional"),
+        "layout_notes":   parsed.get("layout_notes", "Standard document layout."),
+        "sections_block": "\n\n".join(lines),
+    }
 
 
-def _count_meaningful_fields(fields: dict | None) -> int:
-    """Returns how many extracted fields have a non-empty value."""
-    if not isinstance(fields, dict) or not fields:
-        return 0
-    count = 0
-    for value in fields.values():
-        if value is None:
-            continue
-        if isinstance(value, str) and not value.strip():
-            continue
-        if isinstance(value, (list, dict)) and not value:
-            continue
-        count += 1
-    return count
+
 
 
 def _extract_section_titles_from_block(sections_block: str) -> list[str]:
@@ -905,8 +940,7 @@ Rules:
             logger.warning(f"[doc-gen] Step 3: LLM call failed on attempt {attempt} - retrying")
             continue
 
-        # If model reports truncation but produced a complete valid HTML document,
-        # accept it to avoid unnecessary retries.
+        # If model reports truncation, repair and validate before retrying.
         if finish == "length":
             cleaned = _repair_truncated_html(_clean_html(raw))
             if len(cleaned) > len(best_effort_html):
@@ -917,33 +951,6 @@ Rules:
                     "[doc-gen] Step 3: finish=length but HTML is complete and valid - accepting output"
                 )
                 return cleaned
-
-            if (
-                current_max_tokens is not None
-                and current_max_tokens < _MAX_TOKENS_HTML_HARD_LIMIT
-            ):
-                next_cap = min(
-                    current_max_tokens + _MAX_TOKENS_HTML_STEP_UP,
-                    _MAX_TOKENS_HTML_HARD_LIMIT,
-                )
-                if next_cap > current_max_tokens:
-                    logger.warning(
-                        f"[doc-gen] Step 3: increasing max_tokens_html "
-                        f"{current_max_tokens} -> {next_cap} for retry"
-                    )
-                    current_max_tokens = next_cap
-
-            if not compact_mode and attempt == 1:
-                logger.warning(
-                    "[doc-gen] Step 3: full-generation truncated - switching to compact fallback"
-                )
-                compact_html = await _generate_html_from_context(
-                    context,
-                    user_prompt,
-                    compact_mode=True,
-                )
-                if compact_html.strip():
-                    return compact_html
 
             if attempt < retries:
                 logger.warning(
@@ -1057,77 +1064,27 @@ async def generate_document_html(
     )
 
     try:
-        # Step 1: query analysis
+        # Steps 1+2: combined analysis + blueprint (single LLM call)
         step_started = time.perf_counter()
         try:
-            analysis = await _analyze_query(request.user_prompt)
+            context = await _analyze_and_build(request.user_prompt)
         except HTTPException:
             raise
         except Exception as e:
-            logger.exception("[doc-gen] Step 1 failed")
+            logger.exception("[doc-gen] Steps 1+2 combined failed")
             raise HTTPException(
                 status_code=502,
-                detail=_err_model_failed("Query Analysis", request.user_prompt, str(e)),
+                detail=_err_model_failed("Analysis + Blueprint", request.user_prompt, str(e)),
             )
         logger.info(
-            f"[doc-gen] Step 1 complete in {time.perf_counter() - step_started:.2f}s "
-            f"doc_type={analysis.get('doc_type', 'other')}"
-        )
-
-        # Step 2: blueprint building (LLM)
-        use_static_blueprint = False
-        use_compact_generation = False
-        request_word_count = len(re.findall(r"[A-Za-z0-9]+", request.user_prompt))
-        meaningful_field_count = _count_meaningful_fields(analysis.get("fields"))
-
-        step_started = time.perf_counter()
-        try:
-            has_fields = _has_meaningful_fields(analysis.get("fields"))
-            use_static_blueprint = (
-                _USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY
-                and not has_fields
-                and request_word_count <= 40
-            )
-
-            if use_static_blueprint:
-                logger.info(
-                    "[doc-gen] Step 2: skipping LLM blueprint "
-                    "(no extracted fields + short prompt) - using static blueprint context"
-                )
-                context = _static_template_context(analysis)
-                use_compact_generation = True
-            else:
-                context = await _build_template_context(analysis, user_prompt=request.user_prompt)
-
-            # For short prompts with only a few explicit values, compact generation
-            # avoids long-token full generation while still using OpenAI output.
-            if request_word_count <= 28 and meaningful_field_count <= 5:
-                use_compact_generation = True
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("[doc-gen] Step 2 failed")
-            raise HTTPException(
-                status_code=502,
-                detail=_err_model_failed("Blueprint Building", request.user_prompt, str(e)),
-            )
-        logger.info(
-            f"[doc-gen] Step 2 complete in {time.perf_counter() - step_started:.2f}s "
+            f"[doc-gen] Steps 1+2 complete in {time.perf_counter() - step_started:.2f}s "
             f"doc_label='{context.get('doc_label', 'Document')}'"
         )
 
         # Step 3: final HTML generation
         step_started = time.perf_counter()
         try:
-            if use_compact_generation:
-                logger.info("[doc-gen] Step 3: using compact OpenAI generation")
-                cleaned_html = await _generate_html_from_context(
-                    context,
-                    request.user_prompt,
-                    compact_mode=True,
-                )
-            else:
-                cleaned_html = await _generate_html_from_context(context, request.user_prompt)
+            cleaned_html = await _generate_html_from_context(context, request.user_prompt)
         except Exception as e:
             logger.exception("[doc-gen] Step 3 failed")
             raise HTTPException(
