@@ -480,12 +480,8 @@ Original User Request:
 - Return ONLY the complete HTML, starting with <html> and ending with </html>.
 - Include <html>, <head> with ONE embedded <style> block, and <body>.
 - Add contenteditable="true" to the outermost content div inside <body>.
-- Render EVERY blueprint section in order — do not skip or abbreviate any section.
-- Write full, realistic legal/professional content for each section — not one-liners.
+- Render every blueprint section in order using its content_hint as the source.
 - Wherever the blueprint shows a [Placeholder], render it as a styled span using the EXACT placeholder text from the blueprint — e.g. if the blueprint says [Email Address] write <span style="font-style:italic;">[Email Address]</span>, if it says [Phone Number] write <span style="font-style:italic;">[Phone Number]</span>. NEVER replace every placeholder with [Client Name] — each placeholder must show its own specific field name.
-- If a field value is provided in the user request, use it directly — do not leave it as a placeholder.
-- Always include a signature block at the end with lines for all parties.
-- Close ALL HTML tags — the document must end with </body></html> with no open tags.
 - Do NOT include markdown backticks, explanations, or any text outside the HTML.
 
 ━━━ DESIGN RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

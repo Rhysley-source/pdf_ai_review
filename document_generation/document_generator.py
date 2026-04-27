@@ -185,8 +185,8 @@ def _get_int_env(name: str, default: int) -> int:
 
 # Token budgets per step
 # Step 3 output cap:
-# raised to 6000 for gpt-4.1-nano to avoid truncation on longer docs; set MAX_TOKENS_HTML=none (or 0) to remove cap.
-_MAX_TOKENS_HTML      = _get_optional_int_env("MAX_TOKENS_HTML", 6000)
+# default 4200 for predictable latency; set MAX_TOKENS_HTML=none (or 0) to remove cap.
+_MAX_TOKENS_HTML      = _get_optional_int_env("MAX_TOKENS_HTML", 4200)
 _MAX_TOKENS_BLUEPRINT = 2048  # Step 2: detailed pre-filled section plan — needs more room than plain JSON
 _MAX_TOKENS_JSON      = 2048  # Step 1: small JSON classification response
 _HTML_GEN_RETRIES     = _get_int_env("HTML_GEN_RETRIES", 2)  # Step 3 retry attempts
@@ -896,7 +896,7 @@ Rules:
                 user_prompt,
                 model=model_for_call,
                 max_tokens=current_max_tokens,
-                temperature=0.0 if compact_mode else 0.0,
+                temperature=0.1 if compact_mode else 0.2,
                 use_seed=(attempt == 1),
             )
         except Exception:
