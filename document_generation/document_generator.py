@@ -192,7 +192,7 @@ _MAX_TOKENS_JSON      = 2048  # Step 1: small JSON classification response
 _HTML_GEN_RETRIES     = _get_int_env("HTML_GEN_RETRIES", 2)  # Step 3 retry attempts
 _MAX_TOKENS_HTML_STEP_UP = _get_int_env("MAX_TOKENS_HTML_STEP_UP", 1200)
 _MAX_TOKENS_HTML_HARD_LIMIT = _get_int_env("MAX_TOKENS_HTML_HARD_LIMIT", 7200)
-_COMPACT_HTML_MAX_TOKENS = _get_int_env("COMPACT_HTML_MAX_TOKENS", 3200)
+_COMPACT_HTML_MAX_TOKENS = _get_int_env("COMPACT_HTML_MAX_TOKENS", 1800)
 _COMPACT_HTML_RETRIES = _get_int_env("COMPACT_HTML_RETRIES", 2)
 _USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY = (
     (os.environ.get("USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY", "1") or "1").strip().lower()
@@ -465,6 +465,26 @@ def _clean_html(raw: str) -> str:
         # Truncated — keep everything from <html onward
         cleaned = cleaned[start:]
     return cleaned
+
+
+def _repair_truncated_html(html_text: str) -> str:
+    """
+    Best-effort repair for truncated model output.
+    Adds missing closing tags so downstream renderers can still load the document.
+    """
+    repaired = html_text.strip()
+    if not repaired:
+        return repaired
+
+    low = repaired.lower()
+    if "<html" not in low:
+        return repaired
+
+    if "</body>" not in low and "<body" in low:
+        repaired += "\n</body>"
+    if "</html>" not in low:
+        repaired += "\n</html>"
+    return repaired
 
 
 def _validate_html(html: str) -> tuple[bool, str]:
@@ -825,6 +845,7 @@ Rules:
 """
         current_max_tokens = _COMPACT_HTML_MAX_TOKENS
         retries = max(1, _COMPACT_HTML_RETRIES)
+        model_for_call = _FAST_MODEL
     else:
         system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
             **context,
@@ -832,6 +853,9 @@ Rules:
         )
         current_max_tokens = _MAX_TOKENS_HTML
         retries = _HTML_GEN_RETRIES
+        model_for_call = None
+
+    best_effort_html = ""
 
     for attempt in range(1, retries + 1):
         if attempt == 1:
@@ -846,6 +870,7 @@ Rules:
             raw, finish = await _call_llm(
                 system_prompt,
                 user_prompt,
+                model=model_for_call,
                 max_tokens=current_max_tokens,
                 temperature=0.1 if compact_mode else 0.2,
                 use_seed=(attempt == 1),
@@ -859,7 +884,9 @@ Rules:
         # If model reports truncation but produced a complete valid HTML document,
         # accept it to avoid unnecessary retries.
         if finish == "length":
-            cleaned = _clean_html(raw)
+            cleaned = _repair_truncated_html(_clean_html(raw))
+            if len(cleaned) > len(best_effort_html):
+                best_effort_html = cleaned
             valid, _ = _validate_html(cleaned)
             if valid:
                 logger.warning(
@@ -892,9 +919,16 @@ Rules:
                     f"[doc-gen] Step 3: response truncated (finish=length) on final attempt "
                     f"{attempt}/{retries}"
                 )
+                if best_effort_html:
+                    logger.warning(
+                        "[doc-gen] Step 3: returning best-effort repaired HTML after truncation"
+                    )
+                    return best_effort_html
             continue
 
-        cleaned = _clean_html(raw)
+        cleaned = _repair_truncated_html(_clean_html(raw))
+        if len(cleaned) > len(best_effort_html):
+            best_effort_html = cleaned
         valid, reason = _validate_html(cleaned)
         if valid:
             return cleaned
@@ -903,6 +937,10 @@ Rules:
             f"[doc-gen] Step 3: invalid HTML on attempt {attempt}/{retries} "
             f"- {reason} (finish={finish})"
         )
+
+    if best_effort_html:
+        logger.warning("[doc-gen] Step 3: returning best-effort repaired HTML after all attempts")
+        return best_effort_html
 
     return ""  # all attempts exhausted - caller raises HTTPException
 
