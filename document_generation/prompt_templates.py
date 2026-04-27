@@ -21,62 +21,22 @@ class SimulatedPromptTemplate:
 # ---------------------------------------------------------------------------
 
 QUERY_ANALYSIS_PROMPT = SimulatedPromptTemplate(
-    template="""You are a document analysis assistant. Read the user's request and return ONLY a valid JSON object — no markdown, no explanation, no backticks.
+    template="""Return ONLY one JSON object (no markdown):
+{"is_document_request":boolean,"doc_type":"invoice|contract|employment|nda|lease|resume|certificate|report|proposal|purchase_order|letter|other","doc_label":"string","fields":{}}
 
-JSON keys you must return:
-  "is_document_request" : true if the user is asking to generate, create, or draft any kind of
-                          document. false for anything else (questions, calculations, greetings,
-                          general knowledge, weather, coding help, etc.).
-  "doc_type"  : classify into EXACTLY one of:
-                invoice, contract, employment, nda, lease, resume,
-                certificate, report, proposal, purchase_order, letter, other
-                (set to "other" when is_document_request is false)
-  "doc_label" : short human-readable name for the specific document (max 6 words).
-                Examples: "Tax Invoice", "Service Agreement", "Job Offer Letter",
-                "Non-Disclosure Agreement", "Software Engineer Resume"
-                (set to "" when is_document_request is false)
-  "fields"    : a flat JSON object of ALL details extracted from the user's request.
-                Use snake_case keys. Set value to null for any detail not mentioned.
-                Extract: names, company names, dates, amounts, roles, addresses,
-                durations, quantities, descriptions, and any other document-specific data.
-                (set to {} when is_document_request is false)
+Rules:
+- is_document_request=true only for generate/create/draft document requests.
+- If false: {"is_document_request":false,"doc_type":"other","doc_label":"","fields":{}}
+- If true: choose one doc_type from the list.
+- doc_label: short and specific (max 5 words).
+- fields: include only explicit values from the user request, using snake_case keys.
+- Do not invent values. Do not add null keys.
 
-Mapping guidance:
-  invoice        → billing / payment document between vendor and client
-  contract       → service, vendor, freelancer, consulting, or general agreement
-  employment     → job offer letter, appointment letter, employment contract
-  nda            → non-disclosure or confidentiality agreement
-  lease          → property lease, rent agreement, tenancy, leave and licence
-  resume         → CV, curriculum vitae, resume, candidate profile
-  certificate    → certificate of completion, appreciation, training, achievement
-  report         → analytical, financial, status, or summary report
-  proposal       → business proposal, project proposal, RFP response
-  purchase_order → purchase order, PO, procurement document
-  letter         → formal letter, cover letter, recommendation letter, notice
-  other          → anything not covered above
-
-Return ONLY the raw JSON. No wrapper text, no markdown fences.
-
-Example — document request:
-{
-  "is_document_request": true,
-  "doc_type": "invoice",
-  "doc_label": "Web Development Invoice",
-  "fields": {
-    "vendor_name": "Acme Corp",
-    "client_name": "Beta Ltd",
-    "amount": "2000 USD",
-    "due_date": null
-  }
-}
-
-Example — non-document request ("what is the capital of France?"):
-{
-  "is_document_request": false,
-  "doc_type": "other",
-  "doc_label": "",
-  "fields": {}
-}""",
+Hints:
+- employment: offer letter, appointment letter, employment contract
+- lease: rent agreement, tenancy
+- nda: non-disclosure, confidentiality
+- purchase_order: PO, procurement order""",
     input_variables=[],
 )
 
