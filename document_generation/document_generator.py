@@ -18,6 +18,8 @@ from .prompt_templates import (
     QUERY_ANALYSIS_PROMPT,
     TEMPLATE_BUILD_PROMPT,
     DOCUMENT_GENERATION_V2_PROMPT,
+    DOCUMENT_GENERATION_SYSTEM_PROMPT,
+    MERGED_ANALYSIS_BLUEPRINT_PROMPT,
     REGENERATION_INTENT_PROMPT,
     SECTION_TEMPLATES,
     build_generation_context,
@@ -194,10 +196,7 @@ _MAX_TOKENS_HTML_STEP_UP = _get_int_env("MAX_TOKENS_HTML_STEP_UP", 1200)
 _MAX_TOKENS_HTML_HARD_LIMIT = _get_int_env("MAX_TOKENS_HTML_HARD_LIMIT", 7200)
 _COMPACT_HTML_MAX_TOKENS = _get_int_env("COMPACT_HTML_MAX_TOKENS", 1800)
 _COMPACT_HTML_RETRIES = _get_int_env("COMPACT_HTML_RETRIES", 2)
-_USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY = (
-    (os.environ.get("USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY", "1") or "1").strip().lower()
-    in {"1", "true", "yes", "on"}
-)
+
 
 
 async def _call_llm(
@@ -583,6 +582,123 @@ async def _analyze_query(user_prompt: str) -> dict:
     return analysis
 
 
+def _parse_merged_json(raw: str) -> tuple[dict, dict | None]:
+    """
+    Parses the merged Steps 1+2 response into (analysis, context).
+    Returns context=None when blueprint sections are missing (caller uses static fallback).
+    Raises HTTPException(422) when is_document_request is False.
+    Raises ValueError on malformed JSON (caller falls back to sequential calls).
+    """
+    cleaned = raw.strip()
+    if "```" in cleaned:
+        cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Merged response non-JSON: {raw[:200]}") from exc
+
+    if not isinstance(parsed, dict) or "doc_type" not in parsed:
+        raise ValueError(f"Merged response missing doc_type: {raw[:200]}")
+
+    if parsed["doc_type"] not in SECTION_TEMPLATES:
+        parsed["doc_type"] = "other"
+    if not isinstance(parsed.get("fields"), dict):
+        parsed["fields"] = {}
+
+    analysis = {
+        "is_document_request": bool(parsed.get("is_document_request", True)),
+        "doc_type":  parsed["doc_type"],
+        "doc_label": parsed.get("doc_label", "Document"),
+        "fields":    parsed["fields"],
+    }
+
+    if not analysis["is_document_request"]:
+        return analysis, None
+
+    sections = parsed.get("sections", [])
+    if not isinstance(sections, list) or not sections:
+        return analysis, None  # caller uses static fallback
+
+    lines = []
+    for i, sec in enumerate(sections, 1):
+        title        = sec.get("title", f"Section {i}")
+        content_hint = sec.get("content_hint", "")
+        missing      = sec.get("missing_fields", [])
+        entry        = f"{i}. {title}\n   → {content_hint}"
+        if missing:
+            entry += f"\n   ⚠ Missing fields (use visible placeholders): {', '.join(missing)}"
+        lines.append(entry)
+    sections_block = "\n\n".join(lines)
+
+    doc_label = (parsed.get("document_title") or "").strip() or analysis["doc_label"]
+
+    context = {
+        "doc_type":       analysis["doc_type"],
+        "doc_label":      doc_label,
+        "tone":           parsed.get("tone", "professional"),
+        "layout_notes":   parsed.get("layout_notes", "Standard document layout."),
+        "sections_block": sections_block,
+    }
+    return analysis, context
+
+
+async def _analyze_and_build_blueprint(user_prompt: str) -> tuple[dict, dict]:
+    """
+    Single fast-model call replacing sequential _analyze_query + _build_template_context.
+    Saves one full LLM round-trip (~400-700 ms) per generate-html request.
+    Falls back to sequential calls when the merged response cannot be parsed.
+    Raises HTTPException(422) when the prompt is not a document request.
+    """
+    logger.info("[doc-gen] Steps 1+2 (merged): analyzing + building blueprint...")
+    try:
+        raw, _ = await _call_llm(
+            MERGED_ANALYSIS_BLUEPRINT_PROMPT.template,
+            user_prompt,
+            model=_FAST_MODEL,
+            max_tokens=_MAX_TOKENS_BLUEPRINT,
+            temperature=0,
+            use_seed=True,
+        )
+        logger.info(f"[doc-gen] Steps 1+2 merged raw output: {raw[:300]}")
+        analysis, context = _parse_merged_json(raw)
+    except ValueError as exc:
+        logger.warning(f"[doc-gen] Merged parse failed ({exc}) — falling back to sequential")
+        analysis = await _analyze_query(user_prompt)
+        context  = await _build_template_context(analysis, user_prompt)
+        analysis["_user_prompt"] = user_prompt
+        return analysis, context
+
+    analysis["_user_prompt"] = user_prompt
+
+    if not analysis.get("is_document_request", False):
+        raise HTTPException(
+            status_code=422,
+            detail=_err_not_document_request(user_prompt),
+        )
+
+    if context is None:
+        logger.info("[doc-gen] Merged blueprint empty — using static template fallback")
+        context = _static_template_context(analysis)
+
+    return analysis, context
+
+
+def _build_step3_user_message(context: dict, user_prompt: str) -> str:
+    """
+    Builds the dynamic user message for Step 3, keeping the system prompt static
+    so OpenAI can cache the ~700-token DOCUMENT_GENERATION_SYSTEM_PROMPT prefix.
+    """
+    return (
+        f"Document Type : {context['doc_label']} ({context['doc_type']})\n"
+        f"Tone          : {context['tone']}\n"
+        f"Layout Notes  : {context['layout_notes']}\n\n"
+        f"Document Blueprint — generate each section in this exact order:\n"
+        f"{context['sections_block']}\n\n"
+        f"Original User Request:\n{user_prompt}"
+    )
+
+
 def _parse_blueprint_json(raw: str, analysis: dict) -> dict:
     """
     Parses the Step 2 LLM blueprint response.
@@ -694,21 +810,6 @@ async def _build_template_context(analysis: dict, user_prompt: str = "") -> dict
     return _parse_blueprint_json(raw, analysis)
 
 
-def _has_meaningful_fields(fields: dict | None) -> bool:
-    """
-    Returns True when Step 1 extracted at least one non-empty field value.
-    """
-    if not isinstance(fields, dict) or not fields:
-        return False
-    for value in fields.values():
-        if value is None:
-            continue
-        if isinstance(value, str) and not value.strip():
-            continue
-        if isinstance(value, (list, dict)) and not value:
-            continue
-        return True
-    return False
 
 
 def _count_meaningful_fields(fields: dict | None) -> int:
@@ -870,11 +971,12 @@ Rules:
         current_max_tokens = _COMPACT_HTML_MAX_TOKENS
         retries = max(1, _COMPACT_HTML_RETRIES)
         model_for_call = _FAST_MODEL
+        user_message = user_prompt  # compact system_prompt embeds all context
     else:
-        system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
-            **context,
-            user_request=user_prompt,
-        )
+        # Static system prompt enables OpenAI prompt-cache hits across requests.
+        # Dynamic blueprint + user request move to the user message.
+        system_prompt  = DOCUMENT_GENERATION_SYSTEM_PROMPT
+        user_message   = _build_step3_user_message(context, user_prompt)
         current_max_tokens = _MAX_TOKENS_HTML
         retries = _HTML_GEN_RETRIES
         model_for_call = None
@@ -893,7 +995,7 @@ Rules:
         try:
             raw, finish = await _call_llm(
                 system_prompt,
-                user_prompt,
+                user_message,
                 model=model_for_call,
                 max_tokens=current_max_tokens,
                 temperature=0.1 if compact_mode else 0.2,
@@ -1057,64 +1159,28 @@ async def generate_document_html(
     )
 
     try:
-        # Step 1: query analysis
+        # Steps 1+2 merged: single fast-model call for analysis + blueprint.
+        # Saves one full LLM round-trip vs the previous sequential Step1→Step2 flow.
         step_started = time.perf_counter()
         try:
-            analysis = await _analyze_query(request.user_prompt)
+            analysis, context = await _analyze_and_build_blueprint(request.user_prompt)
         except HTTPException:
             raise
         except Exception as e:
-            logger.exception("[doc-gen] Step 1 failed")
+            logger.exception("[doc-gen] Steps 1+2 (merged) failed")
             raise HTTPException(
                 status_code=502,
                 detail=_err_model_failed("Query Analysis", request.user_prompt, str(e)),
             )
         logger.info(
-            f"[doc-gen] Step 1 complete in {time.perf_counter() - step_started:.2f}s "
-            f"doc_type={analysis.get('doc_type', 'other')}"
-        )
-
-        # Step 2: blueprint building (LLM)
-        use_static_blueprint = False
-        use_compact_generation = False
-        request_word_count = len(re.findall(r"[A-Za-z0-9]+", request.user_prompt))
-        meaningful_field_count = _count_meaningful_fields(analysis.get("fields"))
-
-        step_started = time.perf_counter()
-        try:
-            has_fields = _has_meaningful_fields(analysis.get("fields"))
-            use_static_blueprint = (
-                _USE_STATIC_BLUEPRINT_WHEN_FIELDS_EMPTY
-                and not has_fields
-                and request_word_count <= 40
-            )
-
-            if use_static_blueprint:
-                logger.info(
-                    "[doc-gen] Step 2: skipping LLM blueprint "
-                    "(no extracted fields + short prompt) - using static blueprint context"
-                )
-                context = _static_template_context(analysis)
-                use_compact_generation = True
-            else:
-                context = await _build_template_context(analysis, user_prompt=request.user_prompt)
-
-            # For short prompts with only a few explicit values, compact generation
-            # avoids long-token full generation while still using OpenAI output.
-            if request_word_count <= 28 and meaningful_field_count <= 5:
-                use_compact_generation = True
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("[doc-gen] Step 2 failed")
-            raise HTTPException(
-                status_code=502,
-                detail=_err_model_failed("Blueprint Building", request.user_prompt, str(e)),
-            )
-        logger.info(
-            f"[doc-gen] Step 2 complete in {time.perf_counter() - step_started:.2f}s "
+            f"[doc-gen] Steps 1+2 (merged) complete in {time.perf_counter() - step_started:.2f}s "
+            f"doc_type={analysis.get('doc_type', 'other')} "
             f"doc_label='{context.get('doc_label', 'Document')}'"
         )
+
+        request_word_count     = len(re.findall(r"[A-Za-z0-9]+", request.user_prompt))
+        meaningful_field_count = _count_meaningful_fields(analysis.get("fields"))
+        use_compact_generation = request_word_count <= 28 and meaningful_field_count <= 5
 
         # Step 3: final HTML generation
         step_started = time.perf_counter()
@@ -1204,35 +1270,29 @@ async def regenerate_document_html(
             detail=_err_document_not_found(request.document_id),
         )
 
-    # Intent check runs in parallel with nothing else here, but is isolated
-    # so it uses the fast model and doesn't delay the modify path unnecessarily.
-    # LLM intent check — branch based on whether user wants to modify or generate new
-    intent = await _check_regeneration_intent(request.modification_query, existing_html)
+    # Fast keyword pre-filter: if the query clearly contains modification verbs/phrases,
+    # skip the LLM intent call entirely (saves one round-trip for the common case).
+    # Only fall through to the LLM check when the query has no modification keywords —
+    # i.e. it might be asking for a brand new document.
+    if _is_modification_query(request.modification_query):
+        intent = "modify"
+        logger.info("[doc-gen] Regeneration intent=modify (keyword pre-filter, skipped LLM check)")
+    else:
+        intent = await _check_regeneration_intent(request.modification_query, existing_html)
 
     if intent == "new_document":
         # ── New document generation path (same as /generate-html) ──────────
         logger.info("[doc-gen] Regeneration intent=new_document — running generation pipeline")
 
         try:
-            analysis = await _analyze_query(request.modification_query)
+            _, context = await _analyze_and_build_blueprint(request.modification_query)
         except HTTPException:
             raise
         except Exception as e:
-            logger.exception("[doc-gen] Step 1 failed during regeneration→generate")
+            logger.exception("[doc-gen] Steps 1+2 failed during regeneration→generate")
             raise HTTPException(
                 status_code=502,
                 detail=_err_model_failed("Query Analysis", request.modification_query, str(e)),
-            )
-
-        try:
-            context = await _build_template_context(analysis, user_prompt=request.modification_query)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("[doc-gen] Step 2 failed during regeneration→generate")
-            raise HTTPException(
-                status_code=502,
-                detail=_err_model_failed("Blueprint Building", request.modification_query, str(e)),
             )
 
         try:

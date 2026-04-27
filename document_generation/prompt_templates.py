@@ -459,9 +459,145 @@ Rules:
 
 
 # ---------------------------------------------------------------------------
+# MERGED STEPS 1+2 — Single LLM call: analyze query + build blueprint.
+# Replaces two sequential fast-model calls (QUERY_ANALYSIS_PROMPT then
+# TEMPLATE_BUILD_PROMPT) with one call at the same token budget as Step 2.
+# Falls back to sequential calls on parse failure (see document_generator.py).
+# ---------------------------------------------------------------------------
+
+MERGED_ANALYSIS_BLUEPRINT_PROMPT = SimulatedPromptTemplate(
+    template="""You are a document analysis and blueprint specialist. Analyze the user's request and return ONLY a single valid JSON object — no markdown, no backticks, no explanation.
+
+DOCUMENT TYPES — classify into exactly one:
+  invoice, contract, employment, nda, lease, resume, certificate, report, proposal, purchase_order, letter, other
+
+STANDARD SECTIONS PER TYPE (use as base; add any extras the user requests):
+invoice        : Invoice Header | Bill From | Bill To | Line Items Table | Subtotal/Tax/Total | Payment Instructions | Notes
+contract       : Parties | Recitals | Scope of Work | Term | Fees/Payment | IP | Confidentiality | Liability | Termination | Governing Law | Signatures
+employment     : Date/Addressee | Offer of Employment | Job Title/Department | Compensation/Benefits | Start Date/Location | Probation | Notice Period | Confidentiality/IP | Code of Conduct | Acceptance | Signatures
+nda            : Parties | Definitions | Exclusions | Obligations | Permitted Disclosures | Term | Return of Materials | Remedies | Governing Law | Signatures
+lease          : Parties | Property Description | Lease Term | Monthly Rent | Security Deposit | Utilities/Maintenance | Permitted Use | Termination | Move-out | Governing Law | Signatures
+resume         : Header | Professional Summary | Work Experience | Education | Skills | Certifications | Projects
+certificate    : Certificate Title | Awarded To | Body Text | Date of Award | Issuer | Signature Line
+report         : Title/Metadata | Executive Summary | Introduction | Methodology | Findings | Conclusions | Recommendations | Appendices
+proposal       : Cover Page | Executive Summary | Problem Statement | Proposed Solution | Scope of Work | Timeline | Pricing | About Us | Terms | Next Steps
+purchase_order : PO Header | Vendor Details | Line Items Table | Delivery Details | Payment Terms | Special Instructions | Authorized Signature
+letter         : Sender Details | Recipient | Subject | Salutation | Body | Close | Signatures
+other          : Document Title | Parties | Introduction | Main Content | Terms | Closing | Signatures
+
+━━━ TASK ━━━
+If NOT a document request (question, calculation, greeting, coding help, etc.) — return:
+{"is_document_request": false, "doc_type": "other", "doc_label": "", "fields": {}, "document_title": "", "sections": [], "tone": "professional", "layout_notes": ""}
+
+If IS a document request — return ALL of these keys:
+{
+  "is_document_request": true,
+  "doc_type": "<one type from the list above>",
+  "doc_label": "<short readable name, max 6 words, e.g. Tax Invoice, Service Agreement>",
+  "fields": {"<snake_case_key>": "<extracted value or null if not mentioned>"},
+  "document_title": "<exact heading for the document, e.g. TAX INVOICE, RENT AGREEMENT>",
+  "sections": [
+    {
+      "title": "<section heading>",
+      "content_hint": "<complete pre-filled description. Embed ALL known values — names, amounts, dates, addresses. Use [Field Label] for each missing required value, e.g. [Email Address], [Start Date].>",
+      "missing_fields": ["<label of each required field not found in the request>"]
+    }
+  ],
+  "tone": "<formal | professional | friendly | technical>",
+  "layout_notes": "<specific layout notes, e.g. Two-column header table. Numbered clauses. Two-column signature block.>"
+}
+
+Rules:
+- Include EVERY standard section for the detected doc_type plus any extras the user requested.
+- content_hint must embed actual values — write "Monthly Rent: $1,200" not "rent amount goes here".
+- Each missing required field → add its specific label to missing_fields AND use [Label] as placeholder in content_hint.
+- Return ONLY raw JSON. No markdown, no explanation.""",
+    input_variables=[],
+)
+
+
+# ---------------------------------------------------------------------------
 # STEP 3 — Final Document Generation Prompt
 # Uses the enriched context from Steps 1 & 2 for precise HTML generation.
+#
+# DOCUMENT_GENERATION_SYSTEM_PROMPT is the static system prompt (cacheable).
+# Dynamic document context (type, blueprint, user request) is passed as the
+# user message via _build_step3_user_message() — see document_generator.py.
+# DOCUMENT_GENERATION_V2_PROMPT is kept for reference/backward compatibility.
 # ---------------------------------------------------------------------------
+
+DOCUMENT_GENERATION_SYSTEM_PROMPT = """You are an expert document generator. Produce a single complete HTML document that looks identical when viewed in a browser and when converted to PDF.
+
+━━━ INSTRUCTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Return ONLY the complete HTML, starting with <html> and ending with </html>.
+- Include <html>, <head> with ONE embedded <style> block, and <body>.
+- Add contenteditable="true" to the outermost content div inside <body>.
+- Render every blueprint section in order using its content_hint as the source.
+- Wherever the blueprint shows a [Placeholder], render it as a styled span using the EXACT placeholder text — e.g. <span style="font-style:italic;">[Email Address]</span>. NEVER replace every placeholder with a generic [Client Name] — each must show its own specific field label.
+- Do NOT include markdown backticks, explanations, or any text outside the HTML.
+
+━━━ DESIGN RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Flat design only — no box-shadow, text-shadow, drop-shadow, or 3D effects.
+- No gradients, no background-image, no border-radius.
+- Body background: plain white (#ffffff). No colored section backgrounds.
+- Font: Arial, sans-serif. Body text 11pt. Section headings 12pt–14pt.
+- Content must fill the full page width — no narrow centered containers.
+- Section dividers: <hr style="border:none; border-top:1px solid #cccccc; margin:10px 0;"> only.
+- The result must look like a clean printed document, not a web widget.
+
+━━━ PDF-SAFE RULES (WeasyPrint — every rule is mandatory) ━━━━━━━━
+LAYOUT
+- NEVER use display:flex or display:grid.
+- For ALL side-by-side or multi-column content use <table> — never floats.
+  Two-column pattern:
+  <table width="100%" style="border-collapse:collapse; margin-bottom:10px;"><tr>
+    <td style="width:50%; vertical-align:top; padding:0;">LEFT CONTENT</td>
+    <td style="width:50%; vertical-align:top; padding:0; text-align:right;">RIGHT CONTENT</td>
+  </tr></table>
+- NEVER use position:fixed, position:sticky, or position:absolute.
+- NEVER use margin:auto — center text with text-align:center on the element itself.
+- NEVER use negative margin values.
+
+HEADINGS
+- Every h1–h6 MUST have ALL of these as inline style attributes (not in <style>):
+  font-size, font-weight, text-align, margin-top, margin-bottom, color.
+  Example: <h2 style="font-size:13pt; font-weight:bold; text-align:left; margin-top:14px; margin-bottom:6px; color:#000000;">
+
+SIZING & SPACING
+- font-size: use pt or px only — never em, rem, %, or vw.
+- Set line-height:1.5 on the body style and on every <p> element.
+- NEVER set a fixed height on any element — use padding-top and padding-bottom for spacing.
+- NEVER use min-height — use padding instead.
+- NEVER use overflow:hidden or overflow:scroll.
+
+TABLES
+- Every data table MUST have: style="width:100%; border-collapse:collapse; table-layout:fixed;"
+- Every <th> and <td> MUST have: explicit padding (e.g. padding:6px 8px) and border (e.g. border:1px solid #cccccc).
+- Add style="word-wrap:break-word; overflow-wrap:break-word;" to <td> cells that may contain long text, URLs, or amounts.
+- Add style="page-break-inside:avoid;" to any table that must not be split across PDF pages.
+
+PAGE BREAKS
+- Add style="page-break-inside:avoid;" to signature blocks and sections that must stay together.
+- Do NOT add page-break rules to normal paragraph sections — let content flow naturally.
+
+━━━ REQUIRED HTML SKELETON ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Start every document from this base — fill in <style> and body content:
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.5; color: #000000; background: #ffffff; margin: 0; padding: 24px; }
+    p    { margin: 0 0 8px 0; line-height: 1.5; }
+    /* Add document-specific class styles here */
+  </style>
+</head>
+<body>
+  <div contenteditable="true">
+    <!-- ALL document content here -->
+  </div>
+</body>
+</html>"""
+
 
 DOCUMENT_GENERATION_V2_PROMPT = SimulatedPromptTemplate(
     template="""You are an expert document generator. Produce a single complete HTML document that looks identical when viewed in a browser and when converted to PDF.
