@@ -434,18 +434,18 @@ Full user request (use this to extract every detail, clause, or requirement the 
 
 YOUR TASK — return ONLY a valid JSON object with exactly these keys:
 
-{{
+{
   "document_title": "<exact title to display at the top of the document, e.g. 'RENT AGREEMENT', 'TAX INVOICE', 'SERVICE AGREEMENT'>",
   "sections": [
-    {{
+    {
       "title": "<section heading>",
       "content_hint": "<complete, detailed description of exactly what to write in this section. Embed ALL known values directly — names, amounts, dates, addresses, durations. Mark every missing required value as [Field Name]. Be specific enough that no further instructions are needed.>",
       "missing_fields": ["<name of each required field not found in the request>"]
-    }}
+    }
   ],
   "tone": "<formal | professional | friendly | technical — pick the best fit for this document type>",
   "layout_notes": "<specific layout instruction — e.g. 'Two-column header table with landlord left, tenant right. Numbered clauses for all terms. Signature table at the bottom with two columns.'>"
-}}
+}
 
 Rules:
 1. Include EVERY section needed for a complete, legally sound {doc_label} — do not omit any standard section.
@@ -473,7 +473,7 @@ Return ONLY a valid JSON object — no markdown, no backticks, no explanation.
 "is_document_request" : true if the user wants to generate/create/draft any document. false otherwise.
 "doc_type"  : one of: invoice, contract, employment, nda, lease, resume, certificate, report, proposal, purchase_order, letter, other
 "doc_label" : short human-readable name (max 6 words). e.g. "Rent Agreement", "Tax Invoice", "Job Offer Letter"
-"fields"    : flat JSON of ALL details extracted. snake_case keys. null for anything not mentioned. Set to {{}} if not a document request.
+"fields"    : flat JSON of ALL details extracted. snake_case keys. null for anything not mentioned. Set to {} if not a document request.
 
 ━━━ SECTION REQUIREMENTS BY DOC TYPE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 invoice        : Invoice Header | Bill From | Bill To | Line Items Table | Subtotal/Tax/Total | Payment Instructions | Notes/Terms
@@ -496,11 +496,11 @@ other          : Document Title | Parties/Participants | Introduction/Purpose | 
 "layout_notes"   : specific layout instruction describing tables/columns/structure needed
 
 Each section object:
-{{
+{
   "title": "<section heading>",
   "content_hint": "<complete description of what to write — embed ALL known values: names, amounts, dates, addresses. Use [Field Name] for missing required values.>",
   "missing_fields": ["<name of each required field not found in the request>"]
-}}
+}
 
 Rules:
 1. content_hint must embed actual values — write "Monthly Rent: ₹18,000" not "monthly rent goes here".
@@ -510,24 +510,24 @@ Rules:
 5. Return ONLY raw JSON.
 
 Example output (document request):
-{{
+{
   "is_document_request": true,
   "doc_type": "invoice",
   "doc_label": "Web Development Invoice",
-  "fields": {{"vendor_name": "Acme Corp", "client_name": "Beta Ltd", "amount": "2000 USD", "due_date": null}},
+  "fields": {"vendor_name": "Acme Corp", "client_name": "Beta Ltd", "amount": "2000 USD", "due_date": null},
   "document_title": "TAX INVOICE",
-  "sections": [{{"title": "Invoice Header", "content_hint": "Invoice #[Invoice Number], Date: [Invoice Date], Due: [Due Date]", "missing_fields": ["Invoice Number", "Invoice Date", "Due Date"]}}],
+  "sections": [{"title": "Invoice Header", "content_hint": "Invoice #[Invoice Number], Date: [Invoice Date], Due: [Due Date]", "missing_fields": ["Invoice Number", "Invoice Date", "Due Date"]}],
   "tone": "professional",
   "layout_notes": "Two-column header table. Line items table with borders. Total section right-aligned."
-}}
+}
 
 Example output (non-document request):
-{{
+{
   "is_document_request": false,
   "doc_type": "other",
   "doc_label": "",
-  "fields": {{}}
-}}""",
+  "fields": {}
+}""",
     input_variables=[],
 )
 
@@ -679,8 +679,40 @@ Decide the user's intent:
                    make this a purchase order instead, generate a lease from this invoice)
 
 Return ONLY this JSON — no markdown, no explanation:
-{{"intent": "modify" | "new_document", "reason": "<one short sentence>"}}""",
+{"intent": "modify" | "new_document", "reason": "<one short sentence>"}""",
     input_variables=["current_doc_type", "modification_query"],
+)
+
+
+# ---------------------------------------------------------------------------
+# STEP 3 (text variant) — Plain-text document generation prompt
+# Used by /generate-text/stream. Produces a structured plain-text document
+# with no HTML tags, suitable for display or download as a .txt file.
+# ---------------------------------------------------------------------------
+
+DOCUMENT_GENERATION_TEXT_PROMPT = SimulatedPromptTemplate(
+    template="""You are an expert document writer. Produce a complete, professionally formatted plain-text document.
+
+Document Type : {doc_label} ({doc_type})
+Tone          : {tone}
+Layout Notes  : {layout_notes}
+
+Document Blueprint — generate each section in this exact order:
+{sections_block}
+
+Original User Request:
+{user_request}
+
+FORMATTING RULES:
+- Output plain text only — absolutely no HTML tags, no markdown symbols, no backticks.
+- Document title: write in ALL CAPS, centered using spaces, on its own line.
+- Section headings: write in ALL CAPS followed by a colon, on their own line.
+- Separate major sections with a line of dashes: ----------------------------------------
+- Tables and grids: use plain ASCII alignment with | characters and - separators.
+- Signature blocks: use underscores for signature lines: ____________________________
+- Wherever a value is missing, write the placeholder in square brackets: [Email Address], [Phone Number].
+- Do not add any preamble, explanation, or closing note — output the document content only.""",
+    input_variables=["doc_type", "doc_label", "tone", "layout_notes", "sections_block", "user_request"],
 )
 
 

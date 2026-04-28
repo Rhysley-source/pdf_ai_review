@@ -19,6 +19,7 @@ from .prompt_templates import (
     TEMPLATE_BUILD_PROMPT,
     COMBINED_ANALYSIS_BLUEPRINT_PROMPT,
     DOCUMENT_GENERATION_V2_PROMPT,
+    DOCUMENT_GENERATION_TEXT_PROMPT,
     REGENERATION_INTENT_PROMPT,
     SECTION_TEMPLATES,
     build_generation_context,
@@ -857,82 +858,6 @@ def _analysis_summary(analysis: dict) -> dict:
     }
 
 
-async def _stream_html_from_context(
-    context: dict,
-    user_prompt: str,
-    doc_id: str,
-):
-    """
-    Async generator for Step 3 — streams raw HTML chunks from OpenAI directly to
-    the client. Buffers the prefix until <html is found so markdown fences are
-    dropped before the first byte reaches the frontend. After the stream ends,
-    cleans and saves the full document to storage.
-    """
-    system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
-        **context,
-        user_request=user_prompt,
-    )
-    model = os.environ.get("MODEL_NAME", _MODEL)
-
-    kwargs: dict = {
-        "model":    model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_prompt},
-        ],
-        "stream": True,
-    }
-    if model not in _FIXED_TEMPERATURE_MODELS:
-        kwargs["temperature"] = 0.2
-    if _MAX_TOKENS_HTML is not None:
-        if model in _MAX_COMPLETION_TOKENS_MODELS:
-            kwargs["max_completion_tokens"] = _MAX_TOKENS_HTML
-        else:
-            kwargs["max_tokens"] = _MAX_TOKENS_HTML
-
-    accumulated: list[str] = []
-    prefix_buf = ""
-    html_started = False
-
-    try:
-        stream = await _CLIENT.chat.completions.create(**kwargs)
-        async for chunk in stream:
-            delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
-            if not delta:
-                continue
-            accumulated.append(delta)
-
-            if not html_started:
-                prefix_buf += delta
-                idx = prefix_buf.lower().find("<html")
-                if idx != -1:
-                    html_started = True
-                    yield prefix_buf[idx:].encode()
-                    prefix_buf = ""
-            else:
-                yield delta.encode()
-
-        # If the model never emitted <html (shouldn't happen), yield what we have
-        if not html_started and prefix_buf:
-            yield prefix_buf.encode()
-
-    except Exception:
-        logger.exception("[doc-gen] Step 3 stream failed")
-        return
-
-    # Post-stream: clean, validate, save
-    full_raw = "".join(accumulated)
-    cleaned_html = _repair_truncated_html(_clean_html(full_raw))
-    valid, reason = _validate_html(cleaned_html)
-    if valid:
-        try:
-            await asyncio.to_thread(_save_document, doc_id, cleaned_html)
-            logger.info(f"[doc-gen] Step 3 stream: saved doc_id={doc_id}")
-        except Exception:
-            logger.exception("[doc-gen] Step 3 stream: storage write failed")
-    else:
-        logger.warning(f"[doc-gen] Step 3 stream: HTML invalid after completion — {reason}")
-
 
 async def _generate_html_from_context(
     context: dict,
@@ -1119,7 +1044,7 @@ async def _check_regeneration_intent(modification_query: str, existing_html: str
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@router.post("/generate-html")
+@router.post("/generate-html", response_class=HTMLResponse)
 async def generate_document_html(
     request: DocumentGenerationRequest,
     _: None = Depends(verify_api_key),
@@ -1158,12 +1083,32 @@ async def generate_document_html(
             f"doc_label='{context.get('doc_label', 'Document')}'"
         )
 
-        logger.info(f"[doc-gen] /generate-html starting stream doc_id={doc_id}")
-        return StreamingResponse(
-            _stream_html_from_context(context, request.user_prompt, doc_id),
-            media_type="text/html",
-            headers={"X-Document-Id": doc_id},
+        # Step 3: generate full HTML (with retry + validation)
+        step_started = time.perf_counter()
+        try:
+            raw_html = await _generate_html_from_context(context, request.user_prompt)
+        except Exception as e:
+            logger.exception("[doc-gen] Step 3 failed")
+            raise HTTPException(
+                status_code=502,
+                detail=_err_model_failed("HTML Generation", request.user_prompt, str(e)),
+            )
+        logger.info(
+            f"[doc-gen] Step 3 complete in {time.perf_counter() - step_started:.2f}s"
         )
+
+        if not raw_html.strip():
+            raise HTTPException(
+                status_code=500,
+                detail=_err_empty_output(request.user_prompt),
+            )
+
+        await asyncio.to_thread(_save_document, doc_id, raw_html)
+        logger.info(
+            f"[doc-gen] /generate-html done doc_id={doc_id} "
+            f"total={time.perf_counter() - request_started:.2f}s"
+        )
+        return HTMLResponse(content=raw_html, headers={"X-Document-Id": doc_id})
 
     except HTTPException as exc:
         logger.warning(
@@ -1183,6 +1128,109 @@ async def generate_document_html(
                 "message": "An unexpected error occurred. Please try again.",
             },
         )
+
+
+@router.post("/generate-text/stream")
+async def generate_document_text_stream(
+    request: DocumentGenerationRequest,
+    _: None = Depends(verify_api_key),
+):
+    """
+    Streams a plain-text document to the client as it is generated.
+
+    Same Steps 1+2 pipeline as /generate-html (classify + blueprint), but
+    Step 3 produces structured plain text instead of HTML — no tags, no markdown.
+    Response is streamed chunk-by-chunk as text/plain.
+    The X-Document-Id header carries the document ID (same namespace as /generate-html).
+    """
+    if _is_gibberish(request.user_prompt):
+        raise HTTPException(status_code=422, detail=_err_invalid_prompt(request.user_prompt))
+
+    doc_id = request.document_id or str(uuid.uuid4())
+    request_started = time.perf_counter()
+    logger.info(f"[doc-gen] /generate-text/stream start doc_id={doc_id}")
+
+    try:
+        step_started = time.perf_counter()
+        try:
+            context = await _analyze_and_build(request.user_prompt)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("[doc-gen] /generate-text/stream Steps 1+2 failed")
+            raise HTTPException(
+                status_code=502,
+                detail=_err_model_failed("Analysis + Blueprint", request.user_prompt, str(e)),
+            )
+        logger.info(
+            f"[doc-gen] /generate-text/stream Steps 1+2 done in "
+            f"{time.perf_counter() - step_started:.2f}s "
+            f"doc_label='{context.get('doc_label', 'Document')}'"
+        )
+
+    except HTTPException as exc:
+        logger.warning(
+            f"[doc-gen] /generate-text/stream aborted doc_id={doc_id} "
+            f"status={exc.status_code} total={time.perf_counter() - request_started:.2f}s"
+        )
+        raise
+
+    async def _stream_text():
+        system_prompt = DOCUMENT_GENERATION_TEXT_PROMPT.format(
+            **context,
+            user_request=request.user_prompt,
+        )
+        model = os.environ.get("MODEL_NAME", _MODEL)
+
+        kwargs: dict = {
+            "model":    model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": request.user_prompt},
+            ],
+            "stream": True,
+        }
+        if model not in _FIXED_TEMPERATURE_MODELS:
+            kwargs["temperature"] = 0.2
+        if _MAX_TOKENS_HTML is not None:
+            if model in _MAX_COMPLETION_TOKENS_MODELS:
+                kwargs["max_completion_tokens"] = _MAX_TOKENS_HTML
+            else:
+                kwargs["max_tokens"] = _MAX_TOKENS_HTML
+
+        accumulated: list[str] = []
+        try:
+            stream = await _CLIENT.chat.completions.create(**kwargs)
+            async for chunk in stream:
+                delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
+                if not delta:
+                    continue
+                accumulated.append(delta)
+                yield delta.encode("utf-8")
+        except Exception:
+            logger.exception("[doc-gen] /generate-text/stream Step 3 failed")
+            return
+
+        full_text = "".join(accumulated)
+        if full_text.strip():
+            try:
+                await asyncio.to_thread(_save_document, doc_id, full_text)
+                logger.info(
+                    f"[doc-gen] /generate-text/stream saved doc_id={doc_id} "
+                    f"total={time.perf_counter() - request_started:.2f}s"
+                )
+            except Exception:
+                logger.exception("[doc-gen] /generate-text/stream storage write failed")
+
+    return StreamingResponse(
+        _stream_text(),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "X-Document-Id":     doc_id,
+            "Cache-Control":     "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/regenerate-html", response_class=HTMLResponse)
