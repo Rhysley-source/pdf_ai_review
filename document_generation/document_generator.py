@@ -1428,8 +1428,6 @@ async def regenerate_document_html_stream(
                 kwargs["max_tokens"] = _MAX_TOKENS_HTML
 
         accumulated: list[str] = []
-        prefix_buf   = ""
-        html_started = False
 
         try:
             stream = await _CLIENT.chat.completions.create(**kwargs)
@@ -1438,19 +1436,7 @@ async def regenerate_document_html_stream(
                 if not delta:
                     continue
                 accumulated.append(delta)
-
-                if not html_started:
-                    prefix_buf += delta
-                    idx = prefix_buf.lower().find("<html")
-                    if idx != -1:
-                        html_started = True
-                        yield prefix_buf[idx:].encode()
-                        prefix_buf = ""
-                else:
-                    yield delta.encode()
-
-            if not html_started and prefix_buf:
-                yield prefix_buf.encode()
+                yield delta.encode()
 
         except Exception:
             logger.exception("[doc-gen] /regenerate-html/stream Step 3 failed")
@@ -1470,7 +1456,7 @@ async def regenerate_document_html_stream(
 
     return StreamingResponse(
         _stream(),
-        media_type="text/html",
+        media_type="text/plain",
         headers={
             "X-Document-Id":     doc_id,
             "Cache-Control":     "no-cache",
