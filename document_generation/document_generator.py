@@ -1347,6 +1347,138 @@ async def regenerate_document_html(
     return HTMLResponse(content=cleaned_html)
 
 
+@router.post("/regenerate-html/stream")
+async def regenerate_document_html_stream(
+    request: DocumentRegenerationRequest,
+    _: None = Depends(verify_api_key),
+):
+    """
+    Streaming version of /regenerate-html.
+
+    Two paths — decided by an intent check before streaming starts:
+      • modify       → streams the modified existing document HTML
+      • new_document → runs Steps 1+2 (classify + blueprint) then streams fresh HTML
+
+    HTML is streamed chunk-by-chunk as text/html. After the stream completes
+    the full document is cleaned, validated, and saved to storage.
+    X-Document-Id header carries the document ID.
+    """
+    if _is_gibberish(request.modification_query):
+        raise HTTPException(
+            status_code=422,
+            detail=_err_invalid_modification(request.modification_query),
+        )
+
+    existing_html = await asyncio.to_thread(_load_document, request.document_id)
+    if not existing_html:
+        raise HTTPException(
+            status_code=404,
+            detail=_err_document_not_found(request.document_id),
+        )
+
+    # Intent check completes before streaming so we know which path to take
+    intent = await _check_regeneration_intent(request.modification_query, existing_html)
+    logger.info(f"[doc-gen] /regenerate-html/stream intent={intent} doc_id={request.document_id}")
+
+    doc_id = request.document_id
+    model  = os.environ.get("MODEL_NAME", _MODEL)
+
+    if intent == "new_document":
+        # ── New document path: Steps 1+2 must finish before we can stream ──
+        try:
+            analysis = await _analyze_query(request.modification_query)
+            context  = await _build_template_context(analysis, user_prompt=request.modification_query)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("[doc-gen] /regenerate-html/stream Steps 1+2 failed (new_document)")
+            raise HTTPException(
+                status_code=502,
+                detail=_err_model_failed("Analysis + Blueprint", request.modification_query, str(e)),
+            )
+
+        system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
+            **context,
+            user_request=request.modification_query,
+        )
+        user_message = request.modification_query
+    else:
+        # ── Modify path: feed existing HTML + modification query to LLM ────
+        system_prompt = REGENERATE_PROMPT.format(
+            existing_html=existing_html,
+            modification_query=request.modification_query,
+        )
+        user_message = request.modification_query
+
+    async def _stream():
+        kwargs: dict = {
+            "model":    model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_message},
+            ],
+            "stream": True,
+        }
+        if model not in _FIXED_TEMPERATURE_MODELS:
+            kwargs["temperature"] = 0.2
+        if _MAX_TOKENS_HTML is not None:
+            if model in _MAX_COMPLETION_TOKENS_MODELS:
+                kwargs["max_completion_tokens"] = _MAX_TOKENS_HTML
+            else:
+                kwargs["max_tokens"] = _MAX_TOKENS_HTML
+
+        accumulated: list[str] = []
+        prefix_buf   = ""
+        html_started = False
+
+        try:
+            stream = await _CLIENT.chat.completions.create(**kwargs)
+            async for chunk in stream:
+                delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
+                if not delta:
+                    continue
+                accumulated.append(delta)
+
+                if not html_started:
+                    prefix_buf += delta
+                    idx = prefix_buf.lower().find("<html")
+                    if idx != -1:
+                        html_started = True
+                        yield prefix_buf[idx:].encode()
+                        prefix_buf = ""
+                else:
+                    yield delta.encode()
+
+            if not html_started and prefix_buf:
+                yield prefix_buf.encode()
+
+        except Exception:
+            logger.exception("[doc-gen] /regenerate-html/stream Step 3 failed")
+            return
+
+        full_raw     = "".join(accumulated)
+        cleaned_html = _repair_truncated_html(_clean_html(full_raw))
+        valid, reason = _validate_html(cleaned_html)
+        if valid:
+            try:
+                await asyncio.to_thread(_save_document, doc_id, cleaned_html)
+                logger.info(f"[doc-gen] /regenerate-html/stream saved doc_id={doc_id}")
+            except Exception:
+                logger.exception("[doc-gen] /regenerate-html/stream storage write failed")
+        else:
+            logger.warning(f"[doc-gen] /regenerate-html/stream HTML invalid after stream — {reason}")
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/html",
+        headers={
+            "X-Document-Id":     doc_id,
+            "Cache-Control":     "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/get-html/{document_id}", response_class=HTMLResponse)
 async def get_document_html(
     document_id: str,
