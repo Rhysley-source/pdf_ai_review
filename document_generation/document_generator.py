@@ -24,6 +24,7 @@ from .prompt_templates import (
     SECTION_TEMPLATES,
     build_generation_context,
     REGENERATE_PROMPT,
+    REGENERATE_TEXT_PROMPT,
 )
 from auth import verify_api_key
 
@@ -1383,32 +1384,12 @@ async def regenerate_document_html_stream(
     doc_id = request.document_id
     model  = os.environ.get("MODEL_NAME", _MODEL)
 
-    if intent == "new_document":
-        # ── New document path: Steps 1+2 must finish before we can stream ──
-        try:
-            analysis = await _analyze_query(request.modification_query)
-            context  = await _build_template_context(analysis, user_prompt=request.modification_query)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("[doc-gen] /regenerate-html/stream Steps 1+2 failed (new_document)")
-            raise HTTPException(
-                status_code=502,
-                detail=_err_model_failed("Analysis + Blueprint", request.modification_query, str(e)),
-            )
-
-        system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
-            **context,
-            user_request=request.modification_query,
-        )
-        user_message = request.modification_query
-    else:
-        # ── Modify path: feed existing HTML + modification query to LLM ────
-        system_prompt = REGENERATE_PROMPT.format(
-            existing_html=existing_html,
-            modification_query=request.modification_query,
-        )
-        user_message = request.modification_query
+    # Both paths use the plain-text regeneration prompt
+    system_prompt = REGENERATE_TEXT_PROMPT.format(
+        existing_html=existing_html,
+        modification_query=request.modification_query,
+    )
+    user_message = request.modification_query
 
     async def _stream():
         kwargs: dict = {
@@ -1427,32 +1408,16 @@ async def regenerate_document_html_stream(
             else:
                 kwargs["max_tokens"] = _MAX_TOKENS_HTML
 
-        accumulated: list[str] = []
-
         try:
             stream = await _CLIENT.chat.completions.create(**kwargs)
             async for chunk in stream:
                 delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
                 if not delta:
                     continue
-                accumulated.append(delta)
                 yield delta.encode()
-
         except Exception:
             logger.exception("[doc-gen] /regenerate-html/stream Step 3 failed")
             return
-
-        full_raw     = "".join(accumulated)
-        cleaned_html = _repair_truncated_html(_clean_html(full_raw))
-        valid, reason = _validate_html(cleaned_html)
-        if valid:
-            try:
-                await asyncio.to_thread(_save_document, doc_id, cleaned_html)
-                logger.info(f"[doc-gen] /regenerate-html/stream saved doc_id={doc_id}")
-            except Exception:
-                logger.exception("[doc-gen] /regenerate-html/stream storage write failed")
-        else:
-            logger.warning(f"[doc-gen] /regenerate-html/stream HTML invalid after stream — {reason}")
 
     return StreamingResponse(
         _stream(),

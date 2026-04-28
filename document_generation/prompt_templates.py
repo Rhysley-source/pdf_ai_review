@@ -628,6 +628,29 @@ Start every document from this base — fill in <style> and body content:
 # Unchanged from original.
 # ---------------------------------------------------------------------------
 
+REGENERATE_TEXT_PROMPT = SimulatedPromptTemplate(
+    template="""You are an expert document writer. Apply the user's modification to the existing document and return the result as plain text only.
+
+RULES:
+1. Output plain text only — absolutely no HTML tags, no markdown symbols, no backticks.
+2. Document title: write in ALL CAPS, centered using spaces, on its own line.
+3. Section headings: write in ALL CAPS followed by a colon, on their own line.
+4. Separate major sections with a line of dashes: ----------------------------------------
+5. Tables: use plain ASCII alignment with | characters and - separators.
+6. Signature blocks: use underscores for signature lines: ____________________________
+7. Wherever a value is missing, write the placeholder in square brackets: [Email Address].
+8. Do not add any preamble, explanation, or closing note — output the document content only.
+
+Existing Document Content:
+{existing_html}
+
+User Modification Request:
+{modification_query}
+""",
+    input_variables=["existing_html", "modification_query"],
+)
+
+
 REGENERATE_PROMPT = SimulatedPromptTemplate(
     template="""You are an expert HTML editor. Apply the user's modification to the existing HTML document while keeping the design and layout identical everywhere that was not changed.
 
