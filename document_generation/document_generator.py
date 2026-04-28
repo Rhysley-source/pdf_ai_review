@@ -273,41 +273,6 @@ async def _call_llm_fast(system_prompt: str, user_message: str) -> str:
     return content
 
 
-async def _call_llm_stream(
-    system_prompt: str,
-    user_message:  str,
-    model:         str | None = None,
-    max_tokens:    int | None = _MAX_TOKENS_HTML,
-    temperature:   float | None = 0.2,
-):
-    """Streams LLM output chunk by chunk. Yields raw text deltas."""
-    model = model or os.environ.get("MODEL_NAME", _MODEL)
-
-    kwargs: dict = {
-        "model":    model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_message},
-        ],
-        "stream": True,
-    }
-
-    if model not in _FIXED_TEMPERATURE_MODELS:
-        kwargs["temperature"] = temperature if temperature is not None else 0
-
-    if max_tokens is not None:
-        if model in _MAX_COMPLETION_TOKENS_MODELS:
-            kwargs["max_completion_tokens"] = max_tokens
-        else:
-            kwargs["max_tokens"] = max_tokens
-
-    stream = await _CLIENT.chat.completions.create(**kwargs)
-    async for chunk in stream:
-        delta = chunk.choices[0].delta.content if chunk.choices else None
-        if delta:
-            yield delta
-
-
 # ---------------------------------------------------------------------------
 # User-facing error helpers
 # ---------------------------------------------------------------------------
@@ -1179,23 +1144,6 @@ async def _check_regeneration_intent(modification_query: str, existing_html: str
 
 
 # ---------------------------------------------------------------------------
-# SSE helper
-# ---------------------------------------------------------------------------
-
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
-
-def _html_to_plain_text(html_content: str) -> str:
-    """Strip HTML tags to extract readable plain text from a stored document."""
-    text = re.sub(r"<style[^>]*>.*?</style>", "", html_content, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -1459,104 +1407,6 @@ async def regenerate_document_html(
         )
 
     return HTMLResponse(content=cleaned_html)
-
-
-@router.post("/regenerate-html/stream")
-async def regenerate_document_html_stream(
-    request: DocumentRegenerationRequest,
-    _: None = Depends(verify_api_key),
-):
-    """
-    Streams the regenerated document as plain text via Server-Sent Events.
-
-    SSE events:
-      start  — {"document_id": str, "intent": "modify"|"new_document"}
-      chunk  — {"text": str}   ← plain text token(s) from the model
-      done   — {"document_id": str, "total_chars": int}
-      error  — {"error": str, "message": str}
-    """
-    async def _generate():
-        if _is_gibberish(request.modification_query):
-            yield _sse("error", _err_invalid_modification(request.modification_query))
-            return
-
-        existing_html = await asyncio.to_thread(_load_document, request.document_id)
-        if not existing_html:
-            yield _sse("error", _err_document_not_found(request.document_id))
-            return
-
-        intent = await _check_regeneration_intent(request.modification_query, existing_html)
-        yield _sse("start", {"document_id": request.document_id, "intent": intent})
-
-        if intent == "new_document":
-            try:
-                analysis = await _analyze_query(request.modification_query)
-            except HTTPException as exc:
-                detail = exc.detail if isinstance(exc.detail, dict) else {"error": "analysis_failed", "message": str(exc.detail)}
-                yield _sse("error", detail)
-                return
-            except Exception as exc:
-                yield _sse("error", _err_model_failed("Query Analysis", request.modification_query, str(exc)))
-                return
-
-            doc_label = analysis.get("doc_label", "Document")
-            fields    = analysis.get("fields") or {}
-            fields_block = "\n".join(f"  {k}: {v}" for k, v in fields.items()) or "  [No specific details provided]"
-
-            system_prompt = (
-                f"You are a professional document writer.\n"
-                f"Generate a complete {doc_label} as plain text only.\n"
-                f"Do NOT use any HTML tags, markdown, or special formatting symbols.\n"
-                f"Use clear section headings in UPPERCASE, followed by the content.\n"
-                f"Separate sections with a blank line.\n\n"
-                f"Document type: {doc_label}\n"
-                f"Details provided:\n{fields_block}\n\n"
-                f"Full user request:\n{request.modification_query}\n\n"
-                f"Use [Placeholder] for any required field not provided by the user."
-            )
-        else:
-            existing_text = _html_to_plain_text(existing_html)
-            system_prompt = (
-                "You are a professional document editor.\n"
-                "Apply the user's modification to the existing document and return the complete updated document as plain text only.\n"
-                "Do NOT use any HTML tags, markdown, or special formatting symbols.\n"
-                "Use clear section headings in UPPERCASE followed by the content.\n"
-                "Preserve all sections not affected by the modification.\n\n"
-                f"Existing document:\n{existing_text}"
-            )
-
-        accumulated = ""
-        try:
-            async for chunk in _call_llm_stream(system_prompt, request.modification_query):
-                accumulated += chunk
-                yield _sse("chunk", {"text": chunk})
-        except Exception as exc:
-            logger.exception("[doc-gen] /regenerate-html/stream LLM failed")
-            yield _sse("error", _err_model_failed("Text Generation", request.modification_query, str(exc)))
-            return
-
-        if not accumulated.strip():
-            yield _sse("error", _err_empty_output(request.modification_query))
-            return
-
-        try:
-            await asyncio.to_thread(_save_document, request.document_id, accumulated)
-        except Exception:
-            logger.exception("[doc-gen] /regenerate-html/stream storage failed")
-            yield _sse("error", {"error": "storage_failed", "message": "Generated but could not be saved."})
-            return
-
-        yield _sse("done", {"document_id": request.document_id, "total_chars": len(accumulated)})
-
-    return StreamingResponse(
-        _generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control":     "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection":        "keep-alive",
-        },
-    )
 
 
 @router.get("/get-html/{document_id}", response_class=HTMLResponse)
