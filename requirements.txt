@@ -97,6 +97,12 @@ python-dotenv
 reportlab
 python-docx
 weasyprint
+psycopg2
+asyncpg
+qdrant-client
+langchain-openai
+langgraph
+langchain_qdrant
 
 
 # Install LibreOffice (used for conversion)
