@@ -70,6 +70,16 @@ def _doc_path(doc_id: str) -> str:
     return os.path.join(_DOCS_DIR, f"{safe_id}.html")
 
 
+def _ascii_safe_html(content: str) -> str:
+    """
+    Convert non-ASCII characters to HTML entities so the output is
+    7-bit ASCII-safe. Downstream MySQL latin1/utf8mb3 columns can store
+    it without charset errors; browsers render the entities identically.
+    e.g. ₹ → &#8377;  €  → &#8364;  © → &#169;
+    """
+    return content.encode("ascii", "xmlcharrefreplace").decode("ascii")
+
+
 def _save_document(doc_id: str, html: str) -> None:
     """Write a single document file — no JSON serialization, no full-file rewrite."""
     with open(_doc_path(doc_id), "w", encoding="utf-8") as f:
@@ -1224,12 +1234,13 @@ async def generate_document_html(
                 detail=_err_empty_output(request.user_prompt),
             )
 
-        await asyncio.to_thread(_save_document, doc_id, raw_html)
+        safe_html = _ascii_safe_html(raw_html)
+        await asyncio.to_thread(_save_document, doc_id, safe_html)
         logger.info(
             f"[doc-gen] /generate-html done doc_id={doc_id} "
             f"total={time.perf_counter() - request_started:.2f}s"
         )
-        return HTMLResponse(content=raw_html, headers={"X-Document-Id": doc_id})
+        return HTMLResponse(content=safe_html, headers={"X-Document-Id": doc_id})
 
     except HTTPException as exc:
         logger.warning(
