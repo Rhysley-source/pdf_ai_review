@@ -470,7 +470,7 @@ COMBINED_ANALYSIS_BLUEPRINT_PROMPT = SimulatedPromptTemplate(
 Return ONLY a valid JSON object — no markdown, no backticks, no explanation.
 
 ━━━ CLASSIFICATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"is_document_request" : true if the user wants to generate/create/draft any document. false otherwise.
+"is_document_request" : true if the user wants to generate/create/draft any document, OR if they have pasted a raw/existing document to be replicated. false otherwise.
 "doc_type"  : one of: invoice, contract, employment, nda, lease, resume, certificate, report, proposal, purchase_order, letter, other
 "doc_label" : short human-readable name (max 6 words). e.g. "Rent Agreement", "Tax Invoice", "Job Offer Letter"
 "fields"    : flat JSON of ALL details extracted. snake_case keys. null for anything not mentioned. Set to {} if not a document request.

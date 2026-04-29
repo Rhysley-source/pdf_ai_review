@@ -41,6 +41,8 @@ router = APIRouter()
 _MODEL           = os.environ.get("MODEL_NAME", "gpt-4.1-nano")
 # Steps 1+2 (JSON classification) — faster/lighter model, no quality impact
 _FAST_MODEL      = os.environ.get("FAST_MODEL_NAME", "gpt-4.1-nano")
+# Intent check — gpt-4o-mini for cheap semantic classification before full pipeline
+_INTENT_MODEL    = os.environ.get("INTENT_MODEL_NAME", "gpt-4o-mini")
 _API_KEY         = os.environ.get("OPENAI_API_KEY", "")
 _CLIENT          = AsyncOpenAI(api_key=_API_KEY)
 
@@ -263,6 +265,45 @@ async def _call_llm_fast(system_prompt: str, user_message: str) -> str:
     return content
 
 
+_INTENT_CHECK_SYSTEM_PROMPT = """\
+You are a document intent classifier. Analyze the user input and return ONLY a JSON object.
+
+Return exactly one of these intents:
+- "request"      — user is asking to create/generate/draft a document (e.g. "create an invoice for...")
+- "raw_document" — user has pasted an existing complete document (e.g. full invoice, contract, NDA text)
+- "unrelated"    — input is unrelated to document generation (questions, math, general chat, etc.)
+
+Return ONLY: {"intent": "<request|raw_document|unrelated>"}"""
+
+
+async def _check_document_intent(user_prompt: str) -> str:
+    """
+    Uses gpt-4o-mini to classify the user prompt as:
+      "request"      — wants to generate a document
+      "raw_document" — pasted an existing document
+      "unrelated"    — nothing to do with document generation
+
+    Falls back to "request" on any parse/API error so the main pipeline
+    decides (and raises 422 if truly invalid).
+    """
+    try:
+        content, _ = await _call_llm(
+            system_prompt=_INTENT_CHECK_SYSTEM_PROMPT,
+            user_message=user_prompt,
+            model=_INTENT_MODEL,
+            max_tokens=20,
+            use_seed=False,
+        )
+        parsed = json.loads(content.strip())
+        intent = parsed.get("intent", "request")
+        if intent not in ("request", "raw_document", "unrelated"):
+            intent = "request"
+        return intent
+    except Exception:
+        logger.warning("[doc-gen] intent check failed, defaulting to 'request'")
+        return "request"
+
+
 # ---------------------------------------------------------------------------
 # User-facing error helpers
 # ---------------------------------------------------------------------------
@@ -443,6 +484,34 @@ def _is_gibberish(text: str) -> bool:
         return True
 
     return False
+
+
+def _is_raw_document(text: str) -> bool:
+    """
+    Returns True when the input looks like a pasted raw/existing document
+    rather than a user request to create one.
+
+    Requires length > 500 chars AND at least 2 structural signals.
+    """
+    stripped = text.strip()
+    if len(stripped) <= 500:
+        return False
+
+    signals = 0
+    if re.search(r'\b[A-Z]{3,}[\s:]+[A-Z]{3,}', stripped):
+        signals += 1
+    if re.search(r'_{5,}', stripped):
+        signals += 1
+    if re.search(r'^\s*\d+[\.\)]\s+\w', stripped, re.MULTILINE):
+        signals += 1
+    if re.search(r'\b(WHEREAS|THEREFORE|HEREINAFTER|AGREEMENT|INVOICE|CERTIFICATE)\b', stripped):
+        signals += 1
+    if re.search(r'\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b', stripped):
+        signals += 1
+    if re.search(r'[\$₹£€]\s*\d+', stripped):
+        signals += 1
+
+    return signals >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -1147,6 +1216,24 @@ async def generate_document_text_stream(
     if _is_gibberish(request.user_prompt):
         raise HTTPException(status_code=422, detail=_err_invalid_prompt(request.user_prompt))
 
+    intent = await _check_document_intent(request.user_prompt)
+    logger.info(f"[doc-gen] /generate-text/stream intent={intent!r}")
+
+    if intent == "unrelated":
+        raise HTTPException(
+            status_code=422,
+            detail=_err_invalid_prompt(request.user_prompt),
+        )
+    elif intent == "raw_document":
+        analysis_prompt = (
+            "The following is a complete existing document. "
+            "Analyze it, identify its type, extract all field values, "
+            "and generate a new complete document of the same type:\n\n"
+            + request.user_prompt
+        )
+    else:
+        analysis_prompt = request.user_prompt
+
     doc_id = request.document_id or str(uuid.uuid4())
     request_started = time.perf_counter()
     logger.info(f"[doc-gen] /generate-text/stream start doc_id={doc_id}")
@@ -1154,7 +1241,7 @@ async def generate_document_text_stream(
     try:
         step_started = time.perf_counter()
         try:
-            context = await _analyze_and_build(request.user_prompt)
+            context = await _analyze_and_build(analysis_prompt)
         except HTTPException:
             raise
         except Exception as e:
