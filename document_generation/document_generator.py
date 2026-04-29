@@ -192,9 +192,9 @@ def _get_int_env(name: str, default: int) -> int:
 # Step 3 output cap: None = no cap (model outputs full response).
 # Set MAX_TOKENS_HTML env var to a positive integer to re-enable a cap.
 _MAX_TOKENS_HTML      = _get_optional_int_env("MAX_TOKENS_HTML", None)
-_MAX_TOKENS_BLUEPRINT = 4096  # Step 2: detailed pre-filled section plan — needs more room than plain JSON
+_MAX_TOKENS_BLUEPRINT = _get_optional_int_env("MAX_TOKENS_BLUEPRINT", None)  # None = no cap; long docs need full output
 _MAX_TOKENS_JSON      = 512   # Step 1: small JSON classification response — output is always compact
-_MAX_TOKENS_COMBINED  = 4096  # Combined Step 1+2: full blueprint output (raised from 2048 — long prompts truncated JSON)
+_MAX_TOKENS_COMBINED  = _get_optional_int_env("MAX_TOKENS_COMBINED", None)  # None = no cap; resumes/contracts need full blueprint
 _HTML_GEN_RETRIES     = _get_int_env("HTML_GEN_RETRIES", 2)  # Step 3 retry attempts
 _COMPACT_HTML_MAX_TOKENS = _get_int_env("COMPACT_HTML_MAX_TOKENS", 1800)
 _COMPACT_HTML_RETRIES = _get_int_env("COMPACT_HTML_RETRIES", 2)
@@ -810,7 +810,7 @@ async def _analyze_and_build(user_prompt: str) -> dict:
         temperature=0,
         use_seed=True,
     )
-    logger.info(f"[doc-gen] Steps 1+2 combined raw output (finish={finish}): {raw[:300]}")
+    logger.info(f"[doc-gen] Steps 1+2 combined raw output (finish={finish}, total_chars={len(raw)}): {raw[:120]}…")
 
     cleaned = raw.strip()
     if "```" in cleaned:
