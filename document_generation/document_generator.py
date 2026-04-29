@@ -1172,9 +1172,6 @@ async def generate_document_html(
       Step 2 (Python) — select type-specific section template, merge extracted fields
       Step 3 (LLM)    — generate final HTML using the enriched context
     """
-    if _is_gibberish(request.user_prompt):
-        raise HTTPException(status_code=422, detail=_err_invalid_prompt(request.user_prompt))
-
     intent = await _check_document_intent(request.user_prompt)
     logger.info(f"[doc-gen] /generate-html intent={intent!r}")
     if intent == "unrelated":
@@ -1275,9 +1272,6 @@ async def generate_document_text_stream(
     Response is streamed chunk-by-chunk as text/plain.
     The X-Document-Id header carries the document ID (same namespace as /generate-html).
     """
-    if _is_gibberish(request.user_prompt):
-        raise HTTPException(status_code=422, detail=_err_invalid_prompt(request.user_prompt))
-
     intent = await _check_document_intent(request.user_prompt)
     logger.info(f"[doc-gen] /generate-text/stream intent={intent!r}")
 
@@ -1392,12 +1386,6 @@ async def regenerate_document_html(
     Looks up HTML by document_id, applies user modifications,
     updates storage, and returns the modified HTML.
     """
-    if _is_gibberish(request.modification_query):
-        raise HTTPException(
-            status_code=422,
-            detail=_err_invalid_modification(request.modification_query),
-        )
-
     is_modification = await _check_modification_intent(request.modification_query)
     logger.info(f"[doc-gen] /regenerate-html modification_intent={is_modification}")
     if not is_modification:
@@ -1521,12 +1509,6 @@ async def regenerate_document_html_stream(
     the full document is cleaned, validated, and saved to storage.
     X-Document-Id header carries the document ID.
     """
-    if _is_gibberish(request.modification_query):
-        raise HTTPException(
-            status_code=422,
-            detail=_err_invalid_modification(request.modification_query),
-        )
-
     is_modification = await _check_modification_intent(request.modification_query)
     logger.info(f"[doc-gen] /regenerate-html/stream modification_intent={is_modification}")
     if not is_modification:
