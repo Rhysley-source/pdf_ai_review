@@ -555,7 +555,7 @@ Original User Request:
 - Include <html>, <head> with ONE embedded <style> block, and <body>.
 - Add contenteditable="true" to the outermost content div inside <body>.
 - Render every blueprint section in order using its content_hint as the source.
-- Wherever the blueprint shows a [Placeholder], render it as a styled span using the EXACT placeholder text from the blueprint — e.g. if the blueprint says [Email Address] write <span style="font-style:italic;">[Email Address]</span>, if it says [Phone Number] write <span style="font-style:italic;">[Phone Number]</span>. NEVER replace every placeholder with [Client Name] — each placeholder must show its own specific field name.
+- Wherever the blueprint shows a [Placeholder], render it as plain text using the EXACT placeholder text from the blueprint — e.g. if the blueprint says [Email Address] write [Email Address], if it says [Phone Number] write [Phone Number]. Do NOT wrap placeholders in any HTML tag. NEVER replace every placeholder with [Client Name] — each placeholder must show its own specific field name.
 - Do NOT include markdown backticks, explanations, or any text outside the HTML.
 
 ━━━ DESIGN RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -667,6 +667,7 @@ RULES:
 10. Every data table must have style="width:100%; border-collapse:collapse; table-layout:fixed;" and all <td>/<th> must have explicit padding and border.
 11. Add style="word-wrap:break-word; overflow-wrap:break-word;" to <td> cells containing long text, URLs, or amounts.
 12. Add style="page-break-inside:avoid;" to signature blocks and any section that must not split across PDF pages.
+13. Placeholders like [Email Address], [Phone Number] must remain as plain text — do NOT wrap them in <span> or any other tag.
 
 Existing HTML:
 {existing_html}
