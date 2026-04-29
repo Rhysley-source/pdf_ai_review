@@ -192,9 +192,9 @@ def _get_int_env(name: str, default: int) -> int:
 # Step 3 output cap: None = no cap (model outputs full response).
 # Set MAX_TOKENS_HTML env var to a positive integer to re-enable a cap.
 _MAX_TOKENS_HTML      = _get_optional_int_env("MAX_TOKENS_HTML", None)
-_MAX_TOKENS_BLUEPRINT = 2048  # Step 2: detailed pre-filled section plan — needs more room than plain JSON
+_MAX_TOKENS_BLUEPRINT = 4096  # Step 2: detailed pre-filled section plan — needs more room than plain JSON
 _MAX_TOKENS_JSON      = 512   # Step 1: small JSON classification response — output is always compact
-_MAX_TOKENS_COMBINED  = 2048  # Combined Step 1+2: full blueprint output
+_MAX_TOKENS_COMBINED  = 4096  # Combined Step 1+2: full blueprint output (raised from 2048 — long prompts truncated JSON)
 _HTML_GEN_RETRIES     = _get_int_env("HTML_GEN_RETRIES", 2)  # Step 3 retry attempts
 _COMPACT_HTML_MAX_TOKENS = _get_int_env("COMPACT_HTML_MAX_TOKENS", 1800)
 _COMPACT_HTML_RETRIES = _get_int_env("COMPACT_HTML_RETRIES", 2)
@@ -302,6 +302,37 @@ async def _check_document_intent(user_prompt: str) -> str:
     except Exception:
         logger.warning("[doc-gen] intent check failed, defaulting to 'request'")
         return "request"
+
+
+_MODIFICATION_INTENT_SYSTEM_PROMPT = """\
+You are a document modification classifier. The user has an existing document and is providing a query.
+Determine if the query is asking to modify, update, change, or regenerate the document in any way.
+
+Return ONLY: {"is_modification": true} or {"is_modification": false}
+
+true  — any edit, update, change, add, remove, replace, rewrite, reformat request
+false — unrelated queries (questions, general chat, math, greetings, etc.)"""
+
+
+async def _check_modification_intent(query: str) -> bool:
+    """
+    Uses gpt-4o-mini to confirm the query is a modification/change request
+    for an existing document. Returns False for unrelated queries.
+    Falls back to True on any error so the pipeline continues normally.
+    """
+    try:
+        content, _ = await _call_llm(
+            system_prompt=_MODIFICATION_INTENT_SYSTEM_PROMPT,
+            user_message=query,
+            model=_INTENT_MODEL,
+            max_tokens=10,
+            use_seed=False,
+        )
+        parsed = json.loads(content.strip())
+        return bool(parsed.get("is_modification", True))
+    except Exception:
+        logger.warning("[doc-gen] modification intent check failed, defaulting to True")
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -771,7 +802,7 @@ async def _analyze_and_build(user_prompt: str) -> dict:
     Falls back to static template on JSON parse failure.
     """
     logger.info("[doc-gen] Steps 1+2 (combined): analysing and building blueprint...")
-    raw, _ = await _call_llm(
+    raw, finish = await _call_llm(
         COMBINED_ANALYSIS_BLUEPRINT_PROMPT.template,
         user_prompt,
         model=_FAST_MODEL,
@@ -779,7 +810,7 @@ async def _analyze_and_build(user_prompt: str) -> dict:
         temperature=0,
         use_seed=True,
     )
-    logger.info(f"[doc-gen] Steps 1+2 combined raw output: {raw[:300]}")
+    logger.info(f"[doc-gen] Steps 1+2 combined raw output (finish={finish}): {raw[:300]}")
 
     cleaned = raw.strip()
     if "```" in cleaned:
@@ -788,7 +819,13 @@ async def _analyze_and_build(user_prompt: str) -> dict:
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError:
-        logger.warning("[doc-gen] Steps 1+2 combined: parse failed — falling back to two-step flow")
+        if finish == "length":
+            logger.warning(
+                f"[doc-gen] Steps 1+2 combined: output truncated at {_MAX_TOKENS_COMBINED} tokens "
+                f"(prompt length={len(user_prompt)} chars) — falling back to two-step flow"
+            )
+        else:
+            logger.warning("[doc-gen] Steps 1+2 combined: parse failed — falling back to two-step flow")
         analysis = await _analyze_query(user_prompt)
         return await _build_template_context(analysis, user_prompt=user_prompt)
 
@@ -1128,6 +1165,20 @@ async def generate_document_html(
     if _is_gibberish(request.user_prompt):
         raise HTTPException(status_code=422, detail=_err_invalid_prompt(request.user_prompt))
 
+    intent = await _check_document_intent(request.user_prompt)
+    logger.info(f"[doc-gen] /generate-html intent={intent!r}")
+    if intent == "unrelated":
+        raise HTTPException(status_code=422, detail=_err_invalid_prompt(request.user_prompt))
+    elif intent == "raw_document":
+        request = request.model_copy(update={
+            "user_prompt": (
+                "The following is a complete existing document. "
+                "Analyze it, identify its type, extract all field values, "
+                "and generate a new complete document of the same type:\n\n"
+                + request.user_prompt
+            )
+        })
+
     doc_id = request.document_id or str(uuid.uuid4())
     request_started = time.perf_counter()
     logger.info(
@@ -1336,6 +1387,14 @@ async def regenerate_document_html(
             detail=_err_invalid_modification(request.modification_query),
         )
 
+    is_modification = await _check_modification_intent(request.modification_query)
+    logger.info(f"[doc-gen] /regenerate-html modification_intent={is_modification}")
+    if not is_modification:
+        raise HTTPException(
+            status_code=422,
+            detail=_err_invalid_modification(request.modification_query),
+        )
+
     # Fetch existing HTML — per-doc file read, wrapped in thread
     existing_html = await asyncio.to_thread(_load_document, request.document_id)
 
@@ -1452,6 +1511,14 @@ async def regenerate_document_html_stream(
     X-Document-Id header carries the document ID.
     """
     if _is_gibberish(request.modification_query):
+        raise HTTPException(
+            status_code=422,
+            detail=_err_invalid_modification(request.modification_query),
+        )
+
+    is_modification = await _check_modification_intent(request.modification_query)
+    logger.info(f"[doc-gen] /regenerate-html/stream modification_intent={is_modification}")
+    if not is_modification:
         raise HTTPException(
             status_code=422,
             detail=_err_invalid_modification(request.modification_query),
