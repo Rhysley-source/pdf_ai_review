@@ -1529,7 +1529,7 @@ async def regenerate_document_html(
     return HTMLResponse(content=cleaned_html)
 
 
-@router.post("/regenerate-html/stream")
+@router.post("/regenerate-text/stream")
 async def regenerate_document_html_stream(
     request: DocumentRegenerationRequest,
     _: None = Depends(verify_api_key),
