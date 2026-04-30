@@ -1295,6 +1295,124 @@ async def generate_document_html(
         )
 
 
+@router.post("/generate-html/stream")
+async def generate_document_html_stream(
+    request: DocumentGenerationRequest,
+    _: None = Depends(verify_api_key),
+):
+    """
+    Streams an HTML document to the client chunk-by-chunk as it is generated.
+
+    Same Steps 1+2 pipeline as /generate-html (classify + blueprint), but
+    Step 3 streams the HTML output instead of returning it all at once.
+    The full accumulated HTML is cleaned and saved to storage after streaming.
+    X-Document-Id header carries the document ID.
+    """
+    intent = await _check_document_intent(request.user_prompt)
+    logger.info(f"[doc-gen] /generate-html/stream intent={intent!r}")
+
+    if intent == "unrelated":
+        raise HTTPException(
+            status_code=422,
+            detail=_err_invalid_prompt(request.user_prompt),
+        )
+    elif intent == "raw_document":
+        analysis_prompt = (
+            "The following is a complete existing document. "
+            "Analyze it, identify its type, extract all field values, "
+            "and generate a new complete document of the same type:\n\n"
+            + request.user_prompt
+        )
+    else:
+        analysis_prompt = request.user_prompt
+
+    doc_id = request.document_id or str(uuid.uuid4())
+    request_started = time.perf_counter()
+    logger.info(f"[doc-gen] /generate-html/stream start doc_id={doc_id}")
+
+    try:
+        step_started = time.perf_counter()
+        try:
+            context = await _analyze_and_build(analysis_prompt)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("[doc-gen] /generate-html/stream Steps 1+2 failed")
+            raise HTTPException(
+                status_code=502,
+                detail=_err_model_failed("Analysis + Blueprint", request.user_prompt, str(e)),
+            )
+        logger.info(
+            f"[doc-gen] /generate-html/stream Steps 1+2 done in "
+            f"{time.perf_counter() - step_started:.2f}s "
+            f"doc_label='{context.get('doc_label', 'Document')}'"
+        )
+    except HTTPException as exc:
+        logger.warning(
+            f"[doc-gen] /generate-html/stream aborted doc_id={doc_id} "
+            f"status={exc.status_code} total={time.perf_counter() - request_started:.2f}s"
+        )
+        raise
+
+    async def _stream_html():
+        system_prompt = DOCUMENT_GENERATION_V2_PROMPT.format(
+            **context,
+            user_request=request.user_prompt,
+        )
+        model = os.environ.get("MODEL_NAME", _MODEL)
+
+        kwargs: dict = {
+            "model":    model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": request.user_prompt},
+            ],
+            "stream": True,
+        }
+        if model not in _FIXED_TEMPERATURE_MODELS:
+            kwargs["temperature"] = 0.2
+        if _MAX_TOKENS_HTML is not None:
+            if model in _MAX_COMPLETION_TOKENS_MODELS:
+                kwargs["max_completion_tokens"] = _MAX_TOKENS_HTML
+            else:
+                kwargs["max_tokens"] = _MAX_TOKENS_HTML
+
+        accumulated: list[str] = []
+        try:
+            stream = await _CLIENT.chat.completions.create(**kwargs)
+            async for chunk in stream:
+                delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
+                if not delta:
+                    continue
+                accumulated.append(delta)
+                yield delta.encode("utf-8")
+        except Exception:
+            logger.exception("[doc-gen] /generate-html/stream Step 3 failed")
+            return
+
+        raw_html = "".join(accumulated)
+        if raw_html.strip():
+            try:
+                cleaned = _ascii_safe_html(_clean_html(raw_html))
+                await asyncio.to_thread(_save_document, doc_id, cleaned)
+                logger.info(
+                    f"[doc-gen] /generate-html/stream saved doc_id={doc_id} "
+                    f"total={time.perf_counter() - request_started:.2f}s"
+                )
+            except Exception:
+                logger.exception("[doc-gen] /generate-html/stream storage write failed")
+
+    return StreamingResponse(
+        _stream_html(),
+        media_type="text/html; charset=utf-8",
+        headers={
+            "X-Document-Id":     doc_id,
+            "Cache-Control":     "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/generate-text/stream")
 async def generate_document_text_stream(
     request: DocumentGenerationRequest,
@@ -1565,10 +1683,10 @@ async def regenerate_document_html_stream(
     logger.info(f"[doc-gen] /regenerate-html/stream intent={intent} doc_id={request.document_id}")
 
     doc_id = request.document_id
+    request_started = time.perf_counter()
     model  = os.environ.get("MODEL_NAME", _MODEL)
 
-    # Both paths use the plain-text regeneration prompt
-    system_prompt = REGENERATE_TEXT_PROMPT.format(
+    system_prompt = REGENERATE_PROMPT.format(
         existing_html=existing_html,
         modification_query=request.modification_query,
     )
@@ -1591,20 +1709,34 @@ async def regenerate_document_html_stream(
             else:
                 kwargs["max_tokens"] = _MAX_TOKENS_HTML
 
+        accumulated: list[str] = []
         try:
             stream = await _CLIENT.chat.completions.create(**kwargs)
             async for chunk in stream:
                 delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
                 if not delta:
                     continue
-                yield delta.encode()
+                accumulated.append(delta)
+                yield delta.encode("utf-8")
         except Exception:
-            logger.exception("[doc-gen] /regenerate-html/stream Step 3 failed")
+            logger.exception("[doc-gen] /regenerate-html/stream failed")
             return
+
+        raw_html = "".join(accumulated)
+        if raw_html.strip():
+            try:
+                cleaned = _ascii_safe_html(_clean_html(raw_html))
+                await asyncio.to_thread(_save_document, doc_id, cleaned)
+                logger.info(
+                    f"[doc-gen] /regenerate-html/stream saved doc_id={doc_id} "
+                    f"total={time.perf_counter() - request_started:.2f}s"
+                )
+            except Exception:
+                logger.exception("[doc-gen] /regenerate-html/stream storage write failed")
 
     return StreamingResponse(
         _stream(),
-        media_type="text/plain",
+        media_type="text/html; charset=utf-8",
         headers={
             "X-Document-Id":     doc_id,
             "Cache-Control":     "no-cache",
