@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import hashlib
 import os
 import time
@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-MODEL_NAME_OB = os.environ.get("MODEL_NAME_OB", "gpt-4o")
+MODEL_NAME_OB  = os.environ.get("MODEL_NAME_OB", "gpt-4o")
 MODEL_NAME     = os.environ.get("MODEL_NAME", "gpt-5-nano")
+ANALYSE_MODEL  = os.environ.get("ANALYSE_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 if not OPENAI_API_KEY:
     logger.error("OPENAI_API_KEY is not set in environment variables.")
@@ -34,20 +35,25 @@ _MAX_COMPLETION_TOKENS_MODELS = {
     "o1", "o1-mini", "o3-mini", "o3",
 }
 
-TOKEN_CHUNK_SIZE    = 800000
-TOKEN_CHUNK_OVERLAP = 500
+
+ANALYSE_MAX_OUT_TOKENS = 2048   # tighter cap for analyse map+synthesis — limits reasoning depth
+TOKEN_CHUNK_SIZE    = int(os.environ.get("TOKEN_CHUNK_SIZE", "20000"))
+TOKEN_CHUNK_OVERLAP = int(os.environ.get("TOKEN_CHUNK_OVERLAP", "200"))
 MAX_OUTPUT_TOKENS   = 4096
 MAP_JSON_RETRY_ATTEMPTS = 2
+OPENAI_JSON_TIMEOUT_S = int(os.environ.get("OPENAI_JSON_TIMEOUT_S", "90"))
+OPENAI_STREAM_TIMEOUT_S = int(os.environ.get("OPENAI_STREAM_TIMEOUT_S", "120"))
 
 # ---------------------------------------------------------------------------
-# Module-level semaphore — shared across all requests on this worker
+# Module-level semaphore  shared across all requests on this worker
 # ---------------------------------------------------------------------------
-_MAP_CONCURRENCY  = 3
+
+_MAP_CONCURRENCY  = int(os.environ.get("MAP_CONCURRENCY", "3"))
 _MAP_SEMAPHORE: asyncio.Semaphore | None = None
 
 # Caps concurrent plain-text LLM calls (risk detection, key clauses, etc.)
 # to avoid OpenAI rate-limit throttling when many chunks fire in parallel.
-_TEXT_CONCURRENCY = 8
+_TEXT_CONCURRENCY = int(os.environ.get("TEXT_CONCURRENCY", "8"))
 _TEXT_SEMAPHORE: asyncio.Semaphore | None = None
 
 
@@ -82,31 +88,32 @@ def split_by_tokens(text: str) -> list[str]:
     all_ids  = _encoding.encode(text)
     n_tokens = len(all_ids)
     logger.info(
-        f"[split_by_tokens] {len(text):,} chars → {n_tokens:,} tokens "
+        f"[split_by_tokens] {len(text):,} chars -> {n_tokens:,} tokens "
         f"({len(text)/n_tokens:.2f} chars/token) in {time.perf_counter()-t0:.3f}s"
     )
     chunks = []
     start  = 0
+    step   = max(1, TOKEN_CHUNK_SIZE - TOKEN_CHUNK_OVERLAP)
     while start < n_tokens:
         end       = min(start + TOKEN_CHUNK_SIZE, n_tokens)
         chunk_ids = all_ids[start:end]
         chunks.append(_encoding.decode(chunk_ids))
-        start    += TOKEN_CHUNK_SIZE - TOKEN_CHUNK_OVERLAP
-    logger.info(f"[split_by_tokens] → {len(chunks)} chunk(s) of ≤{TOKEN_CHUNK_SIZE} tokens")
+        start    += step
+    logger.info(f"[split_by_tokens] -> {len(chunks)} chunk(s) of <={TOKEN_CHUNK_SIZE} tokens")
     return chunks
 
 
 # ---------------------------------------------------------------------------
 # Prompts for PDF analysis (used by generate_analysis / generate_analysis_stream)
-# These prompts contain the word "json" — required by OpenAI when
+# These prompts contain the word "json" required by OpenAI when
 # response_format=json_object is set.
 # ---------------------------------------------------------------------------
 
 _MAP_SYSTEM = (
     "You are a document analysis assistant. Analyse the document excerpt provided. "
     "Output ONLY a JSON object with exactly these fields:\n"
-    '{"overview":"what this document is — type, subject, and purpose",'
-    '"summary":"cover all key points in this excerpt — as long or short as the content requires",'
+    '{"overview":"what this document is - type, subject, and purpose",'
+    '"summary":"cover all key points in this excerpt - as long or short as the content requires",'
     '"highlights":["specific fact with number/name/date","fact","fact"]}\n'
     "CRITICAL: overview and summary MUST be plain strings. "
     "highlights MUST be a flat array of strings. "
@@ -122,24 +129,129 @@ _MAP_RETRY_SYSTEM = (
 _SYNTH_SYSTEM = (
     "You are given summaries of consecutive sections of a single document. "
     "Write a JSON object with exactly two fields:\n"
-    '{"overview":"describe what the entire document is — its type, subject, and main purpose",'
+    '{"overview":"describe what the entire document is - its type, subject, and main purpose",'
     '"summary":"cover ALL major topics across the entire document. Work through from start to end. '
-    "Be specific — include key subjects, people, figures, decisions, and conclusions. "
+    "Be specific - include key subjects, people, figures, decisions, and conclusions. "
     'Do NOT repeat topics. Write as much as needed to accurately represent the full document."}\n'
-    "CRITICAL: both fields must be plain strings — no nested objects, no arrays. "
+    "CRITICAL: both fields must be plain strings - no nested objects, no arrays. "
     "No prose outside the JSON."
 )
 
 
-def _build_map_messages(text: str, retry: bool = False) -> list[dict]:
-    system = _MAP_RETRY_SYSTEM if retry else _MAP_SYSTEM
+def _normalize_analysis_type(analysis_type: int) -> int:
+    return analysis_type if analysis_type in (0, 1, 2, 3) else 0
+
+
+def _analysis_token_budget(analysis_type: int) -> tuple[int, int]:
+    """
+    Returns (map_tokens, synth_tokens) tuned for lower latency.
+    """
+    analysis_type = _normalize_analysis_type(analysis_type)
+    if analysis_type == 1:
+        return 500, 700
+    if analysis_type == 2:
+        return 1200, 1600
+    if analysis_type == 3:
+        return 1000, 0
+    return 1800, 2200
+
+
+def _empty_analysis_result() -> dict:
+    return {"overview": "", "summary": "", "highlights": []}
+
+
+def _has_required_content(candidate: dict, analysis_type: int) -> bool:
+    analysis_type = _normalize_analysis_type(analysis_type)
+    if analysis_type == 1:
+        return bool(candidate.get("overview"))
+    if analysis_type == 2:
+        return bool(candidate.get("summary"))
+    if analysis_type == 3:
+        return bool(candidate.get("highlights"))
+    return bool(
+        candidate.get("overview")
+        or candidate.get("summary")
+        or candidate.get("highlights")
+    )
+
+
+def _build_map_system(analysis_type: int, retry: bool = False) -> str:
+    analysis_type = _normalize_analysis_type(analysis_type)
+    if retry:
+        if analysis_type == 1:
+            return (
+                "Output ONLY this JSON object. Nothing else.\n"
+                '{"overview":"..."}'
+            )
+        if analysis_type == 2:
+            return (
+                "Output ONLY this JSON object. Nothing else.\n"
+                '{"summary":"..."}'
+            )
+        if analysis_type == 3:
+            return (
+                "Output ONLY this JSON object. Nothing else.\n"
+                '{"highlights":["...","..."]}'
+            )
+        return _MAP_RETRY_SYSTEM
+
+    if analysis_type == 1:
+        return (
+            "You are a document analysis assistant. Analyse the document excerpt provided. "
+            "Output ONLY a JSON object with exactly this field:\n"
+            '{"overview":"what this document is - type, subject, and purpose"}\n'
+            "CRITICAL: overview MUST be a plain string. "
+            "NEVER use nested objects or nested arrays."
+        )
+    if analysis_type == 2:
+        return (
+            "You are a document analysis assistant. Analyse the document excerpt provided. "
+            "Output ONLY a JSON object with exactly this field:\n"
+            '{"summary":"cover all key points in this excerpt - as long or short as needed"}\n'
+            "CRITICAL: summary MUST be a plain string. "
+            "NEVER use nested objects or nested arrays."
+        )
+    if analysis_type == 3:
+        return (
+            "You are a document analysis assistant. Analyse the document excerpt provided. "
+            "Output ONLY a JSON object with exactly this field:\n"
+            '{"highlights":["specific fact with number/name/date","fact","fact"]}\n'
+            "CRITICAL: highlights MUST be a flat array of strings. "
+            "NEVER use nested objects or nested arrays."
+        )
+    return _MAP_SYSTEM
+
+
+def _build_synth_system(analysis_type: int) -> str:
+    analysis_type = _normalize_analysis_type(analysis_type)
+    if analysis_type == 1:
+        return (
+            "You are given summaries of consecutive sections of a single document. "
+            "Write a JSON object with exactly one field:\n"
+            '{"overview":"describe what the entire document is - its type, subject, and main purpose"}\n'
+            "CRITICAL: overview must be a plain string. "
+            "No prose outside the JSON."
+        )
+    if analysis_type == 2:
+        return (
+            "You are given summaries of consecutive sections of a single document. "
+            "Write a JSON object with exactly one field:\n"
+            '{"summary":"cover ALL major topics across the entire document. Work through from start to end."}\n'
+            "CRITICAL: summary must be a plain string. "
+            "No prose outside the JSON."
+        )
+    return _SYNTH_SYSTEM
+
+
+def _build_map_messages(text: str, analysis_type: int = 0, retry: bool = False) -> list[dict]:
+    system = _build_map_system(analysis_type, retry=retry)
     return [
         {"role": "system", "content": system},
         {"role": "user",   "content": f"Document:\n---\n{text}\n---"},
     ]
 
 
-def _build_synth_messages(results: list[dict]) -> list[dict]:
+def _build_synth_messages(results: list[dict], analysis_type: int = 0) -> list[dict]:
     parts = []
     for i, r in enumerate(results, 1):
         overview = r.get("overview", "").strip()
@@ -153,7 +265,7 @@ def _build_synth_messages(results: list[dict]) -> list[dict]:
             parts.append("\n".join(lines))
     body = "\n\n".join(parts)
     return [
-        {"role": "system", "content": _SYNTH_SYSTEM},
+        {"role": "system", "content": _build_synth_system(analysis_type)},
         {"role": "user",   "content": f"Section summaries (in document order):\n---\n{body}\n---"},
     ]
 
@@ -175,13 +287,13 @@ def _merge_highlights(results: list[dict]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# _build_api_kwargs — shared helper to build model-aware API kwargs
+# _build_api_kwargs - shared helper to build model-aware API kwargs
 # ---------------------------------------------------------------------------
 
 def _messages_seed(messages: list[dict]) -> int:
     """
     Derives a stable integer seed from the full message content.
-    Same document + same prompt → same seed → deterministic LLM output.
+    Same document + same prompt -> same seed -> deterministic LLM output.
     """
     content = "".join(m.get("content", "") for m in messages)
     digest  = hashlib.sha256(content.encode()).hexdigest()
@@ -193,19 +305,21 @@ def _build_api_kwargs(
     use_json:         bool = False,
     streaming:        bool = False,
     max_output_tokens: int = MAX_OUTPUT_TOKENS,
+    model:            str | None = None,
 ) -> dict:
     """
     Build OpenAI API kwargs handling model differences.
 
-    use_json=True  → sets response_format=json_object
+    use_json=True  -> sets response_format=json_object
                      ONLY use when messages contain the word "json"
-                     (OpenAI requirement) — PDF analysis calls only.
+                     (OpenAI requirement) - PDF analysis calls only.
 
-    use_json=False → NO response_format
+    use_json=False -> NO response_format
                      Required for key-clause-extraction, risk-detection,
                      and any plain-text call where prompt lacks "json".
     """
-    model = os.environ.get("MODEL_NAME", MODEL_NAME)
+    if model is None:
+        model = os.environ.get("MODEL_NAME", MODEL_NAME)
 
     kwargs: dict = {
         "model":    model,
@@ -216,7 +330,7 @@ def _build_api_kwargs(
     if model not in _FIXED_TEMPERATURE_MODELS:
         kwargs["temperature"] = 0.0
 
-    # seed derived from message content — same input always produces same output
+    # seed derived from message content - same input always produces same output
     kwargs["seed"] = _messages_seed(messages)
 
     # token limit parameter name differs by model
@@ -225,7 +339,7 @@ def _build_api_kwargs(
     else:
         kwargs["max_tokens"] = max_output_tokens
 
-    # JSON mode — ONLY when prompt contains word "json"
+    # JSON mode - ONLY when prompt contains word "json"
     if use_json:
         kwargs["response_format"] = {"type": "json_object"}
 
@@ -244,11 +358,11 @@ def _build_api_kwargs_ob(
     """
     Build OpenAI API kwargs handling model differences.
 
-    use_json=True  → sets response_format=json_object
+    use_json=True  -> sets response_format=json_object
                      ONLY use when messages contain the word "json"
-                     (OpenAI requirement) — PDF analysis calls only.
+                     (OpenAI requirement) - PDF analysis calls only.
 
-    use_json=False → NO response_format
+    use_json=False -> NO response_format
                      Required for key-clause-extraction, risk-detection,
                      and any plain-text call where prompt lacks "json".
     """
@@ -272,7 +386,7 @@ def _build_api_kwargs_ob(
     else:
         kwargs["max_tokens"] = MAX_OUTPUT_TOKENS
 
-    # JSON mode — ONLY when prompt contains word "json"
+    # JSON mode - ONLY when prompt contains word "json"
     if use_json:
         kwargs["response_format"] = {"type": "json_object"}
 
@@ -297,6 +411,9 @@ def _build_api_kwargs_ob(
 async def _run_inference_json(
     messages: list[dict],
     label:    str = "",
+    model:    str | None = None,
+    max_output_tokens: int = MAX_OUTPUT_TOKENS,
+    timeout_s: int = OPENAI_JSON_TIMEOUT_S,
 ) -> tuple[str, int, int]:
     """
     OpenAI call with response_format=json_object.
@@ -305,7 +422,66 @@ async def _run_inference_json(
     """
     tag    = f"[{label}] " if label else ""
     t0     = time.perf_counter()
-    kwargs = _build_api_kwargs(messages, use_json=True, streaming=False)
+
+    kwargs = _build_api_kwargs(
+        messages,
+        use_json=True,
+        streaming=False,
+        model=model,
+        max_output_tokens=max_output_tokens,
+    )
+
+    backoff = 1.25
+    attempts = 2
+    for attempt in range(1, attempts + 1):
+        try:
+            response = await asyncio.wait_for(
+                _client.chat.completions.create(**kwargs),
+                timeout=timeout_s,
+            )
+            elapsed       = time.perf_counter() - t0
+            content       = response.choices[0].message.content or ""
+            input_tokens  = response.usage.prompt_tokens
+            output_tokens = response.usage.completion_tokens
+            logger.info(
+                f"{tag}in={input_tokens} out={output_tokens} in {elapsed:.2f}s "
+                f"(attempt={attempt})"
+            )
+            return content, input_tokens, output_tokens
+        except asyncio.TimeoutError:
+            logger.warning(f"{tag}OpenAI JSON timeout after {timeout_s}s (attempt={attempt}/{attempts})")
+            if attempt >= attempts:
+                raise
+        except Exception as e:
+            logger.exception(f"{tag}OpenAI API call failed (attempt={attempt}/{attempts}): {e}")
+            if attempt >= attempts:
+                raise
+
+        await asyncio.sleep(backoff * attempt)
+
+    raise RuntimeError(f"{tag}OpenAI JSON call failed after retries")
+
+
+async def _run_inference_json_mini(
+    messages: list[dict],
+    label:    str = "",
+) -> tuple[str, int, int]:
+    """
+    Same as _run_inference_json but always uses gpt-4o-mini regardless of MODEL_NAME env var.
+    Used by the red flag scanner.
+    Returns (content, input_tokens, output_tokens).
+    """
+    tag    = f"[{label}] " if label else ""
+    t0     = time.perf_counter()
+
+    kwargs: dict = {
+        "model":           "gpt-4o-mini",
+        "messages":        messages,
+        "temperature":     0.0,
+        "seed":            _messages_seed(messages),
+        "max_tokens":      8000,
+        "response_format": {"type": "json_object"},
+    }
 
     try:
         response      = await _client.chat.completions.create(**kwargs)
@@ -313,10 +489,10 @@ async def _run_inference_json(
         content       = response.choices[0].message.content or ""
         input_tokens  = response.usage.prompt_tokens
         output_tokens = response.usage.completion_tokens
-        logger.info(f"{tag}in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
+        logger.info(f"{tag}[gpt-4o-mini] in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
         return content, input_tokens, output_tokens
     except Exception as e:
-        logger.exception(f"{tag}OpenAI API call failed: {e}")
+        logger.exception(f"{tag}[gpt-4o-mini] OpenAI API call failed: {e}")
         raise
 
 
@@ -326,7 +502,7 @@ async def _run_inference_json(
 # For: key-clause-extraction, risk-detection, intent classification
 # Routes: POST /key-clause-extraction, POST /detect-risks
 #
-# NO response_format — plain text output.
+# NO response_format - plain text output.
 # Required because those prompts do NOT contain the word "json" and
 # setting json_object would cause a 400 error from OpenAI.
 # ---------------------------------------------------------------------------
@@ -337,7 +513,7 @@ async def _run_inference_text(
     max_output_tokens: int = MAX_OUTPUT_TOKENS,
 ) -> tuple[str, int, int]:
     """
-    OpenAI call WITHOUT response_format — plain text output.
+    OpenAI call WITHOUT response_format - plain text output.
     Use for key-clause-extraction, risk-detection, and any call
     where the prompt does NOT explicitly ask for JSON.
     Returns (content, input_tokens, output_tokens).
@@ -365,7 +541,7 @@ async def _run_inference_text_obligation(
     label:    str = "",
 ) -> tuple[str, int, int]:
     """
-    OpenAI call WITHOUT response_format — plain text output.
+    OpenAI call WITHOUT response_format - plain text output.
     Use for key-clause-extraction, risk-detection, and any call
     where the prompt does NOT explicitly ask for JSON.
     Returns (content, input_tokens, output_tokens).
@@ -398,14 +574,26 @@ async def _run_inference_text_obligation(
 # Yields: ("delta", str) | ("done", (input_tokens, output_tokens))
 # ---------------------------------------------------------------------------
 
-async def _run_inference_stream(messages: list[dict], label: str = ""):
+async def _run_inference_stream(
+    messages: list[dict],
+    label: str = "",
+    model: str | None = None,
+    max_output_tokens: int = MAX_OUTPUT_TOKENS,
+):
     """
-    Streaming OpenAI call — yields token deltas then final token counts.
+    Streaming OpenAI call - yields token deltas then final token counts.
     No response_format (not needed; extract_json handles parsing).
     """
     tag    = f"[{label}] " if label else ""
     t0     = time.perf_counter()
-    kwargs = _build_api_kwargs(messages, use_json=False, streaming=True)
+    kwargs = _build_api_kwargs(
+        messages,
+        use_json=False,
+        streaming=True,
+        model=model,
+        max_output_tokens=max_output_tokens,
+    )
+    kwargs["timeout"] = OPENAI_STREAM_TIMEOUT_S
 
     input_tokens  = 0
     output_tokens = 0
@@ -420,7 +608,7 @@ async def _run_inference_stream(messages: list[dict], label: str = ""):
                     output_tokens = chunk.usage.completion_tokens
 
         logger.info(
-            f"{tag}stream done — in={input_tokens} out={output_tokens} "
+            f"{tag}stream done - in={input_tokens} out={output_tokens} "
             f"({time.perf_counter()-t0:.2f}s)"
         )
     except Exception as e:
@@ -431,13 +619,13 @@ async def _run_inference_stream(messages: list[dict], label: str = ""):
 
 
 # ---------------------------------------------------------------------------
-# run_llm — generic plain-text runner
+# run_llm - generic plain-text runner
 #
 # Routes: POST /key-clause-extraction, POST /detect-risks
 #
 # Uses _run_inference_TEXT (no response_format) because:
 #   - key-clause + risk-detection prompts do NOT contain the word "json"
-#   - setting json_object without "json" in messages → 400 error from OpenAI
+#   - setting json_object without "json" in messages -> 400 error from OpenAI
 # ---------------------------------------------------------------------------
 
 async def transcribe_audio(audio_bytes: bytes, filename: str) -> tuple[str, str]:
@@ -447,7 +635,7 @@ async def transcribe_audio(audio_bytes: bytes, filename: str) -> tuple[str, str]
     (flac, m4a, mp3, mp4, mpeg, mpga, oga, ogg, wav, webm).
 
     Uses the transcriptions endpoint (NOT translations) so Whisper transcribes
-    in the same language it detects — audio in Hindi returns Hindi text,
+    in the same language it detects - audio in Hindi returns Hindi text,
     audio in Spanish returns Spanish text, etc.
 
     response_format="verbose_json" is used to get the detected language back
@@ -468,8 +656,8 @@ async def transcribe_audio(audio_bytes: bytes, filename: str) -> tuple[str, str]
         elapsed = time.perf_counter() - t0
         detected_language = getattr(response, "language", "unknown")
         logger.info(
-            f"[transcribe_audio] done in {elapsed:.2f}s — "
-            f"{len(response.text)} chars — language={detected_language}"
+            f"[transcribe_audio] done in {elapsed:.2f}s - "
+            f"{len(response.text)} chars - language={detected_language}"
         )
         return response.text, detected_language
     except Exception as e:
@@ -486,7 +674,7 @@ async def run_llm(
     """
     Generic plain-text LLM runner.
     Used by /key-clause-extraction and /detect-risks.
-    Does NOT set response_format — plain text output only.
+    Does NOT set response_format - plain text output only.
     Pass max_output_tokens to override the default limit for calls that
     produce large structured JSON (e.g. risk detection analysis).
     """
@@ -552,10 +740,10 @@ async def run_llm_with_tokens(
 
 async def run_llm_raw(system: str, user: str) -> str:
     """
-    LLM call with explicit system and user messages — no document wrapper.
+    LLM call with explicit system and user messages - no document wrapper.
     Use when the caller already embeds all context in the user turn
     (e.g. enrichment prompts for document comparison).
-    Does NOT set response_format — plain text output only.
+    Does NOT set response_format - plain text output only.
     """
     messages = [
         {"role": "system", "content": system},
@@ -584,12 +772,18 @@ async def run_llm_raw_json(system: str, user: str) -> tuple[str, int, int]:
 
 
 # ---------------------------------------------------------------------------
-# _run_map_chunk — one map chunk with semaphore + retry
+# _run_map_chunk - one map chunk with semaphore + retry
 # Uses _run_inference_json (PDF analysis prompts contain "json")
 # ---------------------------------------------------------------------------
 
-async def _run_map_chunk(i: int, total: int, chunk_text: str) -> tuple[dict, int, int]:
-    _EMPTY = {"overview": "", "summary": "", "highlights": []}
+async def _run_map_chunk(
+    i: int,
+    total: int,
+    chunk_text: str,
+    analysis_type: int = 0,
+    map_max_output_tokens: int = MAX_OUTPUT_TOKENS,
+) -> tuple[dict, int, int]:
+    _EMPTY = _empty_analysis_result()
     sem    = _get_semaphore()
     lbl    = f"map {i+1}/{total}"
 
@@ -601,11 +795,18 @@ async def _run_map_chunk(i: int, total: int, chunk_text: str) -> tuple[dict, int
 
         for attempt in range(1, MAP_JSON_RETRY_ATTEMPTS + 1):
             try:
-                messages = _build_map_messages(chunk_text, retry=(attempt > 1))
+                messages = _build_map_messages(
+                    chunk_text,
+                    analysis_type=analysis_type,
+                    retry=(attempt > 1),
+                )
                 if attempt > 1:
                     logger.warning(f"[generate_analysis] [{lbl}] retry {attempt}")
                 raw, i_tok, o_tok = await _run_inference_json(
-                    messages, f"{lbl}-a{attempt}"
+                    messages,
+                    f"{lbl}-a{attempt}",
+                    model=ANALYSE_MODEL,
+                    max_output_tokens=map_max_output_tokens,
                 )
                 in_tokens  += i_tok
                 out_tokens += o_tok
@@ -614,18 +815,18 @@ async def _run_map_chunk(i: int, total: int, chunk_text: str) -> tuple[dict, int
                 break
 
             candidate = extract_json(raw)
-            if candidate.get("overview") or candidate.get("highlights"):
+            if _has_required_content(candidate, analysis_type):
                 parsed = candidate
                 if attempt > 1:
                     logger.info(f"[generate_analysis] [{lbl}] retry {attempt} produced valid JSON")
                 break
             else:
                 logger.warning(
-                    f"[generate_analysis] [{lbl}] attempt {attempt}: no usable JSON — "
+                    f"[generate_analysis] [{lbl}] attempt {attempt}: no usable JSON - "
                     + ("retrying" if attempt < MAP_JSON_RETRY_ATTEMPTS else "giving up")
                 )
 
-        if not isinstance(parsed, dict) or not (parsed.get("overview") or parsed.get("highlights")):
+        if not isinstance(parsed, dict) or not _has_required_content(parsed, analysis_type):
             parsed = dict(_EMPTY)
 
         logger.info(
@@ -641,8 +842,10 @@ async def _run_map_chunk(i: int, total: int, chunk_text: str) -> tuple[dict, int
 # Route: POST /analyze
 # ---------------------------------------------------------------------------
 
-async def generate_analysis(merged_text: str) -> tuple[dict, int, int]:
-    _EMPTY = {"overview": "", "summary": "", "highlights": []}
+async def generate_analysis(merged_text: str, analysis_type: int = 0) -> tuple[dict, int, int]:
+    _EMPTY = _empty_analysis_result()
+    analysis_type = _normalize_analysis_type(analysis_type)
+    map_max_output_tokens, synth_max_output_tokens = _analysis_token_budget(analysis_type)
     if not merged_text or not merged_text.strip():
         return dict(_EMPTY), 0, 0
 
@@ -658,7 +861,16 @@ async def generate_analysis(merged_text: str) -> tuple[dict, int, int]:
         f"[generate_analysis] MAP: {len(chunks)} chunk(s) "
         f"(parallel, concurrency={_MAP_CONCURRENCY})"
     )
-    map_tasks   = [_run_map_chunk(i, len(chunks), ct) for i, ct in enumerate(chunks)]
+    map_tasks = [
+        _run_map_chunk(
+            i,
+            len(chunks),
+            ct,
+            analysis_type=analysis_type,
+            map_max_output_tokens=map_max_output_tokens,
+        )
+        for i, ct in enumerate(chunks)
+    ]
     raw_results = list(await asyncio.gather(*map_tasks))
 
     map_results = []
@@ -667,13 +879,24 @@ async def generate_analysis(merged_text: str) -> tuple[dict, int, int]:
         total_in_tok  += i_tok
         total_out_tok += o_tok
 
-    valid_count = sum(1 for r in map_results if r.get("overview") or r.get("highlights"))
-    logger.info(f"[generate_analysis] MAP complete — {len(map_results)} total, {valid_count} with content")
+    valid_count = sum(1 for r in map_results if _has_required_content(r, analysis_type))
+    logger.info(f"[generate_analysis] MAP complete - {len(map_results)} total, {valid_count} with content")
 
-    if len(map_results) == 1:
-        logger.info("[generate_analysis] single chunk — returning directly")
-        result = map_results[0]
-
+    if analysis_type == 3:
+        # Highlights-only mode skips synthesis to reduce latency.
+        result = {
+            "overview": "",
+            "summary": "",
+            "highlights": _merge_highlights(map_results),
+        }
+    elif len(map_results) == 1:
+        logger.info("[generate_analysis] single chunk - returning directly")
+        one = map_results[0]
+        result = {
+            "overview": one.get("overview", ""),
+            "summary": one.get("summary", ""),
+            "highlights": one.get("highlights", []),
+        }
     else:
         all_highlights = _merge_highlights(map_results)
 
@@ -682,17 +905,25 @@ async def generate_analysis(merged_text: str) -> tuple[dict, int, int]:
         synth_result = {"overview": "", "summary": ""}
         try:
             synth_messages = _build_synth_messages(
-                [r for r in map_results if r.get("overview") or r.get("summary")]
+                [r for r in map_results if r.get("overview") or r.get("summary")],
+                analysis_type=analysis_type,
             )
-            raw_synth, s_in, s_out = await _run_inference_json(synth_messages, "synthesis")
+            raw_synth, s_in, s_out = await _run_inference_json(
+                synth_messages,
+                "synthesis",
+                model=ANALYSE_MODEL,
+                max_output_tokens=synth_max_output_tokens,
+            )
             total_in_tok  += s_in
             total_out_tok += s_out
 
             parsed_synth = extract_json(raw_synth)
-            ov = parsed_synth.get("overview", "")
-            sm = parsed_synth.get("summary",  "")
-            synth_result["overview"] = (ov if isinstance(ov, str) else str(ov)).strip()
-            synth_result["summary"]  = (sm if isinstance(sm, str) else str(sm)).strip()
+            if analysis_type in (0, 1):
+                ov = parsed_synth.get("overview", "")
+                synth_result["overview"] = (ov if isinstance(ov, str) else str(ov)).strip()
+            if analysis_type in (0, 2):
+                sm = parsed_synth.get("summary", "")
+                synth_result["summary"] = (sm if isinstance(sm, str) else str(sm)).strip()
 
             logger.info(
                 f"[generate_analysis] SYNTHESIS done ({time.perf_counter()-t_synth:.2f}s) "
@@ -700,20 +931,20 @@ async def generate_analysis(merged_text: str) -> tuple[dict, int, int]:
                 f"summary={'yes' if synth_result['summary'] else 'empty'}"
             )
         except Exception as e:
-            logger.error(f"[generate_analysis] SYNTHESIS failed: {e} — fallback to first chunk")
+            logger.error(f"[generate_analysis] SYNTHESIS failed: {e} - fallback to chunk output")
 
-        if not synth_result["overview"]:
+        if analysis_type in (0, 1) and not synth_result["overview"]:
             synth_result["overview"] = next(
                 (r["overview"] for r in map_results if r.get("overview")), ""
             )
-        if not synth_result["summary"]:
-            synth_result["summary"]  = next(
-                (r["summary"]  for r in map_results if r.get("summary")),  ""
+        if analysis_type in (0, 2) and not synth_result["summary"]:
+            synth_result["summary"] = next(
+                (r["summary"] for r in map_results if r.get("summary")), ""
             )
 
         result = {
-            "overview":   synth_result["overview"],
-            "summary":    synth_result["summary"],
+            "overview": synth_result["overview"],
+            "summary": synth_result["summary"],
             "highlights": all_highlights,
         }
 
@@ -729,12 +960,18 @@ async def generate_analysis(merged_text: str) -> tuple[dict, int, int]:
 
 
 # ---------------------------------------------------------------------------
-# _run_map_chunk_stream — stream one map chunk, yield deltas then result
+# _run_map_chunk_stream - stream one map chunk, yield deltas then result
 # Uses _run_inference_stream (no response_format, streaming=True)
 # ---------------------------------------------------------------------------
 
-async def _run_map_chunk_stream(i: int, total: int, chunk_text: str):
-    _EMPTY = {"overview": "", "summary": "", "highlights": []}
+async def _run_map_chunk_stream(
+    i: int,
+    total: int,
+    chunk_text: str,
+    analysis_type: int = 0,
+    map_max_output_tokens: int = MAX_OUTPUT_TOKENS,
+):
+    _EMPTY = _empty_analysis_result()
     sem    = _get_semaphore()
     lbl    = f"map {i+1}/{total}"
 
@@ -745,7 +982,11 @@ async def _run_map_chunk_stream(i: int, total: int, chunk_text: str):
         parsed     = None
 
         for attempt in range(1, MAP_JSON_RETRY_ATTEMPTS + 1):
-            messages   = _build_map_messages(chunk_text, retry=(attempt > 1))
+            messages = _build_map_messages(
+                chunk_text,
+                analysis_type=analysis_type,
+                retry=(attempt > 1),
+            )
             raw_buffer = ""
 
             if attempt > 1:
@@ -753,7 +994,10 @@ async def _run_map_chunk_stream(i: int, total: int, chunk_text: str):
 
             try:
                 async for event_type, payload in _run_inference_stream(
-                    messages, f"{lbl}-a{attempt}"
+                    messages,
+                    f"{lbl}-a{attempt}",
+                    model=ANALYSE_MODEL,
+                    max_output_tokens=map_max_output_tokens,
                 ):
                     if event_type == "delta":
                         raw_buffer += payload
@@ -766,16 +1010,16 @@ async def _run_map_chunk_stream(i: int, total: int, chunk_text: str):
                 break
 
             candidate = extract_json(raw_buffer)
-            if candidate.get("overview") or candidate.get("highlights"):
+            if _has_required_content(candidate, analysis_type):
                 parsed = candidate
                 break
             else:
                 logger.warning(
-                    f"[stream] [{lbl}] attempt {attempt}: no usable JSON — "
+                    f"[stream] [{lbl}] attempt {attempt}: no usable JSON - "
                     + ("retrying" if attempt < MAP_JSON_RETRY_ATTEMPTS else "giving up")
                 )
 
-        if not isinstance(parsed, dict) or not (parsed.get("overview") or parsed.get("highlights")):
+        if not isinstance(parsed, dict) or not _has_required_content(parsed, analysis_type):
             parsed = dict(_EMPTY)
 
         logger.info(
@@ -791,9 +1035,9 @@ async def _run_map_chunk_stream(i: int, total: int, chunk_text: str):
 # Route: POST /analyze/stream
 # ---------------------------------------------------------------------------
 
-async def generate_analysis_stream(merged_text: str):
+async def generate_analysis_stream(merged_text: str, analysis_type: int = 0):
     """
-    Sequential SSE streaming — each chunk streams tokens live to client.
+    Sequential SSE streaming - each chunk streams tokens live to client.
 
     Yields (event_type, payload):
       ("chunk_start",    {"chunk": N, "total": N})
@@ -805,6 +1049,9 @@ async def generate_analysis_stream(merged_text: str):
       ("synthesis_done", {"overview": str, "summary": str})
       ("done",           {"input_tokens": N, "output_tokens": N, "total_tokens": N})
     """
+    analysis_type = _normalize_analysis_type(analysis_type)
+    map_max_output_tokens, synth_max_output_tokens = _analysis_token_budget(analysis_type)
+
     if not merged_text or not merged_text.strip():
         yield ("done", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
         return
@@ -817,14 +1064,19 @@ async def generate_analysis_stream(merged_text: str):
     all_highlights: list = []
     seen_keys:      set  = set()
 
-    logger.info(f"[generate_analysis_stream] {len(chunks)} chunk(s) — sequential streaming")
+    logger.info(f"[generate_analysis_stream] {len(chunks)} chunk(s) - sequential streaming")
 
-    # ── MAP — sequential so tokens reach the client immediately ──────────
     for i, chunk_text in enumerate(chunks):
         yield ("chunk_start", {"chunk": i + 1, "total": len(chunks)})
 
         parsed = None
-        async for event_type, payload in _run_map_chunk_stream(i, len(chunks), chunk_text):
+        async for event_type, payload in _run_map_chunk_stream(
+            i,
+            len(chunks),
+            chunk_text,
+            analysis_type=analysis_type,
+            map_max_output_tokens=map_max_output_tokens,
+        ):
             if event_type == "delta":
                 yield ("token", {"chunk": i + 1, "delta": payload})
 
@@ -854,31 +1106,38 @@ async def generate_analysis_stream(merged_text: str):
                     "all_highlights_so_far": list(all_highlights),
                 })
                 logger.info(
-                    f"[stream] [map {i+1}/{len(chunks)}] yielded — "
+                    f"[stream] [map {i+1}/{len(chunks)}] yielded - "
                     f"overview={'yes' if parsed.get('overview') else 'empty'} "
                     f"new_highlights={len(new_highlights)} total={len(all_highlights)}"
                 )
 
-    valid_count = sum(1 for r in map_results if r.get("overview") or r.get("highlights"))
-    logger.info(f"[stream] MAP complete — {len(map_results)} total, {valid_count} with content")
+    valid_count = sum(1 for r in map_results if _has_required_content(r, analysis_type))
+    logger.info(f"[stream] MAP complete - {len(map_results)} total, {valid_count} with content")
 
-    # ── SYNTHESIS ────────────────────────────────────────────────────────
+   
     synth_overview = ""
     synth_summary  = ""
 
-    if len(map_results) == 1:
+    if analysis_type == 3:
+        yield ("synthesis_done", {"overview": "", "summary": ""})
+    elif len(map_results) == 1:
         synth_overview = map_results[0].get("overview", "")
-        synth_summary  = map_results[0].get("summary",  "")
+        synth_summary  = map_results[0].get("summary", "")
         yield ("synthesis_done", {"overview": synth_overview, "summary": synth_summary})
-
     else:
         yield ("synthesis_start", {})
         synth_buffer = ""
         try:
             synth_messages = _build_synth_messages(
-                [r for r in map_results if r.get("overview") or r.get("summary")]
+                [r for r in map_results if r.get("overview") or r.get("summary")],
+                analysis_type=analysis_type,
             )
-            async for event_type, payload in _run_inference_stream(synth_messages, "synthesis"):
+            async for event_type, payload in _run_inference_stream(
+                synth_messages,
+                "synthesis",
+                model=ANALYSE_MODEL,
+                max_output_tokens=synth_max_output_tokens,
+            ):
                 if event_type == "delta":
                     synth_buffer += payload
                     yield ("token", {"chunk": "synthesis", "delta": payload})
@@ -887,25 +1146,27 @@ async def generate_analysis_stream(merged_text: str):
                     total_out_tok += payload[1]
 
             parsed_synth = extract_json(synth_buffer)
-            ov = parsed_synth.get("overview", "")
-            sm = parsed_synth.get("summary",  "")
-            synth_overview = (ov if isinstance(ov, str) else str(ov)).strip()
-            synth_summary  = (sm if isinstance(sm, str) else str(sm)).strip()
+            if analysis_type in (0, 1):
+                ov = parsed_synth.get("overview", "")
+                synth_overview = (ov if isinstance(ov, str) else str(ov)).strip()
+            if analysis_type in (0, 2):
+                sm = parsed_synth.get("summary", "")
+                synth_summary = (sm if isinstance(sm, str) else str(sm)).strip()
             logger.info(
-                f"[stream] SYNTHESIS done — "
+                f"[stream] SYNTHESIS done - "
                 f"overview={'yes' if synth_overview else 'empty'} "
                 f"summary={'yes' if synth_summary else 'empty'}"
             )
         except Exception as e:
-            logger.error(f"[stream] SYNTHESIS failed: {e} — fallback to first chunk")
+            logger.error(f"[stream] SYNTHESIS failed: {e} - fallback to first chunk")
 
-        if not synth_overview:
+        if analysis_type in (0, 1) and not synth_overview:
             synth_overview = next(
                 (r["overview"] for r in map_results if r.get("overview")), ""
             )
-        if not synth_summary:
-            synth_summary  = next(
-                (r["summary"]  for r in map_results if r.get("summary")),  ""
+        if analysis_type in (0, 2) and not synth_summary:
+            synth_summary = next(
+                (r["summary"] for r in map_results if r.get("summary")), ""
             )
 
         yield ("synthesis_done", {"overview": synth_overview, "summary": synth_summary})
@@ -920,3 +1181,5 @@ async def generate_analysis_stream(merged_text: str):
         "output_tokens": total_out_tok,
         "total_tokens":  total_in_tok + total_out_tok,
     })
+
+

@@ -1,5 +1,6 @@
 import logging
 import logging.config
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -15,6 +16,14 @@ from db_files.db import init_db, close_pool
 # ---------------------------------------------------------------------------
 # Logging 123
 # ---------------------------------------------------------------------------
+_LOG_LEVEL = (os.environ.get("LOG_LEVEL", "INFO") or "INFO").upper()
+if _LOG_LEVEL not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+    _LOG_LEVEL = "INFO"
+
+_FILE_LOG_LEVEL = (os.environ.get("FILE_LOG_LEVEL", _LOG_LEVEL) or _LOG_LEVEL).upper()
+if _FILE_LOG_LEVEL not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+    _FILE_LOG_LEVEL = _LOG_LEVEL
+
 logging.config.dictConfig({
     "version": 1,
     "disable_existing_loggers": False,
@@ -28,20 +37,26 @@ logging.config.dictConfig({
         "console": {
             "class":     "logging.StreamHandler",
             "formatter": "standard",
-            "level":     "INFO",
+            "level":     _LOG_LEVEL,
             "stream":    "ext://sys.stdout",
         },
         "file": {
             "class":     "logging.handlers.RotatingFileHandler",
             "formatter": "standard",
-            "level":     "DEBUG",
+            "level":     _FILE_LOG_LEVEL,
             "filename":  "app.log",
             "maxBytes":  10 * 1024 * 1024,
             "backupCount": 5,
             "encoding":  "utf-8",
         },
     },
-    "root": {"level": "DEBUG", "handlers": ["console", "file"]},
+    "root": {"level": _LOG_LEVEL, "handlers": ["console", "file"]},
+    "loggers": {
+        "httpx": {"level": "WARNING"},
+        "httpcore": {"level": "WARNING"},
+        "openai": {"level": "WARNING"},
+        "python_multipart": {"level": "WARNING"},
+    },
 })
 
 logger = logging.getLogger(__name__)

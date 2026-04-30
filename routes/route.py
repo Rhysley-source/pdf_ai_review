@@ -13,8 +13,8 @@ from typing import Optional
 from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from llm_model.ai_model import generate_analysis, generate_analysis_stream, transcribe_audio
 from utils.json_utils import extract_json
-from db_files.db import log_request, log_comparison_request
-from feature_modules.key_clause_extraction import classify_document, extract_key_clauses, extract_text_from_upload
+from db_files.db import log_request, log_comparison_request, log_analyse_detail
+from feature_modules.key_clause_extraction import classify_document, extract_key_clauses, extract_key_clauses_for_compare, extract_text_from_upload
 from feature_modules.risk_detection import analyze_document_risks
 from feature_modules.red_flag_scanner import scan_red_flags
 from feature_modules.obligation_detection import analyze_document_obligations
@@ -45,7 +45,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # Solution: run load_pdf in the default ThreadPoolExecutor so the event
 # loop remains free to handle other work while OCR runs in a thread.
 # ---------------------------------------------------------------------------
-async def _load_pdf_async(file_path: str, max_pages: int | None = None):
+async def _load_pdf_async(file_path: str, max_pages: int | None = None, _stats: dict | None = None):
     """
     Non-blocking wrapper around load_pdf.
     Runs the synchronous PDF extraction + OCR in a thread pool so the
@@ -54,8 +54,32 @@ async def _load_pdf_async(file_path: str, max_pages: int | None = None):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,                              # default ThreadPoolExecutor
-        partial(load_pdf, file_path, max_pages)
+        partial(load_pdf, file_path, max_pages, _stats)
     )
+
+
+async def _get_page_count_async(file_path: str) -> int:
+    """
+    Run get_page_count in a thread to avoid blocking the event loop.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, partial(get_page_count, file_path))
+
+
+async def _save_upload_to_disk(upload: UploadFile, target_path: str, chunk_size: int = 1024 * 1024) -> int:
+    """
+    Stream upload to disk chunk-by-chunk to avoid loading full file in memory.
+    Returns total bytes written.
+    """
+    written = 0
+    with open(target_path, "wb") as f:
+        while True:
+            chunk = await upload.read(chunk_size)
+            if not chunk:
+                break
+            f.write(chunk)
+            written += len(chunk)
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +116,7 @@ async def analyze_pdf(
     status        = "success"
     error_msg     = None
     session_id    = None
+    extract_stats: dict = {}
 
     logger.info(f"[{request_id}] ── NEW REQUEST ──────────────────────────────")
     logger.info(f"[{request_id}] filename='{file.filename}' analysis_type={analysis_type}")
@@ -102,28 +127,39 @@ async def analyze_pdf(
     safe_name = f"{uuid.uuid4()}.pdf"
     file_path = os.path.join(UPLOAD_FOLDER, safe_name)
 
-    try:
-        content  = await file.read()
-        pdf_size = len(content)
-        with open(file_path, "wb") as f:
-            f.write(content)
-        logger.info(f"[{request_id}] Step 1/5 — saved {pdf_size:,} bytes → '{safe_name}'")
+    t_s1 = t_s2 = t_s3 = t_s4 = t_session = t_s5 = 0.0
 
-        total_pages   = get_page_count(file_path)
+    try:
+        # ── Step 1: read & save uploaded file ────────────────────────────
+        _t = time.perf_counter()
+        pdf_size = await _save_upload_to_disk(file, file_path)
+        t_s1 = time.perf_counter() - _t
+        logger.info(f"[{request_id}] Step 1/5 — upload+save {pdf_size:,} bytes → '{safe_name}' ({t_s1:.3f}s)")
+
+        # ── Step 2: page count ────────────────────────────────────────────
+        _t = time.perf_counter()
+        total_pages   = await _get_page_count_async(file_path)
         pages_to_read = total_pages if MAX_PDF_PAGES is None else min(total_pages, MAX_PDF_PAGES)
         was_truncated = MAX_PDF_PAGES is not None and total_pages > MAX_PDF_PAGES
+        t_s2 = time.perf_counter() - _t
         logger.info(
-            f"[{request_id}] Step 2/5 — pages={total_pages} analysing={pages_to_read} "
-            f"{'(TRUNCATED)' if was_truncated else '(all pages)'}"
+            f"[{request_id}] Step 2/5 — page count: total={total_pages} analysing={pages_to_read} "
+            f"{'(TRUNCATED)' if was_truncated else '(all pages)'} ({t_s2:.3f}s)"
         )
 
+        # ── Step 3: PDF extraction (PyMuPDF + OCR) ────────────────────────
         try:
-            t_extract = time.perf_counter()
+            _t = time.perf_counter()
             # ── Non-blocking: OCR runs in thread pool ──────────────────────
-            pages = await _load_pdf_async(file_path, pages_to_read)
+            pages = await _load_pdf_async(file_path, pages_to_read, extract_stats)
+            t_s3 = time.perf_counter() - _t
             logger.info(
-                f"[{request_id}] Step 3/5 — extracted {len(pages)} page(s) "
-                f"({time.perf_counter()-t_extract:.2f}s)"
+                f"[{request_id}] Step 3/5 — extraction: {len(pages)} page(s) "
+                f"total={t_s3:.2f}s | "
+                f"pymupdf={extract_stats.get('pymupdf_time', 0):.2f}s "
+                f"({extract_stats.get('native_pages', 0)}p) | "
+                f"ocr={extract_stats.get('ocr_time', 0):.2f}s "
+                f"({extract_stats.get('ocr_pages', 0)}p)"
             )
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
@@ -140,21 +176,35 @@ async def analyze_pdf(
             if analysis_type == 3: return {"highlights": []}
             return result
 
+        # ── Step 4: merge page text ───────────────────────────────────────
+        _t = time.perf_counter()
         merged_text = "\n\n".join(p.page_content for p in pages)
-        logger.info(f"[{request_id}] Step 4/5 — merged {len(merged_text):,} chars")
+        t_s4 = time.perf_counter() - _t
+        logger.info(f"[{request_id}] Step 4/5 — merge: {len(merged_text):,} chars ({t_s4:.3f}s)")
 
+        # ── Session ───────────────────────────────────────────────────────
+        _t = time.perf_counter()
         session_id = create_session(
             text=merged_text,
             filename=file.filename or "unknown",
             total_pages=total_pages,
             pages_analysed=pages_to_read,
         )
-        logger.info(f"[{request_id}] session created — id={session_id[:8]}")
+        t_session = time.perf_counter() - _t
+        logger.info(f"[{request_id}] session created — id={session_id[:8]} ({t_session:.3f}s)")
 
-        logger.info(f"[{request_id}] Step 5/5 — running inference")
-        t_infer = time.perf_counter()
-        final_output, total_in_tok, total_out_tok = await generate_analysis(merged_text)
-        logger.info(f"[{request_id}] Step 5/5 — done ({time.perf_counter()-t_infer:.2f}s)")
+        # ── Step 5: LLM inference ─────────────────────────────────────────
+        logger.info(f"[{request_id}] Step 5/5 — inference start")
+        _t = time.perf_counter()
+        final_output, total_in_tok, total_out_tok = await generate_analysis(
+            merged_text,
+            analysis_type=analysis_type,
+        )
+        t_s5 = time.perf_counter() - _t
+        logger.info(
+            f"[{request_id}] Step 5/5 — inference done ({t_s5:.2f}s) "
+            f"tokens={total_in_tok}in/{total_out_tok}out"
+        )
 
     except HTTPException:
         status    = "error"
@@ -171,7 +221,8 @@ async def analyze_pdf(
             logger.debug(f"[{request_id}] temp file deleted")
 
         elapsed = time.perf_counter() - t_start
-        await log_request(
+
+        asyncio.create_task(log_request(
             request_id        = request_id,
             pdf_name          = file.filename or "unknown",
             pdf_size_bytes    = pdf_size,
@@ -183,10 +234,42 @@ async def analyze_pdf(
             endpoint          = "/analyze",
             status            = status,
             error_message     = error_msg,
-        )
+        ))
+        asyncio.create_task(log_analyse_detail(
+            request_id        = request_id,
+            pdf_name          = file.filename or "unknown",
+            pdf_size_bytes    = pdf_size,
+            total_pages       = total_pages,
+            pages_analysed    = pages_to_read,
+            pdf_type          = extract_stats.get("pdf_type"),
+            native_pages      = extract_stats.get("native_pages",       0),
+            ocr_pages         = extract_stats.get("ocr_pages",          0),
+            ocr_timeout_pages = extract_stats.get("ocr_timeout_pages",  0),
+            placeholder_pages = extract_stats.get("placeholder_pages",  0),
+            blank_pages       = extract_stats.get("blank_pages",       0),
+            t_upload_s        = t_s1,
+            t_pagecount_s     = t_s2,
+            t_extract_s       = t_s3,
+            t_pymupdf_s       = extract_stats.get("pymupdf_time", 0.0),
+            t_ocr_s           = extract_stats.get("ocr_time",     0.0),
+            t_merge_s         = t_s4,
+            t_session_s       = t_session,
+            t_inference_s     = t_s5,
+            t_total_s         = elapsed,
+            input_tokens      = total_in_tok,
+            output_tokens     = total_out_tok,
+            endpoint          = "/analyze",
+            status            = status,
+            error_message     = error_msg,
+        ))
 
     elapsed = time.perf_counter() - t_start
-    logger.info(f"[{request_id}] ── COMPLETE — {elapsed:.2f}s ──────")
+    logger.info(
+        f"[{request_id}] ── COMPLETE — {elapsed:.2f}s total | "
+        f"upload={t_s1:.3f}s | pagecount={t_s2:.3f}s | "
+        f"extract={t_s3:.2f}s | merge={t_s4:.3f}s | "
+        f"session={t_session:.3f}s | inference={t_s5:.2f}s"
+    )
 
     if was_truncated:
         final_output.update(truncated=True, pages_analysed=pages_to_read, total_pages=total_pages)
@@ -288,6 +371,17 @@ async def key_clause_extraction(
             status            = status,
             error_message     = error_msg,
         )
+        await log_analyse_detail(
+            request_id    = request_id,
+            pdf_name      = pdf_name,
+            total_pages   = total_pages,
+            pages_analysed= pages_to_read,
+            t_inference_s = elapsed,
+            t_total_s     = elapsed,
+            endpoint      = "/key-clause-extraction",
+            status        = status,
+            error_message = error_msg,
+        )
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
             logger.debug(f"[{request_id}] Temp file deleted: '{file_path}'")
@@ -373,6 +467,17 @@ async def detect_risks(
             endpoint          = "/detect-risks",
             status            = status,
             error_message     = error_msg,
+        )
+        await log_analyse_detail(
+            request_id    = request_id,
+            pdf_name      = pdf_name,
+            total_pages   = total_pages,
+            pages_analysed= pages_to_read,
+            t_inference_s = elapsed,
+            t_total_s     = elapsed,
+            endpoint      = "/detect-risks",
+            status        = status,
+            error_message = error_msg,
         )
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
@@ -490,9 +595,9 @@ async def red_flag_scanner(
             "summary":            result.get("summary", ""),
             "counts": {
                 "total":     len(flags),
-                "dangerous": sum(1 for f in flags if f.get("category") == "Dangerous"),
-                "unusual":   sum(1 for f in flags if f.get("category") == "Unusual"),
-                "missing":   sum(1 for f in flags if f.get("category") == "Missing"),
+                "dangerous": sum(1 for f in flags if f.get("category") == "dangerous"),
+                "unusual":   sum(1 for f in flags if f.get("category") == "unusual"),
+                "missing":   sum(1 for f in flags if f.get("category") == "missing"),
                 "critical":  sum(1 for f in flags if f.get("severity") == "Critical"),
                 "high":      sum(1 for f in flags if f.get("severity") == "High"),
                 "medium":    sum(1 for f in flags if f.get("severity") == "Medium"),
@@ -568,13 +673,10 @@ async def analyze_pdf_stream(
 
         try:
             yield _sse("status", {"step": "saving", "message": "Saving uploaded file..."})
-            content  = await file.read()
-            pdf_size = len(content)
-            with open(file_path, "wb") as f:
-                f.write(content)
+            pdf_size = await _save_upload_to_disk(file, file_path)
             logger.info(f"[{request_id}] saved {pdf_size:,} bytes")
 
-            total_pages   = get_page_count(file_path)
+            total_pages   = await _get_page_count_async(file_path)
             pages_to_read = total_pages if MAX_PDF_PAGES is None else min(total_pages, MAX_PDF_PAGES)
             was_truncated = MAX_PDF_PAGES is not None and total_pages > MAX_PDF_PAGES
 
@@ -613,7 +715,10 @@ async def analyze_pdf_stream(
             overview_sent   = False
             highlight_index = 0
 
-            async for event_type, payload in generate_analysis_stream(merged_text):
+            async for event_type, payload in generate_analysis_stream(
+                merged_text,
+                analysis_type=analysis_type,
+            ):
 
                 if event_type == "chunk_start":
                     yield _sse("status", {
@@ -890,18 +995,54 @@ async def compare_documents_api(
  
         # ── Step 2: Classify + extract key clauses from both docs in parallel
         extraction1, extraction2 = await asyncio.gather(
-            extract_key_clauses(text1),
-            extract_key_clauses(text2),
+            extract_key_clauses_for_compare(text1),
+            extract_key_clauses_for_compare(text2),
         )
- 
+
+        slug1 = extraction1.get("document_slug", "other")
+        slug2 = extraction2.get("document_slug", "other")
+
         logger.info(
             f"[{request_id}] clauses extracted — "
-            f"doc1={extraction1['total_clauses']} ({extraction1['document_type']}) | "
-            f"doc2={extraction2['total_clauses']} ({extraction2['document_type']})"
+            f"doc1={extraction1['total_clauses']} ({extraction1['document_type']}, slug={slug1}) | "
+            f"doc2={extraction2['total_clauses']} ({extraction2['document_type']}, slug={slug2})"
         )
- 
-        # ── Step 3: Compare ───────────────────────────────────────────────
-        result = await compare_documents(
+
+        # Always build both doc content blocks for the response
+        doc1_info = {
+            "filename":      file1.filename or "document_1.pdf",
+            "document_type": extraction1.get("document_type", ""),
+            "total_clauses": extraction1.get("total_clauses", 0),
+            "clauses":       extraction1.get("key_clauses", []),
+        }
+        doc2_info = {
+            "filename":      file2.filename or "document_2.pdf",
+            "document_type": extraction2.get("document_type", ""),
+            "total_clauses": extraction2.get("total_clauses", 0),
+            "clauses":       extraction2.get("key_clauses", []),
+        }
+
+        # ── Step 3: Type check — if different, return early ───────────────
+        if slug1 != slug2:
+            elapsed = time.perf_counter() - t_start
+            logger.info(
+                f"[{request_id}] ── COMPARE ABORTED — type mismatch: {slug1} vs {slug2} | {elapsed:.2f}s"
+            )
+            return {
+                "status":               "success",
+                "documents_compatible": False,
+                "compatibility_message": (
+                    f"These documents are not of the same type — "
+                    f"'{extraction1['document_type']}' vs '{extraction2['document_type']}'. "
+                    f"Comparison cannot be performed."
+                ),
+                "document_1":  doc1_info,
+                "document_2":  doc2_info,
+                "comparison":  None,
+            }
+
+        # ── Step 4: Same type — run full comparison ───────────────────────
+        comp_result = await compare_documents(
             extraction1, extraction2,
             text1, text2,
             doc1_filename=file1.filename or "document_1.pdf",
@@ -912,10 +1053,19 @@ async def compare_documents_api(
         elapsed = time.perf_counter() - t_start
         logger.info(
             f"[{request_id}] ── COMPARE DONE — {elapsed:.2f}s | "
-            f"changes={result['comparison']['total_changes']} | "
-            # f"risk={result['comparison']['overall_risk_level']}"
+            f"changes={comp_result['comparison']['header']['total_changes']}"
         )
-        return result
+
+        return {
+            "status":               "success",
+            "documents_compatible": True,
+            "compatibility_message": (
+                f"Both documents are '{extraction1['document_type']}' — comparison is available."
+            ),
+            "document_1":  doc1_info,
+            "document_2":  doc2_info,
+            "comparison":  comp_result.get("comparison"),
+        }
  
     except HTTPException:
         status    = "failed"
