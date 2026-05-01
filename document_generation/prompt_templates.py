@@ -715,7 +715,7 @@ Return ONLY this JSON — no markdown, no explanation:
 # ---------------------------------------------------------------------------
 
 DOCUMENT_GENERATION_TEXT_PROMPT = SimulatedPromptTemplate(
-    template="""You are an expert document writer. Produce a complete, professionally formatted plain-text document.
+    template="""You are an expert legal document writer. Produce a COMPLETE, fully detailed, professionally formatted plain-text document.
 
 Document Type : {doc_label} ({doc_type})
 Tone          : {tone}
@@ -727,6 +727,13 @@ Document Blueprint — generate each section in this exact order:
 Original User Request:
 {user_request}
 
+CONTENT RULES:
+- Every section must contain full, detailed legal/professional language — complete sentences, standard clauses, obligations, rights, and conditions as appropriate for the document type.
+- Do NOT write one-line summaries. Each section should be a proper paragraph or set of clauses (3–6 sentences minimum).
+- Use placeholder brackets ONLY for sensitive or user-specific data: [Landlord Name], [Tenant Name], [Property Address], [Monthly Rent Amount], [Start Date], [End Date], [Governing State/Country], etc.
+- All standard legal language, obligations, conditions, and boilerplate must be written out in full — never replaced with placeholders.
+- If a section has sub-points or numbered clauses, write them all out completely.
+
 FORMATTING RULES:
 - Output plain text only — absolutely no HTML tags, no markdown symbols, no backticks.
 - Document title: write in ALL CAPS, centered using spaces, on its own line.
@@ -734,7 +741,6 @@ FORMATTING RULES:
 - Separate major sections with a line of dashes: ----------------------------------------
 - Tables and grids: use plain ASCII alignment with | characters and - separators.
 - Signature blocks: use underscores for signature lines: ____________________________
-- Wherever a value is missing, write the placeholder in square brackets: [Email Address], [Phone Number].
 - Do not add any preamble, explanation, or closing note — output the document content only.""",
     input_variables=["doc_type", "doc_label", "tone", "layout_notes", "sections_block", "user_request"],
 )
