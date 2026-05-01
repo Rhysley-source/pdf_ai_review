@@ -390,7 +390,10 @@ def extract_json_raw(text: str) -> dict:
         if recovered:
             return recovered
 
-    logger.error("extract_json_raw: could not parse JSON — returning empty dict")
+    logger.error(
+        f"extract_json_raw: all strategies failed — returning empty dict. "
+        f"Raw input ({len(text)} chars): {text[:600]}"
+    )
     return {}
 
 

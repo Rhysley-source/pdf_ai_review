@@ -36,7 +36,7 @@ _RE_SPACES    = re.compile(r" {2,}")
 # Thresholds
 # ---------------------------------------------------------------------------
 NATIVE_TEXT_THRESHOLD = 0
-OCR_RETRY_ATTEMPTS    = 2
+OCR_RETRY_ATTEMPTS    = 1
 
 # Parallel workers for native extraction (fitz is thread-safe for reads)
 _NATIVE_EXTRACT_WORKERS = 4
@@ -250,24 +250,25 @@ def _ocr_predict(img: np.ndarray) -> list:
 # Public API
 # ---------------------------------------------------------------------------
 
-def load_pdf(file_path: str, max_pages: int | None = None) -> list[Document]:
+def load_pdf(file_path: str, max_pages: int | None = None, _stats: dict | None = None) -> list[Document]:
     """
     Load a PDF and return one LangChain Document per page.
 
-    Extraction pipeline per page:
+    Extraction pipeline — checked per page individually:
 
       Tier 1 — PyMuPDF native  (parallel, ~0.01s/page, zero GPU cost)
+                If a page yields text → done.
       Tier 2 — PaddleOCR-VL   (serial GPU, ~7-10s/page, with timeout + retry)
+                Any page whose PyMuPDF result is empty (image/scanned) → OCR.
       Tier 3 — Placeholder     ("[Page N: content could not be extracted]")
+                Used when OCR times out or fails after all retries.
 
     OCR timeout: each page is given OCR_PAGE_TIMEOUT seconds (default 30s).
     If PaddleOCR hangs (e.g. corrupted image), the page gets a placeholder
     after the timeout rather than blocking the server for minutes.
 
-    PDF type detection:
-      'native'     -> Pass 1 only
-      'image_only' -> Pass 1 skipped, all pages go to PaddleOCR-VL
-      'mixed'      -> Pass 1 for text pages, PaddleOCR-VL for image pages
+    pdf_type ('native' / 'image_only' / 'mixed') is detected for stats/logging
+    only — it does NOT skip any extraction pass.
 
     Data integrity: every page is always returned. No page is silently dropped.
     """
@@ -291,49 +292,46 @@ def load_pdf(file_path: str, max_pages: int | None = None) -> list[Document]:
         f"({'all' if pages_to_process == total_pages else f'first {pages_to_process}'})"
     )
 
-    pdf_type   = _detect_pdf_type(doc, pages_to_process)
+    pdf_type   = _detect_pdf_type(doc, pages_to_process)   # stats/logging only
     fitz_pages = [doc[i] for i in range(pages_to_process)]
 
-    # ── Pass 1: parallel native extraction ───────────────────────────────
+    # ── Pass 1: PyMuPDF on every page (parallel) ─────────────────────────
+    # Pages with no native text are sent to OCR regardless of pdf_type.
     native_results: dict[int, str | None] = {}
 
-    if pdf_type == "image_only":
-        logger.info(
-            "[pdf_utils] Image-only PDF -- skipping native pass, "
-            "all pages going to PaddleOCR-VL"
-        )
-        native_results = {i: None for i in range(pages_to_process)}
-    else:
-        logger.info(
-            f"[pdf_utils] Pass 1 -- parallel native extraction "
-            f"({_NATIVE_EXTRACT_WORKERS} workers)"
-        )
-        t_pass1 = time.perf_counter()
+    logger.info(
+        f"[pdf_utils] Pass 1 -- PyMuPDF on all {pages_to_process} page(s) "
+        f"({_NATIVE_EXTRACT_WORKERS} workers)"
+    )
+    t_pass1 = time.perf_counter()
 
-        def _native_worker(idx_page):
-            idx, page = idx_page
-            return idx, _extract_native(page)
+    def _native_worker(idx_page):
+        idx, page = idx_page
+        return idx, _extract_native(page)
 
-        with ThreadPoolExecutor(max_workers=_NATIVE_EXTRACT_WORKERS) as pool:
-            futures = {
-                pool.submit(_native_worker, (i, p)): i
-                for i, p in enumerate(fitz_pages)
-            }
-            for future in as_completed(futures):
-                try:
-                    idx, text = future.result()
-                    native_results[idx] = text
-                except Exception as e:
-                    logger.warning(f"[pdf_utils] Pass 1 worker failed: {e}")
-                    native_results[futures[future]] = None
+    with ThreadPoolExecutor(max_workers=_NATIVE_EXTRACT_WORKERS) as pool:
+        futures = {
+            pool.submit(_native_worker, (i, p)): i
+            for i, p in enumerate(fitz_pages)
+        }
+        for future in as_completed(futures):
+            try:
+                idx, text = future.result()
+                native_results[idx] = text
+            except Exception as e:
+                logger.warning(f"[pdf_utils] Pass 1 worker failed: {e}")
+                native_results[futures[future]] = None
 
-        native_hit = sum(1 for v in native_results.values() if v is not None)
-        logger.info(
-            f"[pdf_utils] Pass 1 done ({time.perf_counter() - t_pass1:.2f}s) -- "
-            f"native={native_hit}, need_ocr={pages_to_process - native_hit}"
-        )
+    native_hit       = sum(1 for v in native_results.values() if v is not None)
+    _t_pass1_elapsed = time.perf_counter() - t_pass1
+    logger.info(
+        f"[pdf_utils] Pass 1 done ({_t_pass1_elapsed:.2f}s) -- "
+        f"native={native_hit}, need_ocr={pages_to_process - native_hit}"
+    )
+    if _stats is not None:
+        _stats["pymupdf_time"] = _t_pass1_elapsed
+        _stats["native_pages"] = native_hit
 
-    native_hit    = sum(1 for v in native_results.values() if v is not None)
     paddle_needed = [i for i, v in native_results.items() if v is None]
 
     if paddle_needed:
@@ -370,7 +368,9 @@ def load_pdf(file_path: str, max_pages: int | None = None) -> list[Document]:
         )
 
     # ── Pass 2: OCR with per-page timeout ─────────────────────────────────
-    paddle_results: dict[int, str] = {}
+    paddle_results:    dict[int, str] = {}
+    _t_ocr_total      = 0.0
+    _ocr_timeout_count = 0
 
     for idx in paddle_needed:
         fitz_page = fitz_pages[idx]
@@ -390,6 +390,7 @@ def load_pdf(file_path: str, max_pages: int | None = None) -> list[Document]:
                 future  = _OCR_EXECUTOR.submit(_ocr_predict, img)
                 results = future.result(timeout=OCR_PAGE_TIMEOUT)
                 elapsed = time.perf_counter() - t_ocr
+                _t_ocr_total += elapsed
 
                 page_parts = []
                 for res in results:
@@ -421,9 +422,9 @@ def load_pdf(file_path: str, max_pages: int | None = None) -> list[Document]:
                 elapsed = time.perf_counter() - t_ocr
                 logger.error(
                     f"[pdf_utils] Page {page_num}: PaddleOCR-VL TIMEOUT "
-                    f"(attempt {attempt}, {elapsed:.1f}s > {OCR_PAGE_TIMEOUT}s limit) "
-                    + ("— retrying at higher DPI" if attempt < OCR_RETRY_ATTEMPTS else "— giving up")
+                    f"({elapsed:.1f}s > {OCR_PAGE_TIMEOUT}s limit) — giving up"
                 )
+                _ocr_timeout_count += 1
                 future.cancel()
                 if paddle.device.is_compiled_with_cuda():
                     paddle.device.cuda.empty_cache()
@@ -431,9 +432,8 @@ def load_pdf(file_path: str, max_pages: int | None = None) -> list[Document]:
             except Exception as e:
                 elapsed = time.perf_counter() - t_ocr
                 logger.warning(
-                    f"[pdf_utils] Page {page_num}: PaddleOCR-VL attempt {attempt} failed "
-                    f"({elapsed:.2f}s, {e})"
-                    + (" -- retrying" if attempt < OCR_RETRY_ATTEMPTS else " -- exhausted")
+                    f"[pdf_utils] Page {page_num}: PaddleOCR-VL failed "
+                    f"({elapsed:.2f}s) — {e}"
                 )
                 if paddle.device.is_compiled_with_cuda():
                     paddle.device.cuda.empty_cache()
@@ -486,12 +486,24 @@ def load_pdf(file_path: str, max_pages: int | None = None) -> list[Document]:
     elapsed      = time.perf_counter() - t_load
     total_loaded = len(pages)
 
+    if _stats is not None:
+        _stats.setdefault("pymupdf_time", 0.0)
+        _stats.setdefault("native_pages", native_hit)
+        _stats["ocr_time"]          = _t_ocr_total
+        _stats["ocr_pages"]         = paddle_count
+        _stats["total_time"]        = elapsed
+        _stats["pdf_type"]          = pdf_type
+        _stats["placeholder_pages"] = placeholder_count
+        _stats["blank_pages"]       = blank_count
+        _stats["ocr_timeout_pages"] = _ocr_timeout_count
+
     # ── Integrity report ──────────────────────────────────────────────────
     logger.info("[pdf_utils] -- EXTRACTION COMPLETE --------------------------")
     logger.info(f"[pdf_utils] PDF type         : {pdf_type}")
     logger.info(f"[pdf_utils] Pages processed  : {pages_to_process}/{total_pages}")
     logger.info(f"[pdf_utils] Native text       : {native_hit} page(s)")
     logger.info(f"[pdf_utils] PaddleOCR-VL      : {paddle_count} page(s)")
+    logger.info(f"[pdf_utils] OCR timeouts       : {_ocr_timeout_count} page(s)")
     logger.info(f"[pdf_utils] Placeholders      : {placeholder_count} page(s)")
     logger.info(f"[pdf_utils] Blank pages        : {blank_count} page(s)")
     logger.info(f"[pdf_utils] Total loaded      : {total_loaded} page(s)")
