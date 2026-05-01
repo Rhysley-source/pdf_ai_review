@@ -16,22 +16,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-MODEL_NAME_OB  = os.environ.get("MODEL_NAME_OB", "gpt-4o")
-MODEL_NAME     = os.environ.get("MODEL_NAME", "gpt-5-nano")
-ANALYSE_MODEL  = os.environ.get("ANALYSE_MODEL", "gpt-4o-mini")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+MODEL_NAME_OB   = os.environ.get("MODEL_NAME_OB",   "gpt-4.1")
+MODEL_NAME      = os.environ.get("MODEL_NAME",      "gpt-5-nano")
+ANALYSE_MODEL   = os.environ.get("ANALYSE_MODEL",   "gpt-4.1-mini")
+MINI_MODEL_NAME = os.environ.get("MINI_MODEL_NAME", "gpt-4.1-mini")
+OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY",  "")
 if not OPENAI_API_KEY:
     logger.error("OPENAI_API_KEY is not set in environment variables.")
 
 # Models that do NOT support temperature parameter
 _FIXED_TEMPERATURE_MODELS = {
-    "gpt-5-nano", "gpt-4.1-nano", "gpt-4o-mini",
+    "gpt-5-nano", "gpt-4.1-nano", "gpt-4.1-mini", "gpt-4o-mini",
     "o1", "o1-mini", "o3-mini", "o3",
 }
 
 # Models that use max_completion_tokens instead of max_tokens
 _MAX_COMPLETION_TOKENS_MODELS = {
-    "gpt-5-nano", "gpt-4.1-nano", "gpt-4o-mini",
+    "gpt-5-nano", "gpt-4.1-nano", "gpt-4.1-mini", "gpt-4o-mini",
     "o1", "o1-mini", "o3-mini", "o3",
 }
 
@@ -467,21 +468,24 @@ async def _run_inference_json_mini(
     label:    str = "",
 ) -> tuple[str, int, int]:
     """
-    Same as _run_inference_json but always uses gpt-4o-mini regardless of MODEL_NAME env var.
+    Same as _run_inference_json but uses MINI_MODEL_NAME (default: gpt-4.1-mini).
     Used by the red flag scanner.
     Returns (content, input_tokens, output_tokens).
     """
-    tag    = f"[{label}] " if label else ""
-    t0     = time.perf_counter()
+    tag         = f"[{label}] " if label else ""
+    t0          = time.perf_counter()
+    mini_model  = os.environ.get("MINI_MODEL_NAME", MINI_MODEL_NAME)
+    token_kwarg = "max_completion_tokens" if mini_model in _MAX_COMPLETION_TOKENS_MODELS else "max_tokens"
 
     kwargs: dict = {
-        "model":           "gpt-4o-mini",
+        "model":           mini_model,
         "messages":        messages,
-        "temperature":     0.0,
         "seed":            _messages_seed(messages),
-        "max_tokens":      8000,
+        token_kwarg:       8000,
         "response_format": {"type": "json_object"},
     }
+    if mini_model not in _FIXED_TEMPERATURE_MODELS:
+        kwargs["temperature"] = 0.0
 
     try:
         response      = await _client.chat.completions.create(**kwargs)
@@ -489,10 +493,10 @@ async def _run_inference_json_mini(
         content       = response.choices[0].message.content or ""
         input_tokens  = response.usage.prompt_tokens
         output_tokens = response.usage.completion_tokens
-        logger.info(f"{tag}[gpt-4o-mini] in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
+        logger.info(f"{tag}[{mini_model}] in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
         return content, input_tokens, output_tokens
     except Exception as e:
-        logger.exception(f"{tag}[gpt-4o-mini] OpenAI API call failed: {e}")
+        logger.exception(f"{tag}[{mini_model}] OpenAI API call failed: {e}")
         raise
 
 
@@ -692,32 +696,35 @@ async def run_llm_mini(
     max_output_tokens: int = 16000,
 ) -> str:
     """
-    Same as run_llm() but always uses gpt-4o-mini regardless of MODEL_NAME env var.
-    Used by /key-clause-extraction for faster, lower-latency extraction.
-    gpt-4o-mini supports up to 16,384 output tokens and uses max_tokens (not max_completion_tokens).
+    Same as run_llm() but uses MINI_MODEL_NAME (default: gpt-4.1-mini).
+    Used by /key-clause-extraction and /detect-risks for faster, lower-latency extraction.
     """
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": f"Document:\n----------------\n{text}\n----------------"},
     ]
-    t0 = time.perf_counter()
+    t0          = time.perf_counter()
+    mini_model  = os.environ.get("MINI_MODEL_NAME", MINI_MODEL_NAME)
+    token_kwarg = "max_completion_tokens" if mini_model in _MAX_COMPLETION_TOKENS_MODELS else "max_tokens"
+    kwargs: dict = {
+        "model":     mini_model,
+        "messages":  messages,
+        "seed":      _messages_seed(messages),
+        token_kwarg: max_output_tokens,
+    }
+    if mini_model not in _FIXED_TEMPERATURE_MODELS:
+        kwargs["temperature"] = 0.0
     async with _get_text_semaphore():
         try:
-            response = await _client.chat.completions.create(
-                model      = "gpt-4o-mini",
-                messages   = messages,
-                temperature= 0.0,
-                seed       = _messages_seed(messages),
-                max_tokens = max_output_tokens,
-            )
+            response      = await _client.chat.completions.create(**kwargs)
             elapsed       = time.perf_counter() - t0
             content       = response.choices[0].message.content or ""
             input_tokens  = response.usage.prompt_tokens
             output_tokens = response.usage.completion_tokens
-            logger.info(f"[run_llm_mini] in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
+            logger.info(f"[run_llm_mini] model={mini_model} in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
             return content
         except Exception as e:
-            logger.exception(f"[run_llm_mini] OpenAI API call failed: {e}")
+            logger.exception(f"[run_llm_mini] model={mini_model} OpenAI API call failed: {e}")
             raise
 
 
