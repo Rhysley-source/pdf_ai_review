@@ -1295,18 +1295,34 @@ async def generate_document_html(
         )
 
 
+_DIRECT_TEXT_SYSTEM_PROMPT = """\
+You are an expert legal document writer. Generate a COMPLETE, fully detailed, professionally formatted plain-text document based on the user's request.
+
+CONTENT RULES:
+- Every section must contain full legal/professional language — complete sentences, standard clauses, obligations, rights, and conditions.
+- Do NOT write one-line summaries. Each section must be a proper paragraph or set of numbered clauses (3–6 sentences minimum).
+- Use placeholder brackets ONLY for sensitive or user-specific data: [Party Name], [Address], [Amount], [Date], [Governing State], etc.
+- All standard legal language, obligations, and boilerplate must be written out in full — never replaced with placeholders.
+
+FORMATTING RULES:
+- Output plain text only — no HTML tags, no markdown, no backticks.
+- Document title: ALL CAPS, centered using spaces, on its own line.
+- Section headings: ALL CAPS followed by a colon, on their own line.
+- Separate major sections with: ----------------------------------------
+- Tables: use plain ASCII with | and - characters.
+- Signature blocks: use underscores: ____________________________
+- Do not add any preamble, explanation, or closing note — output the document only.\
+"""
+
+
 @router.post("/generate-text/stream")
 async def generate_document_text_stream(
     request: DocumentGenerationRequest,
     _: None = Depends(verify_api_key),
 ):
     """
-    Streams a plain-text document to the client as it is generated.
-
-    Same Steps 1+2 pipeline as /generate-html (classify + blueprint), but
-    Step 3 produces structured plain text instead of HTML — no tags, no markdown.
-    Response is streamed chunk-by-chunk as text/plain.
-    The X-Document-Id header carries the document ID (same namespace as /generate-html).
+    Streams a complete plain-text document directly from the user prompt.
+    Single LLM call after intent check — no blueprint step.
     """
     intent = await _check_document_intent(request.user_prompt)
     logger.info(f"[doc-gen] /generate-text/stream intent={intent!r}")
@@ -1316,57 +1332,27 @@ async def generate_document_text_stream(
             status_code=422,
             detail=_err_invalid_prompt(request.user_prompt),
         )
-    elif intent == "raw_document":
-        analysis_prompt = (
+
+    user_message = request.user_prompt
+    if intent == "raw_document":
+        user_message = (
             "The following is a complete existing document. "
-            "Analyze it, identify its type, extract all field values, "
-            "and generate a new complete document of the same type:\n\n"
+            "Analyze it, identify its type, and generate a new complete document of the same type:\n\n"
             + request.user_prompt
         )
-    else:
-        analysis_prompt = request.user_prompt
 
     doc_id = request.document_id or str(uuid.uuid4())
     request_started = time.perf_counter()
     logger.info(f"[doc-gen] /generate-text/stream start doc_id={doc_id}")
 
-    try:
-        step_started = time.perf_counter()
-        try:
-            context = await _analyze_and_build(analysis_prompt)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("[doc-gen] /generate-text/stream Steps 1+2 failed")
-            raise HTTPException(
-                status_code=502,
-                detail=_err_model_failed("Analysis + Blueprint", request.user_prompt, str(e)),
-            )
-        logger.info(
-            f"[doc-gen] /generate-text/stream Steps 1+2 done in "
-            f"{time.perf_counter() - step_started:.2f}s "
-            f"doc_label='{context.get('doc_label', 'Document')}'"
-        )
-
-    except HTTPException as exc:
-        logger.warning(
-            f"[doc-gen] /generate-text/stream aborted doc_id={doc_id} "
-            f"status={exc.status_code} total={time.perf_counter() - request_started:.2f}s"
-        )
-        raise
-
     async def _stream_text():
-        system_prompt = DOCUMENT_GENERATION_TEXT_PROMPT.format(
-            **context,
-            user_request=request.user_prompt,
-        )
         model = os.environ.get("MODEL_NAME", _MODEL)
 
         kwargs: dict = {
             "model":    model,
             "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": request.user_prompt},
+                {"role": "system", "content": _DIRECT_TEXT_SYSTEM_PROMPT},
+                {"role": "user",   "content": user_message},
             ],
             "stream": True,
         }
