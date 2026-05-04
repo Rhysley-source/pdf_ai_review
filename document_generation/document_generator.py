@@ -1545,6 +1545,12 @@ async def regenerate_document_html_stream(
     the full document is cleaned, validated, and saved to storage.
     X-Document-Id header carries the document ID.
     """
+    if _is_gibberish(request.modification_query):
+        raise HTTPException(
+            status_code=422,
+            detail=_err_invalid_modification(request.modification_query),
+        )
+
     existing_html = await asyncio.to_thread(_load_document, request.document_id)
     if not existing_html:
         raise HTTPException(
