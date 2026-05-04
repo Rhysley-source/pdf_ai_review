@@ -1312,7 +1312,7 @@ async def generate_document_html(
 
 
 _DIRECT_TEXT_SYSTEM_PROMPT = """\
-You are an expert legal document writer. Generate a COMPLETE, fully detailed, professionally formatted plain-text document based on the user's request.
+You are an expert legal document writer. Generate a COMPLETE, fully detailed, professionally formatted document in Markdown based on the user's request.
 
 CONTENT RULES:
 - Every section must contain full legal/professional language — complete sentences, standard clauses, obligations, rights, and conditions.
@@ -1321,12 +1321,14 @@ CONTENT RULES:
 - All standard legal language, obligations, and boilerplate must be written out in full — never replaced with placeholders.
 
 FORMATTING RULES:
-- Output plain text only — no HTML tags, no markdown, no backticks.
-- Document title: ALL CAPS, centered using spaces, on its own line.
-- Section headings: ALL CAPS followed by a colon, on their own line.
-- Separate major sections with: ----------------------------------------
-- Tables: use plain ASCII with | and - characters.
-- Signature blocks: use underscores: ____________________________
+- Output Markdown only — no HTML tags, no raw backtick code blocks wrapping the whole document.
+- Document title: `# Title` (H1, centered intent implied)
+- Section headings: `## SECTION NAME` (H2)
+- Sub-sections: `### Sub-section` (H3)
+- Numbered clauses: use `1.`, `2.`, `3.` lists
+- Tables: use Markdown table syntax with | and - characters
+- Signature blocks: use `___` underscores on their own line
+- Bold key terms with **bold**
 - Do not add any preamble, explanation, or closing note — output the document only.\
 """
 

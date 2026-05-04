@@ -629,17 +629,20 @@ Start every document from this base — fill in <style> and body content:
 # ---------------------------------------------------------------------------
 
 REGENERATE_TEXT_PROMPT = SimulatedPromptTemplate(
-    template="""You are an expert document writer. Apply the user's modification to the existing document and return the result as plain text only.
+    template="""You are an expert document writer. Apply the user's modification to the existing document and return the complete updated document in Markdown.
 
 RULES:
-1. Output plain text only — absolutely no HTML tags, no markdown symbols, no backticks.
-2. Document title: write in ALL CAPS, centered using spaces, on its own line.
-3. Section headings: write in ALL CAPS followed by a colon, on their own line.
-4. Separate major sections with a line of dashes: ----------------------------------------
-5. Tables: use plain ASCII alignment with | characters and - separators.
-6. Signature blocks: use underscores for signature lines: ____________________________
-7. Wherever a value is missing, write the placeholder in square brackets: [Email Address].
-8. Do not add any preamble, explanation, or closing note — output the document content only.
+1. Output Markdown only — no HTML tags, no backtick code blocks wrapping the whole document.
+2. Document title: # Title (H1)
+3. Section headings: ## SECTION NAME (H2)
+4. Sub-sections: ### Sub-section (H3)
+5. Numbered clauses: use 1., 2., 3. lists
+6. Tables: use Markdown table syntax with | and - characters
+7. Signature blocks: use ___ underscores on their own line
+8. Bold key terms with **bold**
+9. Wherever a value is missing, write the placeholder in square brackets: [Email Address].
+10. Apply ONLY the requested modification — keep all other content identical.
+11. Do not add any preamble, explanation, or closing note — output the document only.
 
 Existing Document Content:
 {existing_html}
@@ -715,7 +718,7 @@ Return ONLY this JSON — no markdown, no explanation:
 # ---------------------------------------------------------------------------
 
 DOCUMENT_GENERATION_TEXT_PROMPT = SimulatedPromptTemplate(
-    template="""You are an expert legal document writer. Produce a COMPLETE, fully detailed, professionally formatted plain-text document.
+    template="""You are an expert legal document writer. Produce a COMPLETE, fully detailed, professionally formatted document in Markdown.
 
 Document Type : {doc_label} ({doc_type})
 Tone          : {tone}
@@ -735,12 +738,14 @@ CONTENT RULES:
 - If a section has sub-points or numbered clauses, write them all out completely.
 
 FORMATTING RULES:
-- Output plain text only — absolutely no HTML tags, no markdown symbols, no backticks.
-- Document title: write in ALL CAPS, centered using spaces, on its own line.
-- Section headings: write in ALL CAPS followed by a colon, on their own line.
-- Separate major sections with a line of dashes: ----------------------------------------
-- Tables and grids: use plain ASCII alignment with | characters and - separators.
-- Signature blocks: use underscores for signature lines: ____________________________
+- Output Markdown only — no HTML tags, no backtick code blocks wrapping the whole document.
+- Document title: # Title (H1)
+- Section headings: ## SECTION NAME (H2)
+- Sub-sections: ### Sub-section (H3)
+- Numbered clauses: use 1., 2., 3. lists
+- Tables: use Markdown table syntax with | and - characters
+- Signature blocks: use ___ underscores on their own line
+- Bold key terms with **bold**
 - Do not add any preamble, explanation, or closing note — output the document content only.""",
     input_variables=["doc_type", "doc_label", "tone", "layout_notes", "sections_block", "user_request"],
 )
