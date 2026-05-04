@@ -1361,8 +1361,10 @@ async def generate_document_text_stream(
     user_message = request.user_prompt
     if intent == "raw_document":
         user_message = (
-            "The following is a complete existing document. "
-            "Analyze it, identify its type, and generate a new complete document of the same type:\n\n"
+            "The following is an existing document. "
+            "Reformat and reproduce it with proper professional structure and Markdown formatting. "
+            "Preserve ALL original data exactly as-is — names, dates, amounts, addresses, skills, experience, everything. "
+            "Do NOT replace any real values with placeholders. Only use [placeholder] for fields that are already blank or missing in the original.\n\n"
             + request.user_prompt
         )
 
