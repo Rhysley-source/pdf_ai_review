@@ -553,25 +553,27 @@ def _is_gibberish(text: str) -> bool:
 
     Checks:
     1. Too short after stripping whitespace.
-    2. Alphabetic characters make up less than 50 % of the text
-       (catches strings like "123 @@@ !!!" or random symbols).
-    3. Fewer than 2 words that are at least 3 alphabetic characters long
-       (catches single-char spam like "a b c d e" or keyboard mashing).
+    2. Alphabetic characters make up less than 50% of the text.
+    3. Fewer than 2 words that are at least 3 alphabetic characters long.
+    4. Vowel ratio below 15% — catches random consonant-heavy keyboard mashing
+       like "fvffv fgdfgrf ghggfsd" which passes checks 1-3 but has almost no vowels.
     """
     stripped = text.strip()
 
-    # Too short to mean anything
     if len(stripped) < 5:
         return True
 
-    # Low alphabetic ratio — mostly numbers / symbols / spaces
     alpha_count = sum(1 for c in stripped if c.isalpha())
     if len(stripped) > 0 and (alpha_count / len(stripped)) < 0.50:
         return True
 
-    # Not enough real words (3+ consecutive alpha chars)
     real_words = re.findall(r"[A-Za-z]{3,}", stripped)
     if len(real_words) < 2:
+        return True
+
+    # Vowel ratio — real language has ~35-40% vowels; random mashing has <15%
+    vowel_count = sum(1 for c in stripped.lower() if c in "aeiou")
+    if alpha_count > 0 and (vowel_count / alpha_count) < 0.15:
         return True
 
     return False
