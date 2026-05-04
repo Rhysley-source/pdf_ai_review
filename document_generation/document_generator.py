@@ -1333,14 +1333,21 @@ FORMATTING RULES:
 """
 
 
+def _prompt_cache_key(prompt: str) -> str:
+    """Stable cache key derived from the normalised prompt text."""
+    normalised = prompt.strip().lower()
+    return "cache_" + hashlib.sha256(normalised.encode()).hexdigest()[:24]
+
+
 @router.post("/generate-text/stream")
 async def generate_document_text_stream(
     request: DocumentGenerationRequest,
     _: None = Depends(verify_api_key),
 ):
     """
-    Streams a complete plain-text document directly from the user prompt.
-    Single LLM call after intent check — no blueprint step.
+    Streams a complete Markdown document directly from the user prompt.
+    Cache hit: streams stored result instantly — no LLM call.
+    Cache miss: streams from LLM, saves result keyed by prompt hash.
     """
     intent = await _check_document_intent(request.user_prompt)
     logger.info(f"[doc-gen] /generate-text/stream intent={intent!r}")
@@ -1359,9 +1366,32 @@ async def generate_document_text_stream(
             + request.user_prompt
         )
 
-    doc_id = request.document_id or str(uuid.uuid4())
+    doc_id      = request.document_id or str(uuid.uuid4())
+    cache_key   = _prompt_cache_key(request.user_prompt)
     request_started = time.perf_counter()
-    logger.info(f"[doc-gen] /generate-text/stream start doc_id={doc_id}")
+
+    # ── Cache hit: stream stored document without LLM call ──────────────────
+    cached = await asyncio.to_thread(_load_document, cache_key)
+    if cached:
+        logger.info(f"[doc-gen] /generate-text/stream cache HIT key={cache_key} doc_id={doc_id}")
+
+        async def _stream_cached():
+            chunk_size = 512
+            for i in range(0, len(cached), chunk_size):
+                yield cached[i : i + chunk_size].encode("utf-8")
+
+        return StreamingResponse(
+            _stream_cached(),
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "X-Document-Id":     doc_id,
+                "X-Cache":           "HIT",
+                "Cache-Control":     "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    logger.info(f"[doc-gen] /generate-text/stream cache MISS key={cache_key} doc_id={doc_id}")
 
     async def _stream_text():
         model = os.environ.get("MODEL_NAME", _MODEL)
@@ -1392,16 +1422,18 @@ async def generate_document_text_stream(
                 accumulated.append(delta)
                 yield delta.encode("utf-8")
         except Exception:
-            logger.exception("[doc-gen] /generate-text/stream Step 3 failed")
+            logger.exception("[doc-gen] /generate-text/stream LLM stream failed")
             return
 
         full_text = "".join(accumulated)
         if full_text.strip():
             try:
+                # Save under both cache key (prompt hash) and doc_id
+                await asyncio.to_thread(_save_document, cache_key, full_text)
                 await asyncio.to_thread(_save_document, doc_id, full_text)
                 logger.info(
-                    f"[doc-gen] /generate-text/stream saved doc_id={doc_id} "
-                    f"total={time.perf_counter() - request_started:.2f}s"
+                    f"[doc-gen] /generate-text/stream saved cache_key={cache_key} "
+                    f"doc_id={doc_id} total={time.perf_counter() - request_started:.2f}s"
                 )
             except Exception:
                 logger.exception("[doc-gen] /generate-text/stream storage write failed")
