@@ -294,7 +294,11 @@ Recognised document types:
   letter, memo, quotation, payslip, salary slip, experience letter,
   relieving letter, joining letter, termination letter, internship letter
 
-Valid examples:
+Valid examples — a document type alone is enough, extra details are optional:
+  "resume"                                   → request
+  "generate resume"                          → request
+  "create invoice"                           → request
+  "nda"                                      → request
   "resume sujeet python developer"           → request
   "create resume for John as Python dev"     → request
   "invoice 5000 to ABC Corp"                 → request
@@ -325,9 +329,9 @@ Invalid examples (return "unrelated"):
   "2 + 2"                        → unrelated
 
 ━━━ RULE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-A trigger word (generate, create, make) alone is NOT enough.
-The query MUST identify a specific document type to be "request".
-When in doubt → return "unrelated".
+A trigger word (generate, create, make) alone WITHOUT a document type → "unrelated".
+A document type mentioned (with or without a trigger word) → "request".
+Only return "unrelated" when NO document type is present or the query is gibberish.
 
 Return ONLY: {"intent": "<request|raw_document|unrelated>"}"""
 
