@@ -281,19 +281,20 @@ You are a document intent classifier. Your job is to decide what the user wants.
 There are exactly 3 possible intents:
 
 ━━━ 1. "request" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The user wants to CREATE or GENERATE a document — any type, any phrasing.
+The user wants to CREATE or GENERATE a specific, identifiable document type.
 
-Trigger words (any of these = "request"):
-  create, make, generate, build, draft, write, prepare, give me, need a, want a
+BOTH conditions must be true to return "request":
+  A) The query mentions a SPECIFIC document type (see list below)
+  B) The query makes sense as a real document generation request
 
-Document types (mentioning one = "request" even without a trigger word):
+Recognised document types:
   resume, cv, curriculum vitae, invoice, bill, receipt, contract, agreement,
   offer letter, employment letter, appointment letter, nda, non-disclosure,
   lease, rent agreement, certificate, report, proposal, purchase order,
   letter, memo, quotation, payslip, salary slip, experience letter,
   relieving letter, joining letter, termination letter, internship letter
 
-Informal / short phrasings are valid:
+Valid examples:
   "resume sujeet python developer"           → request
   "create resume for John as Python dev"     → request
   "invoice 5000 to ABC Corp"                 → request
@@ -308,16 +309,25 @@ content with headings, clauses, dates, addresses, signature lines, tables, etc.
 It looks like a real document, not a request to make one.
 
 ━━━ 3. "unrelated" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The input is completely unrelated to any document:
-  general questions, math, greetings, jokes, coding help, weather, etc.
-  "what is python" → unrelated
-  "hello" → unrelated
-  "2 + 2" → unrelated
+Return "unrelated" for ANY of these cases:
+  • No specific document type is mentioned
+  • Query is gibberish, repeated words, or random text
+  • Query uses action words (generate, create, make) WITHOUT a document type
+  • General questions, greetings, math, coding help, weather, etc.
+
+Invalid examples (return "unrelated"):
+  "generate generate generate"   → unrelated  (repeated word, no document type)
+  "create create"                → unrelated  (no document type)
+  "make something"               → unrelated  (vague, no document type)
+  "generate"                     → unrelated  (trigger word only)
+  "what is python"               → unrelated
+  "hello"                        → unrelated
+  "2 + 2"                        → unrelated
 
 ━━━ RULE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-If the input mentions a document type OR asks to make anything that could
-be a document → always return "request". Only return "unrelated" when you
-are certain the input has nothing to do with documents.
+A trigger word (generate, create, make) alone is NOT enough.
+The query MUST identify a specific document type to be "request".
+When in doubt → return "unrelated".
 
 Return ONLY: {"intent": "<request|raw_document|unrelated>"}"""
 
@@ -1531,14 +1541,6 @@ async def regenerate_document_html_stream(
     the full document is cleaned, validated, and saved to storage.
     X-Document-Id header carries the document ID.
     """
-    is_modification = await _check_modification_intent(request.modification_query)
-    logger.info(f"[doc-gen] /regenerate-html/stream modification_intent={is_modification}")
-    if not is_modification:
-        raise HTTPException(
-            status_code=422,
-            detail=_err_invalid_modification(request.modification_query),
-        )
-
     existing_html = await asyncio.to_thread(_load_document, request.document_id)
     if not existing_html:
         raise HTTPException(
