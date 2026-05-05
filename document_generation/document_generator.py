@@ -276,64 +276,52 @@ async def _call_llm_fast(system_prompt: str, user_message: str) -> str:
 
 
 _INTENT_CHECK_SYSTEM_PROMPT = """\
-You are a document intent classifier. Your job is to decide what the user wants.
+You are a document query router. Read the user input and decide how to handle it.
 
-There are exactly 3 possible intents:
+There are exactly 3 outcomes:
 
-━━━ 1. "request" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The user wants to CREATE or GENERATE a specific, identifiable document type.
+━━━ 1. "request" — user wants to generate a document ━━━━━━━━━━━━━━━━━━━━
+Return "request" when the input is asking to create, write, draft, prepare, or generate
+ANY kind of document, letter, form, agreement, or professional writing — in any phrasing,
+any length, any style (short, detailed, formal, informal).
 
-BOTH conditions must be true to return "request":
-  A) The query mentions a SPECIFIC document type (see list below)
-  B) The query makes sense as a real document generation request
+Be VERY generous. If there is any reasonable interpretation that the user wants a document
+→ return "request". When in doubt → return "request".
 
-Recognised document types:
-  resume, cv, curriculum vitae, invoice, bill, receipt, contract, agreement,
-  offer letter, employment letter, appointment letter, nda, non-disclosure,
-  lease, rent agreement, certificate, report, proposal, purchase order,
-  letter, memo, quotation, payslip, salary slip, experience letter,
-  relieving letter, joining letter, termination letter, internship letter
+Examples (all → "request"):
+  "resume"
+  "invoice for 5000"
+  "nda between two companies"
+  "Write a professional business proposal with executive summary and budget"
+  "Draft an employment contract with probation period and termination clauses"
+  "I need a rent agreement for 11 months with monthly rent 15000"
+  "prepare a formal letter to my landlord"
+  "make a certificate for rahul for completing python course"
+  "salary slip for employee john doe january 2025"
+  "a simple agreement between two friends for lending money"
+  "write something for my job application"
+  "create a document for my business"
 
-Valid examples — a document type alone is enough, extra details are optional:
-  "resume"                                   → request
-  "generate resume"                          → request
-  "create invoice"                           → request
-  "nda"                                      → request
-  "resume sujeet python developer"           → request
-  "create resume for John as Python dev"     → request
-  "invoice 5000 to ABC Corp"                 → request
-  "nda between Acme and Beta"                → request
-  "offer letter priya manager 80k"           → request
-  "make me a contract for freelance work"    → request
-  "certificate of completion for rahul"      → request
+━━━ 2. "raw_document" — user has pasted an existing document ━━━━━━━━━━━━
+Return "raw_document" ONLY when the input IS an actual filled-in document (not a request).
+Signals: long text (500+ chars) with real names/dates/amounts already filled in,
+formal headings, signature lines, clauses, address blocks — looks like a real document.
 
-━━━ 2. "raw_document" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The user has PASTED the actual text of an existing document — long structured
-content with headings, clauses, dates, addresses, signature lines, tables, etc.
-It looks like a real document, not a request to make one.
+━━━ 3. "not_document" — completely unrelated to documents ━━━━━━━━━━━━━━━
+Return "not_document" ONLY when you are CERTAIN the input has NOTHING to do with
+any document, letter, form, agreement, or professional writing.
 
-━━━ 3. "unrelated" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Return "unrelated" for ANY of these cases:
-  • No specific document type is mentioned
-  • Query is gibberish, repeated words, or random text
-  • Query uses action words (generate, create, make) WITHOUT a document type
-  • General questions, greetings, math, coding help, weather, etc.
-
-Invalid examples (return "unrelated"):
-  "generate generate generate"   → unrelated  (repeated word, no document type)
-  "create create"                → unrelated  (no document type)
-  "make something"               → unrelated  (vague, no document type)
-  "generate"                     → unrelated  (trigger word only)
-  "what is python"               → unrelated
-  "hello"                        → unrelated
-  "2 + 2"                        → unrelated
+Examples (→ "not_document"):
+  "what is machine learning"
+  "hello how are you"
+  "2 + 2 = ?"
+  "fix my python code"
+  "what is the weather today"
 
 ━━━ RULE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-A trigger word (generate, create, make) alone WITHOUT a document type → "unrelated".
-A document type mentioned (with or without a trigger word) → "request".
-Only return "unrelated" when NO document type is present or the query is gibberish.
+Default to "request". Only use "not_document" when you are 100% certain.
 
-Return ONLY: {"intent": "<request|raw_document|unrelated>"}"""
+Return ONLY: {"intent": "<request|raw_document|not_document>"}"""
 
 
 async def _check_document_intent(user_prompt: str) -> str:
@@ -356,7 +344,7 @@ async def _check_document_intent(user_prompt: str) -> str:
         )
         parsed = json.loads(content.strip())
         intent = parsed.get("intent", "request")
-        if intent not in ("request", "raw_document", "unrelated"):
+        if intent not in ("request", "raw_document", "not_document"):
             intent = "request"
         return intent
     except Exception:
@@ -1408,13 +1396,19 @@ async def generate_document_text_stream(
     Cache hit: streams stored result instantly — no LLM call.
     Cache miss: streams from LLM, saves result keyed by prompt hash.
     """
-    intent = await _check_document_intent(request.user_prompt)
-    logger.info(f"[doc-gen] /generate-text/stream intent={intent!r}")
-
-    if intent == "unrelated":
+    if _is_gibberish(request.user_prompt):
         raise HTTPException(
             status_code=422,
             detail=_err_invalid_prompt(request.user_prompt),
+        )
+
+    intent = await _check_document_intent(request.user_prompt)
+    logger.info(f"[doc-gen] /generate-text/stream intent={intent!r}")
+
+    if intent == "not_document":
+        raise HTTPException(
+            status_code=422,
+            detail=_err_not_document_request(request.user_prompt),
         )
 
     user_message = request.user_prompt
