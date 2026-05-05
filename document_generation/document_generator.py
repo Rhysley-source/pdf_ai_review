@@ -1377,6 +1377,17 @@ You are an expert document writer. Generate a COMPLETE, fully detailed, beautifu
 - Use tables for any structured data (line items, comparisons, schedules).
 - Use > blockquotes for notices, important warnings, or declarations.
 - Signature blocks: **Party Name:** `___________________________` on its own line.
+
+━━━ SPACING RULES (critical for frontend rendering) ━━━━━━━━━━━━━━━━━━━━━
+- Always add ONE blank line after every heading (# ## ###) before content starts.
+- Always add ONE blank line between every paragraph.
+- Always add ONE blank line before and after every `---` horizontal rule.
+- Always add ONE blank line before and after every table.
+- Always add ONE blank line before and after every blockquote (>).
+- Always add ONE blank line between each bullet/numbered list item when the item has more than one line.
+- Always add TWO blank lines before every ## section heading to create clear visual separation.
+- Never place two headings back-to-back without a blank line between them.
+- Never place text immediately after a heading on the same line.
 - Do not add any preamble, explanation, or closing note — output the document only.\
 """
 

@@ -644,7 +644,8 @@ RULES:
 10. Section headings as ## (H2), sub-sections as ### (H3).
 11. Numbered clauses: 1., 2., 3. with **bold clause titles**.
 12. Wherever a value is missing, write the placeholder in square brackets: [Email Address].
-13. Do not add any preamble, explanation, or closing note — output the document only.
+13. SPACING — always one blank line after every heading, between paragraphs, before/after tables, before/after `---` rules, and two blank lines before every ## section heading.
+14. Do not add any preamble, explanation, or closing note — output the document only.
 
 Existing Document Content:
 {existing_html}
