@@ -629,20 +629,22 @@ Start every document from this base — fill in <style> and body content:
 # ---------------------------------------------------------------------------
 
 REGENERATE_TEXT_PROMPT = SimulatedPromptTemplate(
-    template="""You are an expert document writer. Apply the user's modification to the existing document and return the complete updated document in Markdown.
+    template="""You are an expert document writer. Apply the user's modification to the existing document and return the complete updated document in beautifully structured Markdown.
 
 RULES:
-1. Output Markdown only — no HTML tags, no backtick code blocks wrapping the whole document.
-2. Document title: # Title (H1)
-3. Section headings: ## SECTION NAME (H2)
-4. Sub-sections: ### Sub-section (H3)
-5. Numbered clauses: use 1., 2., 3. lists
-6. Tables: use Markdown table syntax with | and - characters
-7. Signature blocks: use ___ underscores on their own line
-8. Bold key terms with **bold**
-9. Wherever a value is missing, write the placeholder in square brackets: [Email Address].
-10. Apply ONLY the requested modification — keep all other content identical.
-11. Do not add any preamble, explanation, or closing note — output the document only.
+1. Output Markdown only — no HTML tags, no wrapping code fences.
+2. Apply ONLY the requested modification — keep all other content identical.
+3. Preserve the document type's structure and formatting style.
+4. Use **bold** for key terms, labels, party names, amounts, and important dates.
+5. Use *italic* for definitions, recitals, and document-type labels.
+6. Use `---` horizontal rules to separate major sections.
+7. Use tables for structured data (line items, comparisons, schedules).
+8. Use > blockquotes for notices, warnings, or declarations.
+9. Signature blocks: **Party Name:** `___________________________` on its own line.
+10. Section headings as ## (H2), sub-sections as ### (H3).
+11. Numbered clauses: 1., 2., 3. with **bold clause titles**.
+12. Wherever a value is missing, write the placeholder in square brackets: [Email Address].
+13. Do not add any preamble, explanation, or closing note — output the document only.
 
 Existing Document Content:
 {existing_html}
