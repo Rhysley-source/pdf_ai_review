@@ -555,13 +555,15 @@ def _is_gibberish(text: str) -> bool:
     if len(stripped) > 0 and (alpha_count / len(stripped)) < 0.50:
         return True
 
-    real_words = re.findall(r"[A-Za-z]{3,}", stripped)
+    # Count words with 2+ chars to handle abbreviations like "jd", "hr", "cv", "nda"
+    real_words = re.findall(r"[A-Za-z]{2,}", stripped)
     if len(real_words) < 2:
         return True
 
     # Vowel ratio — real language has ~35-40% vowels; random mashing has <15%
+    # Skip vowel check for short queries (≤15 chars) — abbreviations like "jd", "cv" have no vowels but are valid
     vowel_count = sum(1 for c in stripped.lower() if c in "aeiou")
-    if alpha_count > 0 and (vowel_count / alpha_count) < 0.15:
+    if alpha_count > 0 and len(stripped) > 15 and (vowel_count / alpha_count) < 0.15:
         return True
 
     return False
