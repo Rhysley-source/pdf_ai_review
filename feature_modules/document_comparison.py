@@ -162,6 +162,37 @@ def _extract_value_diffs(excerpt1: str, excerpt2: str) -> list[str]:
     return diffs
 
 
+_STOPWORDS = {
+    "a", "an", "the", "in", "on", "at", "for", "to", "of", "and", "or",
+    "is", "are", "was", "were", "with", "by", "from", "that", "this", "it",
+    "its", "be", "as", "has", "have", "had", "not", "but", "if", "so",
+}
+
+
+def _text_fallback_diffs(excerpt1: str, excerpt2: str) -> list[str]:
+    """
+    Last-resort diff when regex and LLM both find nothing.
+    Finds words/tokens added to or removed from the text — catches skill names,
+    technology additions, and any non-numeric changes the regex misses.
+    Returns at most 2 concise strings.
+    """
+    tokens1 = set(re.findall(r'\b\w[\w.+-]*\b', (excerpt1 or "").lower()))
+    tokens2 = set(re.findall(r'\b\w[\w.+-]*\b', (excerpt2 or "").lower()))
+
+    tokens1 -= _STOPWORDS
+    tokens2 -= _STOPWORDS
+
+    added   = sorted(tokens2 - tokens1)[:10]
+    removed = sorted(tokens1 - tokens2)[:10]
+
+    points = []
+    if added:
+        points.append(f"Added in Doc2: {', '.join(added)}")
+    if removed:
+        points.append(f"Removed in Doc2: {', '.join(removed)}")
+    return points
+
+
 # ---------------------------------------------------------------------------
 # Clause matching
 # Matches clauses from doc2 → doc1 by name similarity + excerpt similarity.
@@ -550,10 +581,18 @@ async def compare_documents(
         llm_points   = llm_entry.get("difference_points") or []
         diff_points  = value_diffs + [p for p in llm_points if p not in value_diffs]
 
-        # Drop "modified" clauses where no concrete difference was found
+        # If LLM and regex both found nothing for a modified clause (e.g. a
+        # skill name or technology was added/removed — non-numeric changes),
+        # fall back to a direct word-level comparison of the excerpts.
         if c["status"] == "modified" and not diff_points:
-            logger.debug(f"[comparison] Dropping '{name}' — modified but no difference_points detected")
-            continue
+            diff_points = _text_fallback_diffs(
+                c.get("doc1_excerpt", ""), c.get("doc2_excerpt", "")
+            )
+            if diff_points:
+                logger.debug(f"[comparison] '{name}' — used text fallback: {diff_points}")
+            else:
+                logger.debug(f"[comparison] Dropping '{name}' — no difference detected by any method")
+                continue
 
         clause_changes.append({
             "clause_name":       name,
@@ -579,60 +618,38 @@ async def compare_documents(
             "Comparing different document types may produce incomplete or inaccurate results."
         )
 
+    # Flatten all difference_points into a single list.
+    # Each point is prefixed with its clause name so context is preserved.
+    difference_points: list[str] = []
+    for c in clause_changes:
+        label = c["clause_name"]
+        for pt in c["difference_points"]:
+            difference_points.append(f"[{label}] {pt}")
+        # For added/removed clauses with no explicit points, note the status
+        if not c["difference_points"]:
+            if c["status"] == "added":
+                difference_points.append(f"[{label}] New clause added in Document 2")
+            elif c["status"] == "removed":
+                difference_points.append(f"[{label}] Clause removed — not present in Document 2")
+
     duration_ms = int((time.perf_counter() - t_start) * 1000)
     logger.info(
         f"[comparison] Done — {duration_ms}ms | "
-        f"changes={len(clause_changes)} | "
+        f"difference_points={len(difference_points)} | "
         f"types_match={types_match}"
     )
 
-    high_count   = sum(1 for c in clause_changes if c["severity"] == "high")
-    medium_count = sum(1 for c in clause_changes if c["severity"] == "medium")
-    low_count    = sum(1 for c in clause_changes if c["severity"] == "low")
-    added_count  = sum(1 for c in clause_changes if c["status"] == "added")
-    removed_count= sum(1 for c in clause_changes if c["status"] == "removed")
-    modified_count=sum(1 for c in clause_changes if c["status"] == "modified")
-
     return {
-        "status":      "success",
-        "duration_ms": duration_ms,
-        "comparison": {
-            "session_id":       session_id,
-            "compared_at":      datetime.now(timezone.utc).isoformat(),
-            "comparison_notice": comparison_notice,
-
-            # Header block — drives the top bar of the UI
-            "header": {
-                "document_1": {
-                    "filename":      doc1_filename,
-                    "document_type": doc1_type,
-                },
-                "document_2": {
-                    "filename":      doc2_filename,
-                    "document_type": doc2_type,
-                },
-                "total_changes":  len(clause_changes),
-                "by_severity": {
-                    "high":   high_count,
-                    "medium": medium_count,
-                    "low":    low_count,
-                },
-                "by_status": {
-                    "modified": modified_count,
-                    "added":    added_count,
-                    "removed":  removed_count,
-                },
-            },
-
-            # Insights + recommendation
-            "insights": {
-                "semantic_insights": insights,
-                "recommendation":    rec,
-            },
-
-            # One entry per clause that actually changed.
-            # Each entry contains only the concrete difference_points — no
-            # token arrays or side_by_side metadata.
-            "clause_changes": clause_changes,
+        "status":               "success",
+        "duration_ms":          duration_ms,
+        "compared_at":          datetime.now(timezone.utc).isoformat(),
+        "document_1_type":      doc1_type,
+        "document_2_type":      doc2_type,
+        "comparison_notice":    comparison_notice,
+        "total_differences":    len(difference_points),
+        "difference_points":    difference_points,
+        "insights": {
+            "semantic_insights": insights,
+            "recommendation":    rec,
         },
     }

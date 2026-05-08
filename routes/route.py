@@ -1053,7 +1053,7 @@ async def compare_documents_api(
         elapsed = time.perf_counter() - t_start
         logger.info(
             f"[{request_id}] ── COMPARE DONE — {elapsed:.2f}s | "
-            f"changes={comp_result['comparison']['header']['total_changes']}"
+            f"changes={comp_result['total_differences']}"
         )
 
         return {
@@ -1062,9 +1062,16 @@ async def compare_documents_api(
             "compatibility_message": (
                 f"Both documents are '{extraction1['document_type']}' — comparison is available."
             ),
-            "document_1":  doc1_info,
-            "document_2":  doc2_info,
-            "comparison":  comp_result.get("comparison"),
+            "document_1":           doc1_info,
+            "document_2":           doc2_info,
+            "total_differences":    comp_result.get("total_differences"),
+            "difference_points":    comp_result.get("difference_points"),
+            "insights":             comp_result.get("insights"),
+            "comparison_notice":    comp_result.get("comparison_notice"),
+            "document_1_type":      comp_result.get("document_1_type"),
+            "document_2_type":      comp_result.get("document_2_type"),
+            "compared_at":          comp_result.get("compared_at"),
+            "duration_ms":          comp_result.get("duration_ms"),
         }
  
     except HTTPException:
