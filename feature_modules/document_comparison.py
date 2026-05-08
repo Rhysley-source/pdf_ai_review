@@ -28,7 +28,7 @@ import time
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
-from llm_model.ai_model import run_llm_mini
+from llm_model.ai_model import run_llm_mini, run_llm_comparison
 from utils.json_utils import extract_json_raw as extract_json_from_text
 
 logger = logging.getLogger(__name__)
@@ -76,8 +76,90 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").lower().strip())
 
 
+def _normalize_clause_name(name: str) -> str:
+    """
+    Strip leading numbering and structural words before similarity scoring.
+    'Clause 4.2 – Payment Terms' → 'payment terms'
+    'Section 3: Non-Compete'     → 'non compete'
+    'Article IV. Termination'    → 'termination'
+    """
+    s = (name or "").lower()
+    # Remove leading clause/section/article with number and separator
+    s = re.sub(r'^(clause|section|article|part|schedule|exhibit|annex)\s*[\divxlc\d.]*[\s\-–—:\.]*', '', s)
+    # Remove a bare leading number like "4." or "4.2.1 "
+    s = re.sub(r'^\d[\d.]*[\s\-–—:\.]*', '', s)
+    # Strip remaining punctuation, normalize whitespace
+    s = re.sub(r'[^\w\s]', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+
 def _sim(a: str, b: str) -> float:
     return SequenceMatcher(None, _norm(a), _norm(b)).ratio()
+
+
+def _name_sim(a: str, b: str) -> float:
+    """Similarity on normalized clause names — strips numbering before comparing."""
+    return SequenceMatcher(None, _normalize_clause_name(a), _normalize_clause_name(b)).ratio()
+
+
+# ---------------------------------------------------------------------------
+# Regex-based value extraction — improvement 4
+# Pulls out concrete values (amounts, dates, durations, percentages) that
+# are guaranteed to appear in difference_points even if the LLM misses them.
+# ---------------------------------------------------------------------------
+
+_VALUE_PATTERN = re.compile(
+    r'\$[\d,]+(?:\.\d+)?(?:\s*(?:million|billion|k|thousand))?' # $500,000 / $1.5 million
+    r'|\b\d{1,3}(?:,\d{3})*(?:\.\d+)?\s*(?:USD|EUR|GBP|INR)'  # 10,000 USD
+    r'|\b\d+(?:\.\d+)?\s*%'                                     # 15%
+    r'|\b\d+\s*(?:calendar\s+)?days?\b'                         # 30 days
+    r'|\b\d+\s*(?:business\s+)?days?\b'                         # 5 business days
+    r'|\b\d+\s*months?\b'                                        # 6 months
+    r'|\b\d+\s*years?\b'                                         # 2 years
+    r'|\b\d+\s*weeks?\b'                                         # 4 weeks
+    r'|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?'
+    r'|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
+    r'\s+\d{1,2},?\s+\d{4}\b'                                   # January 1, 2025
+    r'|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b',                     # 01/15/2025
+    re.IGNORECASE,
+)
+
+
+def _extract_value_diffs(excerpt1: str, excerpt2: str) -> list[str]:
+    """
+    Compare concrete values extracted from both excerpts via regex.
+    Returns a list of "Doc1: <val> → Doc2: <val>" strings for values that differ.
+    Values present in one doc but absent in the other are also flagged.
+    """
+    vals1 = {v.lower().strip() for v in _VALUE_PATTERN.findall(excerpt1 or "")}
+    vals2 = {v.lower().strip() for v in _VALUE_PATTERN.findall(excerpt2 or "")}
+
+    diffs: list[str] = []
+
+    only_in_1 = vals1 - vals2
+    only_in_2 = vals2 - vals1
+
+    # Try to pair removed/added values for a cleaner "X → Y" message
+    paired: set[str] = set()
+    for v1 in sorted(only_in_1):
+        # Find the closest value in doc2 by type heuristic (same unit suffix)
+        suffix1 = re.sub(r'[\d,.$]', '', v1).strip()
+        match = next(
+            (v2 for v2 in sorted(only_in_2)
+             if re.sub(r'[\d,.$]', '', v2).strip() == suffix1 and v2 not in paired),
+            None,
+        )
+        if match:
+            diffs.append(f"Doc1: \"{v1}\" → Doc2: \"{match}\"")
+            paired.add(match)
+        else:
+            diffs.append(f"Doc1 only: \"{v1}\" (removed or changed)")
+
+    for v2 in sorted(only_in_2):
+        if v2 not in paired:
+            diffs.append(f"Doc2 only: \"{v2}\" (added or changed)")
+
+    return diffs
 
 
 # ---------------------------------------------------------------------------
@@ -86,9 +168,10 @@ def _sim(a: str, b: str) -> float:
 # Returns list of (clause1_or_None, clause2_or_None, match_score).
 # ---------------------------------------------------------------------------
 
-_NAME_WEIGHT    = 0.6
-_EXCERPT_WEIGHT = 0.4
-_MATCH_THRESHOLD = 0.45
+_NAME_WEIGHT     = 0.65
+_EXCERPT_WEIGHT  = 0.35
+_MATCH_THRESHOLD = 0.62   # raised from 0.45 — prevents wrong-clause pairings
+_MIN_NAME_SIM    = 0.28   # clause names must have some overlap before pairing
 
 
 def _match_clauses(
@@ -108,8 +191,13 @@ def _match_clauses(
         for i, c2 in enumerate(clauses2):
             if i in used2:
                 continue
+            # Use normalized names (strips "Clause 4 –" prefixes) for matching
+            name_sim = _name_sim(c1["clause_name"], c2["clause_name"])
+            # Reject pairs where clause names have no meaningful overlap
+            if name_sim < _MIN_NAME_SIM:
+                continue
             score = (
-                _NAME_WEIGHT    * _sim(c1["clause_name"], c2["clause_name"]) +
+                _NAME_WEIGHT    * name_sim +
                 _EXCERPT_WEIGHT * _sim(c1.get("excerpt", ""), c2.get("excerpt", ""))
             )
             if score > best_score:
@@ -181,12 +269,15 @@ def _build_raw_changes(
         else:
             # Both present — check if content actually changed
             ratio = _sim(c1.get("excerpt", ""), c2.get("excerpt", ""))
-            if ratio > 0.97:
-                continue  # identical — skip
+            if ratio >= 1.0:
+                continue  # byte-identical — skip; even 1-word changes are flagged
             status = "modified"
 
         e1 = (c1 or {}).get("excerpt", "")
         e2 = (c2 or {}).get("excerpt", "")
+
+        # Regex-detected value changes — guaranteed presence regardless of LLM quality
+        value_diffs = _extract_value_diffs(e1, e2) if status == "modified" else []
 
         changes.append({
             "clause_name":      name,
@@ -201,8 +292,9 @@ def _build_raw_changes(
                 "significance": (c2 or {}).get("significance", ""),
             },
             "word_diff":        _word_diff(e1, e2) if status == "modified" else [],
-            "summary":          "",   # filled by LLM enrichment
-            "difference_points": [],  # filled by LLM enrichment
+            "value_diffs":      value_diffs,   # regex-extracted; prepended to LLM difference_points
+            "summary":          "",            # filled by LLM enrichment
+            "difference_points": [],           # filled by LLM enrichment
         })
     return changes
 
@@ -266,7 +358,9 @@ def _text_diff_stats(text1: str, text2: str) -> dict:
 
 _ENRICHMENT_SYSTEM = (
     "You are a senior legal analyst specialising in contract risk review. "
-    "Analyse the clause changes provided and return a JSON object with exact difference points per clause. "
+    "Analyse the clause changes provided and identify EXACT, SPECIFIC differences — "
+    "quote the actual values, amounts, dates, percentages, or terms that changed. "
+    "Vague statements like 'terms were modified' are not acceptable. "
     "Return ONLY valid JSON — no markdown, no explanation."
 )
 
@@ -324,10 +418,11 @@ Return ONLY this JSON:
 
 Rules:
 - clause_details key must exactly match the clause_name from the change list
-- difference_points must be specific and concrete — name exact values, dates, amounts, percentages
+- difference_points MUST quote exact text: "Doc1 says X, Doc2 says Y" — never say "was changed" without citing both values
 - Every modified clause must have at least 2 difference_points
-- Added clauses: difference_points should describe what the new clause introduces
-- Removed clauses: difference_points should describe what protection is lost"""
+- Added clauses: quote exact new terms introduced
+- Removed clauses: quote exact text that was removed and name the protection lost
+- If a numeric value, date, party name, or dollar amount changed, it MUST appear in difference_points"""
 
 
 async def _llm_enrichment(changes: list[dict], text1: str, text2: str) -> dict:
@@ -338,8 +433,8 @@ async def _llm_enrichment(changes: list[dict], text1: str, text2: str) -> dict:
     try:
         prompt = _build_enrichment_prompt(changes, text1, text2)
 
-        # Attempt 1
-        raw = await run_llm_mini(prompt, _ENRICHMENT_SYSTEM, max_output_tokens=6000)
+        # Attempt 1 — uses COMPARISON_MODEL (default: gpt-4.1) for accurate legal analysis
+        raw = await run_llm_comparison(prompt, _ENRICHMENT_SYSTEM, max_output_tokens=8000)
         result = extract_json_from_text(raw)
         if result and result.get("clause_details"):
             logger.info(
@@ -374,7 +469,7 @@ async def _llm_enrichment(changes: list[dict], text1: str, text2: str) -> dict:
             + prompt
         )
 
-        raw2   = await run_llm_mini(retry_prompt, _ENRICHMENT_SYSTEM, max_output_tokens=6000)
+        raw2   = await run_llm_comparison(retry_prompt, _ENRICHMENT_SYSTEM, max_output_tokens=8000)
         result2 = extract_json_from_text(raw2)
         if result2 and result2.get("clause_details"):
             logger.info("[comparison] Retry succeeded")
@@ -448,7 +543,11 @@ async def compare_documents(
         name        = c["clause_name"]
         llm_entry   = details.get(name, {})
         summary     = (llm_entry.get("summary") or "").strip()
-        diff_points = llm_entry.get("difference_points") or []
+        # Regex-detected value diffs are prepended — they're factual and guaranteed accurate.
+        # LLM difference_points follow, deduplicated against the regex findings.
+        value_diffs  = c.get("value_diffs", [])
+        llm_points   = llm_entry.get("difference_points") or []
+        diff_points  = value_diffs + [p for p in llm_points if p not in value_diffs]
 
         if not summary:
             if c["status"] == "added":

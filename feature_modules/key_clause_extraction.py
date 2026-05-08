@@ -185,11 +185,62 @@ async def extract_key_clauses(text: str) -> dict:
 # Does NOT affect /key-clause-extraction route response shape
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Comparison-specific extraction prompt — captures full clause text (up to
+# 500 words per excerpt) instead of the 80-word summary used by the public
+# endpoint. Longer excerpts give the word-diff and LLM enrichment more signal.
+# ---------------------------------------------------------------------------
+
+_COMPARE_CALL_SYSTEM = """You are a document analyst extracting clauses for a strict side-by-side comparison.
+
+Analyze the document and return a single JSON object with EXACTLY this structure:
+
+{
+  "document_type": "<slug: contract|employment|nda|lease|invoice|resume|report|other>",
+  "document_label": "<specific document name — max 5 words>",
+  "key_clauses": [
+    {
+      "clause_name": "<plain clause name without numbers — e.g. 'Payment Terms', NOT 'Clause 4 – Payment Terms'>",
+      "excerpt": "<complete clause text from document — include ALL sentences of the clause, up to 500 words>",
+      "significance": "<why this clause matters — max 20 words>"
+    }
+  ]
+}
+
+First identify the document type, then extract every clause relevant to that type:
+
+- contract:    payment terms, liability clauses, termination conditions, IP ownership, dispute resolution,
+               indemnification, confidentiality, governing law, force majeure, warranties
+- employment:  job title/role, salary and compensation, benefits, probation period, notice period,
+               non-compete / non-solicitation, leave policy, working hours, termination conditions
+- nda:         parties involved, definition of confidential information, duration, permitted disclosures,
+               exclusions from confidentiality, breach consequences, jurisdiction
+- lease:       rent amount and due date, lease duration, security deposit, maintenance responsibilities,
+               renewal / termination terms, pet / subletting policy, late fees
+- invoice:     line items and descriptions, unit prices, quantities, subtotal, tax, total amount due,
+               payment due date, payment method, late payment penalties, billing parties
+- resume:      professional summary, core skills and technologies, work experience (roles and achievements),
+               education and qualifications, certifications and licenses, notable projects or accomplishments
+- report:      key findings, main conclusions, critical metrics or data points, recommendations,
+               methodology, data sources, risks or issues identified, action items
+- other:       main topics covered, key decisions or outcomes, important figures or dates,
+               parties or stakeholders involved, notable terms or conditions, action items
+
+Rules:
+- clause_name: plain name only — strip any leading numbers, "Clause", "Section", "Article" prefixes
+- excerpt: copy the FULL clause text verbatim — do NOT summarize or truncate; every sentence matters
+- Extract ALL relevant clauses present in the document
+- Use real text only — do not fabricate or infer
+- Return ONLY valid JSON — no markdown, no explanation"""
+
+
 async def extract_key_clauses_for_compare(text: str) -> dict:
     """
     Dedicated variant of extract_key_clauses used exclusively by /compare-documents.
 
     Differences from extract_key_clauses:
+    - Uses _COMPARE_CALL_SYSTEM: captures full clause text (up to 500 words per excerpt)
+      instead of the 80-word summary used by the public endpoint.
     - Returns document_slug (used for document type compatibility check)
     - 2-attempt retry with raw output logging on failure
     - No 'status' key — internal use only, never returned directly to client
@@ -201,7 +252,7 @@ async def extract_key_clauses_for_compare(text: str) -> dict:
     _MAX_ATTEMPTS = 2
     result = {}
     for attempt in range(1, _MAX_ATTEMPTS + 1):
-        raw = await run_llm_mini(document, _SINGLE_CALL_SYSTEM, max_output_tokens=16000)
+        raw = await run_llm_mini(document, _COMPARE_CALL_SYSTEM, max_output_tokens=16000)
         logger.debug(f"[key_clause_compare] attempt {attempt} raw ({len(raw)} chars): {raw[:800]}")
         result = extract_json_from_text(raw)
         if result and "key_clauses" in result:

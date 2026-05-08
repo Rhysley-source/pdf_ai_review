@@ -16,11 +16,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-MODEL_NAME_OB   = os.environ.get("MODEL_NAME_OB",   "gpt-4.1")
-MODEL_NAME      = os.environ.get("MODEL_NAME",      "gpt-5-nano")
-ANALYSE_MODEL   = os.environ.get("ANALYSE_MODEL",   "gpt-4.1-mini")
-MINI_MODEL_NAME = os.environ.get("MINI_MODEL_NAME", "gpt-4.1-mini")
-OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY",  "")
+MODEL_NAME_OB      = os.environ.get("MODEL_NAME_OB",      "gpt-4.1")
+MODEL_NAME         = os.environ.get("MODEL_NAME",         "gpt-5-nano")
+ANALYSE_MODEL      = os.environ.get("ANALYSE_MODEL",      "gpt-4.1-mini")
+MINI_MODEL_NAME    = os.environ.get("MINI_MODEL_NAME",    "gpt-4.1-mini")
+COMPARISON_MODEL   = os.environ.get("COMPARISON_MODEL",   "gpt-4.1")
+OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY",     "")
 if not OPENAI_API_KEY:
     logger.error("OPENAI_API_KEY is not set in environment variables.")
 
@@ -725,6 +726,50 @@ async def run_llm_mini(
             return content
         except Exception as e:
             logger.exception(f"[run_llm_mini] model={mini_model} OpenAI API call failed: {e}")
+            raise
+
+
+async def run_llm_comparison(
+    text:              str,
+    system_prompt:     str,
+    max_output_tokens: int = 8000,
+) -> str:
+    """
+    High-accuracy LLM runner for document comparison enrichment.
+    Uses COMPARISON_MODEL (default: gpt-4.1) — stronger reasoning and better
+    exact-value quoting than gpt-4.1-mini for legal clause analysis.
+    Override via COMPARISON_MODEL env var without touching code.
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": f"Document:\n----------------\n{text}\n----------------"},
+    ]
+    t0                = time.perf_counter()
+    comparison_model  = os.environ.get("COMPARISON_MODEL", COMPARISON_MODEL)
+    token_kwarg       = "max_completion_tokens" if comparison_model in _MAX_COMPLETION_TOKENS_MODELS else "max_tokens"
+    kwargs: dict = {
+        "model":     comparison_model,
+        "messages":  messages,
+        "seed":      _messages_seed(messages),
+        token_kwarg: max_output_tokens,
+    }
+    if comparison_model not in _FIXED_TEMPERATURE_MODELS:
+        kwargs["temperature"] = 0.0
+
+    async with _get_text_semaphore():
+        try:
+            response      = await _client.chat.completions.create(**kwargs)
+            elapsed       = time.perf_counter() - t0
+            content       = response.choices[0].message.content or ""
+            input_tokens  = response.usage.prompt_tokens
+            output_tokens = response.usage.completion_tokens
+            logger.info(
+                f"[run_llm_comparison] model={comparison_model} "
+                f"in={input_tokens} out={output_tokens} in {elapsed:.2f}s"
+            )
+            return content
+        except Exception as e:
+            logger.exception(f"[run_llm_comparison] model={comparison_model} API call failed: {e}")
             raise
 
 
