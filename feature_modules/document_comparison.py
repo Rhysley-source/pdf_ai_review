@@ -283,17 +283,9 @@ def _build_raw_changes(
             "clause_name":      name,
             "status":           status,
             "severity":         severity,
-            "doc1": {
-                "excerpt":      e1,
-                "significance": (c1 or {}).get("significance", ""),
-            },
-            "doc2": {
-                "excerpt":      e2,
-                "significance": (c2 or {}).get("significance", ""),
-            },
-            "word_diff":        _word_diff(e1, e2) if status == "modified" else [],
+            "doc1_excerpt":     e1,
+            "doc2_excerpt":     e2,
             "value_diffs":      value_diffs,   # regex-extracted; prepended to LLM difference_points
-            "summary":          "",            # filled by LLM enrichment
             "difference_points": [],           # filled by LLM enrichment
         })
     return changes
@@ -372,8 +364,8 @@ def _build_enrichment_prompt(changes: list[dict], doc1_text: str, doc2_text: str
     )
     lines = []
     for i, c in enumerate(sorted_changes, 1):
-        e1 = (c["doc1"].get("excerpt") or "")[:500].replace("\n", " ")
-        e2 = (c["doc2"].get("excerpt") or "")[:500].replace("\n", " ")
+        e1 = (c.get("doc1_excerpt") or "")[:500].replace("\n", " ")
+        e2 = (c.get("doc2_excerpt") or "")[:500].replace("\n", " ")
         lines.append(
             f"{i}. CLAUSE: {c['clause_name'].upper()}\n"
             f"   Status: {c['status']} | Severity: {c['severity']}\n"
@@ -448,8 +440,8 @@ async def _llm_enrichment(changes: list[dict], text1: str, text2: str) -> dict:
         logger.warning("[comparison] LLM attempt 1 weak — retrying with example")
         ex      = changes[0]
         ex_name = ex["clause_name"]
-        ex_e1   = (ex["doc1"].get("excerpt") or "original text")[:60]
-        ex_e2   = (ex["doc2"].get("excerpt") or "revised text")[:60]
+        ex_e1   = (ex.get("doc1_excerpt") or "original text")[:60]
+        ex_e2   = (ex.get("doc2_excerpt") or "revised text")[:60]
 
         retry_prompt = (
             "Return ONLY valid JSON — no markdown.\n\n"
@@ -515,8 +507,17 @@ async def compare_documents(
     """
     t_start = time.perf_counter()
 
-    clauses1: list[dict] = extraction1.get("key_clauses", [])
-    clauses2: list[dict] = extraction2.get("key_clauses", [])
+    # Sort both clause lists alphabetically before matching so the greedy
+    # algorithm always processes clauses in the same order regardless of how
+    # the LLM returned them — this makes the comparison count deterministic.
+    clauses1: list[dict] = sorted(
+        extraction1.get("key_clauses", []),
+        key=lambda c: _normalize_clause_name(c.get("clause_name", "")),
+    )
+    clauses2: list[dict] = sorted(
+        extraction2.get("key_clauses", []),
+        key=lambda c: _normalize_clause_name(c.get("clause_name", "")),
+    )
 
     logger.info(
         f"[comparison] Starting — "
@@ -528,67 +529,39 @@ async def compare_documents(
     pairs = _match_clauses(clauses1, clauses2)
 
     # 2. Build raw change list (CPU-bound, run in thread)
-    # text_diff_stats and risk_score are disabled for v1
     raw_changes = await asyncio.to_thread(_build_raw_changes, pairs)
 
-    # 3. LLM enrichment — summaries, difference_points, insights, recommendation
+    # 3. LLM enrichment — difference_points, insights, recommendation
     llm_data  = await _llm_enrichment(raw_changes, text1, text2)
     details   = llm_data.get("clause_details", {})
     insights  = llm_data.get("semantic_insights", [])
     rec       = llm_data.get("recommendation", "")
 
-    # 4. Attach LLM enrichment + build side_by_side row per clause
+    # 4. Assemble final clause_changes — only real differences are included.
+    # "modified" entries with zero difference_points are discarded: they are
+    # near-identical clauses that passed the 1.0 ratio threshold but have no
+    # concrete change the LLM or regex could detect.
     clause_changes = []
     for c in raw_changes:
-        name        = c["clause_name"]
-        llm_entry   = details.get(name, {})
-        summary     = (llm_entry.get("summary") or "").strip()
-        # Regex-detected value diffs are prepended — they're factual and guaranteed accurate.
-        # LLM difference_points follow, deduplicated against the regex findings.
+        name         = c["clause_name"]
+        llm_entry    = details.get(name, {})
+        # Regex value diffs first (factual), then LLM points (deduplicated)
         value_diffs  = c.get("value_diffs", [])
         llm_points   = llm_entry.get("difference_points") or []
         diff_points  = value_diffs + [p for p in llm_points if p not in value_diffs]
 
-        if not summary:
-            if c["status"] == "added":
-                summary = f"{name} is a new clause added in the revised document."
-            elif c["status"] == "removed":
-                summary = f"{name} has been removed from the revised document."
-            else:
-                summary = f"{name} has been modified in the revised document."
-
-        e1      = c["doc1"].get("excerpt") or None
-        e2      = c["doc2"].get("excerpt") or None
-        wdiff   = c.get("word_diff", [])
-
-        # Split word_diff into left (doc1) and right (doc2) token lists
-        # Left  pane: equal + delete  (what was in doc1)
-        # Right pane: equal + insert  (what is  in doc2)
-        left_tokens  = [{"text": w["text"], "tag": w["tag"]} for w in wdiff if w["tag"] in ("equal", "delete")]
-        right_tokens = [{"text": w["text"], "tag": w["tag"]} for w in wdiff if w["tag"] in ("equal", "insert")]
+        # Drop "modified" clauses where no concrete difference was found
+        if c["status"] == "modified" and not diff_points:
+            logger.debug(f"[comparison] Dropping '{name}' — modified but no difference_points detected")
+            continue
 
         clause_changes.append({
-            "clause_name":  name,
-            "status":       c["status"],
-            "severity":     c["severity"],
-            "summary":      summary,
-            "side_by_side": {
-                "left": {
-                    "filename":    doc1_filename,
-                    "present":     e1 is not None,
-                    "excerpt":     e1,
-                    "significance": c["doc1"].get("significance", ""),
-                    "tokens":      left_tokens,   # equal + delete — render delete in red strikethrough
-                },
-                "right": {
-                    "filename":    doc2_filename,
-                    "present":     e2 is not None,
-                    "excerpt":     e2,
-                    "significance": c["doc2"].get("significance", ""),
-                    "tokens":      right_tokens,  # equal + insert — render insert in green
-                },
-                "difference_points": diff_points,
-            },
+            "clause_name":       name,
+            "status":            c["status"],
+            "severity":          c["severity"],
+            "doc1_excerpt":      c.get("doc1_excerpt") or "",
+            "doc2_excerpt":      c.get("doc2_excerpt") or "",
+            "difference_points": diff_points,
         })
 
     # 5. Document type compatibility message
@@ -651,13 +624,15 @@ async def compare_documents(
                 },
             },
 
-            # Insights + recommendation — top section above clause rows
+            # Insights + recommendation
             "insights": {
                 "semantic_insights": insights,
                 "recommendation":    rec,
             },
 
-            # Clause rows — each has side_by_side block ready for UI rendering
+            # One entry per clause that actually changed.
+            # Each entry contains only the concrete difference_points — no
+            # token arrays or side_by_side metadata.
             "clause_changes": clause_changes,
         },
     }
