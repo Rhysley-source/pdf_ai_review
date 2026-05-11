@@ -1066,6 +1066,8 @@ async def compare_documents_api(
             ),
             "document_1":           doc1_info,
             "document_2":           doc2_info,
+            "doc1_text":            text1,
+            "doc2_text":            text2,
             "stats":                comp_result.get("stats"),
             "diff_blocks":          comp_result.get("diff_blocks"),
             "insights":             comp_result.get("insights"),
