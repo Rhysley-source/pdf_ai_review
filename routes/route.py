@@ -1051,9 +1051,11 @@ async def compare_documents_api(
         )
 
         elapsed = time.perf_counter() - t_start
+        stats   = comp_result.get("stats", {})
         logger.info(
             f"[{request_id}] ── COMPARE DONE — {elapsed:.2f}s | "
-            f"differences={comp_result['total_differences']}"
+            f"similarity={stats.get('similarity_percent')} | "
+            f"added={stats.get('added_words')} removed={stats.get('removed_words')}"
         )
 
         return {
@@ -1064,8 +1066,8 @@ async def compare_documents_api(
             ),
             "document_1":           doc1_info,
             "document_2":           doc2_info,
-            "total_differences":    comp_result.get("total_differences"),
-            "differences":          comp_result.get("differences"),
+            "stats":                comp_result.get("stats"),
+            "diff_blocks":          comp_result.get("diff_blocks"),
             "insights":             comp_result.get("insights"),
             "comparison_notice":    comp_result.get("comparison_notice"),
             "document_1_type":      comp_result.get("document_1_type"),
