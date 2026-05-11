@@ -1069,7 +1069,7 @@ async def compare_documents_api(
             "doc1_text":            text1,
             "doc2_text":            text2,
             "stats":                comp_result.get("stats"),
-            "diff_blocks":          comp_result.get("diff_blocks"),
+            "diff_blocks":          ''#comp_result.get("diff_blocks"),
             "insights":             comp_result.get("insights"),
             "comparison_notice":    comp_result.get("comparison_notice"),
             "document_1_type":      comp_result.get("document_1_type"),
