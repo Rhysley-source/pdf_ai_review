@@ -1053,7 +1053,7 @@ async def compare_documents_api(
         elapsed = time.perf_counter() - t_start
         logger.info(
             f"[{request_id}] ── COMPARE DONE — {elapsed:.2f}s | "
-            f"changes={comp_result['total_differences']}"
+            f"differences={comp_result['total_differences']}"
         )
 
         return {
@@ -1065,7 +1065,7 @@ async def compare_documents_api(
             "document_1":           doc1_info,
             "document_2":           doc2_info,
             "total_differences":    comp_result.get("total_differences"),
-            "difference_points":    comp_result.get("difference_points"),
+            "differences":          comp_result.get("differences"),
             "insights":             comp_result.get("insights"),
             "comparison_notice":    comp_result.get("comparison_notice"),
             "document_1_type":      comp_result.get("document_1_type"),
