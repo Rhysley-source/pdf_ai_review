@@ -1,0 +1,256 @@
+2026-04-07 05:28:07 | INFO     | s_main | Starting up...
+2026-04-07 05:28:11 | ERROR    | db_files.db | [db] Schema init failed: Multiple exceptions: [Errno 10061] Connect call failed ('::1', 5432, 0, 0), [Errno 10061] Connect call failed ('127.0.0.1', 5432)
+2026-04-07 05:29:18 | INFO     | s_main | Starting up...
+2026-04-07 05:29:22 | ERROR    | db_files.db | [db] Schema init failed: Multiple exceptions: [Errno 10061] Connect call failed ('::1', 5432, 0, 0), [Errno 10061] Connect call failed ('127.0.0.1', 5432)
+2026-04-07 05:30:19 | INFO     | s_main | Starting up...
+2026-04-07 05:30:52 | DEBUG    | python_multipart.multipart | Calling on_part_begin with no data
+2026-04-07 05:30:52 | DEBUG    | python_multipart.multipart | Calling on_header_field with data[42:61]
+2026-04-07 05:30:52 | DEBUG    | python_multipart.multipart | Calling on_header_value with data[63:128]
+2026-04-07 05:30:52 | DEBUG    | python_multipart.multipart | Calling on_header_end with no data
+2026-04-07 05:30:52 | DEBUG    | python_multipart.multipart | Calling on_header_field with data[130:142]
+2026-04-07 05:30:52 | DEBUG    | python_multipart.multipart | Calling on_header_value with data[144:159]
+2026-04-07 05:30:52 | DEBUG    | python_multipart.multipart | Calling on_header_end with no data
+2026-04-07 05:30:52 | DEBUG    | python_multipart.multipart | Calling on_headers_finished with no data
+2026-04-07 05:30:52 | DEBUG    | python_multipart.multipart | Calling on_part_data with data[163:2592]
+2026-04-07 05:30:52 | DEBUG    | python_multipart.multipart | Calling on_part_end with no data
+2026-04-07 05:30:52 | DEBUG    | python_multipart.multipart | Calling on_end with no data
+2026-04-07 05:30:52 | INFO     | feature_modules.key_clause_extraction | Received file: detailed_legal_summons (1).pdf for endpoint: /detect-obligations
+2026-04-07 05:30:52 | DEBUG    | utils.pdf_utils | [pdf_utils] get_page_count: 1 page(s)
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] load_pdf: 'C:\Users\arshdeepsingh\pdf_ai_review\temp\ad04d11e-4508-4516-80e1-cd2e25a4edfd.pdf' max_pages=1
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] 1 total page(s), processing 1 (all)
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] PDF type: sampled 1 page(s), 1 had native text -> 'native'
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] Pass 1 -- parallel native extraction (4 workers)
+2026-04-07 05:30:52 | DEBUG    | utils.pdf_utils | [pdf_utils] clean_text: 975 -> 975 chars
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] Pass 1 done (0.00s) -- native=1, need_ocr=0
+2026-04-07 05:30:52 | DEBUG    | utils.pdf_utils | [pdf_utils] Page 1: native (975 chars)
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] -- EXTRACTION COMPLETE --------------------------
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] PDF type         : native
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] Pages processed  : 1/1
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] Native text       : 1 page(s)
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] PaddleOCR-VL      : 0 page(s)
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] Placeholders      : 0 page(s)
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] Blank pages        : 0 page(s)
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] Total loaded      : 1 page(s)
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] Time              : 0.02s
+2026-04-07 05:30:52 | INFO     | utils.pdf_utils | [pdf_utils] ------------------------------------------------------
+2026-04-07 05:30:52 | INFO     | routes.route | [9d49e482] Starting Obligation Detection...
+2026-04-07 05:30:52 | ERROR    | routes.route | [9d49e482] Obligation Detection failed: name 'analyze_document_obligations' is not defined
+Traceback (most recent call last):
+  File "C:\Users\arshdeepsingh\pdf_ai_review\routes\route.py", line 326, in detect_obligations
+    result, total_in_tok, total_out_tok = await analyze_document_obligations(text)
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+NameError: name 'analyze_document_obligations' is not defined
+2026-04-07 05:30:52 | DEBUG    | routes.route | [9d49e482] Temp file deleted
+2026-04-07 05:30:56 | ERROR    | db_files.db | [db] log_request failed for 9d49e482: Multiple exceptions: [Errno 10061] Connect call failed ('::1', 5432, 0, 0), [Errno 10061] Connect call failed ('127.0.0.1', 5432)
+2026-04-07 05:31:02 | DEBUG    | python_multipart.multipart | Calling on_part_begin with no data
+2026-04-07 05:31:02 | DEBUG    | python_multipart.multipart | Calling on_header_field with data[42:61]
+2026-04-07 05:31:02 | DEBUG    | python_multipart.multipart | Calling on_header_value with data[63:128]
+2026-04-07 05:31:02 | DEBUG    | python_multipart.multipart | Calling on_header_end with no data
+2026-04-07 05:31:02 | DEBUG    | python_multipart.multipart | Calling on_header_field with data[130:142]
+2026-04-07 05:31:02 | DEBUG    | python_multipart.multipart | Calling on_header_value with data[144:159]
+2026-04-07 05:31:02 | DEBUG    | python_multipart.multipart | Calling on_header_end with no data
+2026-04-07 05:31:02 | DEBUG    | python_multipart.multipart | Calling on_headers_finished with no data
+2026-04-07 05:31:02 | DEBUG    | python_multipart.multipart | Calling on_part_data with data[163:2592]
+2026-04-07 05:31:02 | DEBUG    | python_multipart.multipart | Calling on_part_end with no data
+2026-04-07 05:31:02 | DEBUG    | python_multipart.multipart | Calling on_end with no data
+2026-04-07 05:31:02 | INFO     | feature_modules.key_clause_extraction | Received file: detailed_legal_summons (1).pdf for endpoint: /detect-obligations
+2026-04-07 05:31:02 | DEBUG    | utils.pdf_utils | [pdf_utils] get_page_count: 1 page(s)
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] load_pdf: 'C:\Users\arshdeepsingh\pdf_ai_review\temp\8c589bd2-2b66-4c1d-8b6c-cc350cd2ed68.pdf' max_pages=1
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] 1 total page(s), processing 1 (all)
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] PDF type: sampled 1 page(s), 1 had native text -> 'native'
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] Pass 1 -- parallel native extraction (4 workers)
+2026-04-07 05:31:02 | DEBUG    | utils.pdf_utils | [pdf_utils] clean_text: 975 -> 975 chars
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] Pass 1 done (0.00s) -- native=1, need_ocr=0
+2026-04-07 05:31:02 | DEBUG    | utils.pdf_utils | [pdf_utils] Page 1: native (975 chars)
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] -- EXTRACTION COMPLETE --------------------------
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] PDF type         : native
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] Pages processed  : 1/1
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] Native text       : 1 page(s)
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] PaddleOCR-VL      : 0 page(s)
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] Placeholders      : 0 page(s)
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] Blank pages        : 0 page(s)
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] Total loaded      : 1 page(s)
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] Time              : 0.01s
+2026-04-07 05:31:02 | INFO     | utils.pdf_utils | [pdf_utils] ------------------------------------------------------
+2026-04-07 05:31:02 | INFO     | routes.route | [491e3a28] Starting Obligation Detection...
+2026-04-07 05:31:02 | ERROR    | routes.route | [491e3a28] Obligation Detection failed: name 'analyze_document_obligations' is not defined
+Traceback (most recent call last):
+  File "C:\Users\arshdeepsingh\pdf_ai_review\routes\route.py", line 326, in detect_obligations
+    result, total_in_tok, total_out_tok = await analyze_document_obligations(text)
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+NameError: name 'analyze_document_obligations' is not defined
+2026-04-07 05:31:02 | DEBUG    | routes.route | [491e3a28] Temp file deleted
+2026-04-07 05:31:06 | ERROR    | db_files.db | [db] log_request failed for 491e3a28: Multiple exceptions: [Errno 10061] Connect call failed ('::1', 5432, 0, 0), [Errno 10061] Connect call failed ('127.0.0.1', 5432)
+2026-04-07 05:33:16 | INFO     | s_main | Shutting down.
+2026-04-07 05:33:21 | INFO     | s_main | Starting up...
+2026-04-07 05:33:39 | DEBUG    | python_multipart.multipart | Calling on_part_begin with no data
+2026-04-07 05:33:39 | DEBUG    | python_multipart.multipart | Calling on_header_field with data[42:61]
+2026-04-07 05:33:39 | DEBUG    | python_multipart.multipart | Calling on_header_value with data[63:124]
+2026-04-07 05:33:39 | DEBUG    | python_multipart.multipart | Calling on_header_end with no data
+2026-04-07 05:33:39 | DEBUG    | python_multipart.multipart | Calling on_header_field with data[126:138]
+2026-04-07 05:33:39 | DEBUG    | python_multipart.multipart | Calling on_header_value with data[140:155]
+2026-04-07 05:33:39 | DEBUG    | python_multipart.multipart | Calling on_header_end with no data
+2026-04-07 05:33:39 | DEBUG    | python_multipart.multipart | Calling on_headers_finished with no data
+2026-04-07 05:33:39 | DEBUG    | python_multipart.multipart | Calling on_part_data with data[159:2588]
+2026-04-07 05:33:39 | DEBUG    | python_multipart.multipart | Calling on_part_end with no data
+2026-04-07 05:33:39 | DEBUG    | python_multipart.multipart | Calling on_end with no data
+2026-04-07 05:33:39 | INFO     | feature_modules.key_clause_extraction | Received file: detailed_legal_summons.pdf for endpoint: /detect-obligations
+2026-04-07 05:33:39 | DEBUG    | utils.pdf_utils | [pdf_utils] get_page_count: 1 page(s)
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] load_pdf: 'C:\Users\arshdeepsingh\pdf_ai_review\temp\896683c9-96d4-4d0d-bc08-20daa1e3b1a4.pdf' max_pages=1
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] 1 total page(s), processing 1 (all)
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] PDF type: sampled 1 page(s), 1 had native text -> 'native'
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] Pass 1 -- parallel native extraction (4 workers)
+2026-04-07 05:33:39 | DEBUG    | utils.pdf_utils | [pdf_utils] clean_text: 975 -> 975 chars
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] Pass 1 done (0.00s) -- native=1, need_ocr=0
+2026-04-07 05:33:39 | DEBUG    | utils.pdf_utils | [pdf_utils] Page 1: native (975 chars)
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] -- EXTRACTION COMPLETE --------------------------
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] PDF type         : native
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] Pages processed  : 1/1
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] Native text       : 1 page(s)
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] PaddleOCR-VL      : 0 page(s)
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] Placeholders      : 0 page(s)
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] Blank pages        : 0 page(s)
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] Total loaded      : 1 page(s)
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] Time              : 0.02s
+2026-04-07 05:33:39 | INFO     | utils.pdf_utils | [pdf_utils] ------------------------------------------------------
+2026-04-07 05:33:39 | INFO     | routes.route | [822c5b17] Starting Obligation Detection...
+2026-04-07 05:33:39 | INFO     | feature_modules.obligation_detection | [ac4f3b1e] ── OBLIGATION DETECTION ─────────────────────
+2026-04-07 05:33:39 | INFO     | feature_modules.obligation_detection | [ac4f3b1e] Step 1/4 — classifying document
+2026-04-07 05:33:39 | DEBUG    | utils.llm_utils | [run_llm_with_tokens] Sending request to LLM...
+2026-04-07 05:33:40 | DEBUG    | openai._base_client | Request options: {'method': 'post', 'url': '/chat/completions', 'files': None, 'idempotency_key': 'stainless-python-retry-57397355-1dcc-4097-b910-d6eb210e831a', 'content': None, 'json_data': {'messages': [{'role': 'system', 'content': '\nClassify this document into ONE:\n\nnda\nrent_agreement\nemployment_contract\nlegal_notice\ngeneral_contract\nother\n\nReturn ONLY one word.\n\nText:\n"""LEGAL SUMMONS NOTICE\nIN THE DISTRICT COURT OF SINGAPORE\nCase No: DC/2026/1452\nPlaintiff: Mr. Rajesh Kumar (NRIC: S1234567A)\nDefendant: Mr. Daniel Tan Wei Ming (NRIC: S7654321B)\nYou, Mr. Daniel Tan Wei Ming, are hereby summoned and required to appear before the District Court\nat 1 Havelock Square, Singapore, on the 15th day of May 2026 at 10:00 AM.\nYou must attend the hearing in person and bring all relevant documents, including contracts,\ncommunication records, and financial statements related to the dispute.\nFailure to comply with this summons shall result in legal consequences, including but not limited to the\nissuance of a warrant for your arrest or a default judgment being entered against you.\nYou are obligated to inform the Court Registry at least 3 working days in advance if you are unable to\nattend, stating valid reasons and providing supporting documentation.\nAll parties must comply with the Rules of Court and maintain proper conduct during proceedings."""\n'}, {'role': 'user', 'content': 'Document:\n----------------\nLEGAL SUMMONS NOTICE\nIN THE DISTRICT COURT OF SINGAPORE\nCase No: DC/2026/1452\nPlaintiff: Mr. Rajesh Kumar (NRIC: S1234567A)\nDefendant: Mr. Daniel Tan Wei Ming (NRIC: S7654321B)\nYou, Mr. Daniel Tan Wei Ming, are hereby summoned and required to appear before the District Court\nat 1 Havelock Square, Singapore, on the 15th day of May 2026 at 10:00 AM.\nYou must attend the hearing in person and bring all relevant documents, including contracts,\ncommunication records, and financial statements related to the dispute.\nFailure to comply with this summons shall result in legal consequences, including but not limited to the\nissuance of a warrant for your arrest or a default judgment being entered against you.\nYou are obligated to inform the Court Registry at least 3 working days in advance if you are unable to\nattend, stating valid reasons and providing supporting documentation.\nAll parties must comply with the Rules of Court and maintain proper conduct during proceedings.\n----------------'}], 'model': 'gpt-4o', 'max_tokens': 4096, 'seed': 42, 'temperature': 0.0}}
+2026-04-07 05:33:40 | DEBUG    | openai._base_client | Sending HTTP Request: POST https://api.openai.com/v1/chat/completions
+2026-04-07 05:33:40 | DEBUG    | httpcore.connection | connect_tcp.started host='api.openai.com' port=443 local_address=None timeout=5.0 socket_options=None
+2026-04-07 05:33:40 | DEBUG    | httpcore.connection | connect_tcp.complete return_value=<httpcore._backends.anyio.AnyIOStream object at 0x00000236C480FB50>
+2026-04-07 05:33:40 | DEBUG    | httpcore.connection | start_tls.started ssl_context=<ssl.SSLContext object at 0x00000236C2AB2E70> server_hostname='api.openai.com' timeout=5.0
+2026-04-07 05:33:40 | DEBUG    | httpcore.connection | start_tls.complete return_value=<httpcore._backends.anyio.AnyIOStream object at 0x00000236C3AE9310>
+2026-04-07 05:33:40 | DEBUG    | httpcore.http11 | send_request_headers.started request=<Request [b'POST']>
+2026-04-07 05:33:40 | DEBUG    | httpcore.http11 | send_request_headers.complete
+2026-04-07 05:33:40 | DEBUG    | httpcore.http11 | send_request_body.started request=<Request [b'POST']>
+2026-04-07 05:33:40 | DEBUG    | httpcore.http11 | send_request_body.complete
+2026-04-07 05:33:40 | DEBUG    | httpcore.http11 | receive_response_headers.started request=<Request [b'POST']>
+2026-04-07 05:33:41 | DEBUG    | httpcore.http11 | receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'OK', [(b'Date', b'Tue, 07 Apr 2026 11:33:41 GMT'), (b'Content-Type', b'application/json'), (b'Transfer-Encoding', b'chunked'), (b'Connection', b'keep-alive'), (b'CF-Ray', b'9e88b801fe67f8ce-SIN'), (b'CF-Cache-Status', b'DYNAMIC'), (b'Server', b'cloudflare'), (b'Strict-Transport-Security', b'max-age=31536000; includeSubDomains; preload'), (b'X-Content-Type-Options', b'nosniff'), (b'access-control-expose-headers', b'X-Request-ID'), (b'openai-organization', b'eazeesign'), (b'openai-processing-ms', b'354'), (b'openai-project', b'proj_rJsGacJJVwdG1AN4nwZqWGZJ'), (b'openai-version', b'2020-10-01'), (b'x-openai-proxy-wasm', b'v0.1'), (b'x-ratelimit-limit-requests', b'500'), (b'x-ratelimit-limit-tokens', b'30000'), (b'x-ratelimit-remaining-requests', b'499'), (b'x-ratelimit-remaining-tokens', b'29461'), (b'x-ratelimit-reset-requests', b'120ms'), (b'x-ratelimit-reset-tokens', b'1.078s'), (b'x-request-id', b'req_5c043ee85086444992ddb6f946d8b899'), (b'set-cookie', b'__cf_bm=FqeVM2Zmh5rsoQrs9AtnuyhnH0W5PcCiK8OGfbqgSc0-1775561620.7958474-1.0.1.1-TvqsKGR.XuV75xnO6VzTR9SNgZEDj5L_c7gvVu7rROLiJ49URmNB.vdiamDP.5Iu1dOldDUe.BcIE3K95zWFjs52tJOvl6LRJ1YQb66aWgoMZe9WIB8vnbrd9CC77TQo; HttpOnly; Secure; Path=/; Domain=api.openai.com; Expires=Tue, 07 Apr 2026 12:03:41 GMT'), (b'Content-Encoding', b'br'), (b'alt-svc', b'h3=":443"; ma=86400')])
+2026-04-07 05:33:41 | INFO     | httpx | HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-04-07 05:33:41 | DEBUG    | httpcore.http11 | receive_response_body.started request=<Request [b'POST']>
+2026-04-07 05:33:41 | DEBUG    | httpcore.http11 | receive_response_body.complete
+2026-04-07 05:33:41 | DEBUG    | httpcore.http11 | response_closed.started
+2026-04-07 05:33:41 | DEBUG    | httpcore.http11 | response_closed.complete
+2026-04-07 05:33:41 | DEBUG    | openai._base_client | HTTP Response: POST https://api.openai.com/v1/chat/completions "200 OK" Headers({'date': 'Tue, 07 Apr 2026 11:33:41 GMT', 'content-type': 'application/json', 'transfer-encoding': 'chunked', 'connection': 'keep-alive', 'cf-ray': '9e88b801fe67f8ce-SIN', 'cf-cache-status': 'DYNAMIC', 'server': 'cloudflare', 'strict-transport-security': 'max-age=31536000; includeSubDomains; preload', 'x-content-type-options': 'nosniff', 'access-control-expose-headers': 'X-Request-ID', 'openai-organization': 'eazeesign', 'openai-processing-ms': '354', 'openai-project': 'proj_rJsGacJJVwdG1AN4nwZqWGZJ', 'openai-version': '2020-10-01', 'x-openai-proxy-wasm': 'v0.1', 'x-ratelimit-limit-requests': '500', 'x-ratelimit-limit-tokens': '30000', 'x-ratelimit-remaining-requests': '499', 'x-ratelimit-remaining-tokens': '29461', 'x-ratelimit-reset-requests': '120ms', 'x-ratelimit-reset-tokens': '1.078s', 'x-request-id': 'req_5c043ee85086444992ddb6f946d8b899', 'set-cookie': '__cf_bm=FqeVM2Zmh5rsoQrs9AtnuyhnH0W5PcCiK8OGfbqgSc0-1775561620.7958474-1.0.1.1-TvqsKGR.XuV75xnO6VzTR9SNgZEDj5L_c7gvVu7rROLiJ49URmNB.vdiamDP.5Iu1dOldDUe.BcIE3K95zWFjs52tJOvl6LRJ1YQb66aWgoMZe9WIB8vnbrd9CC77TQo; HttpOnly; Secure; Path=/; Domain=api.openai.com; Expires=Tue, 07 Apr 2026 12:03:41 GMT', 'content-encoding': 'br', 'alt-svc': 'h3=":443"; ma=86400'})
+2026-04-07 05:33:41 | DEBUG    | openai._base_client | request_id: req_5c043ee85086444992ddb6f946d8b899
+2026-04-07 05:33:41 | INFO     | llm_model.ai_model | [run_llm_with_tokens] in=505 out=2 in 1.76s
+2026-04-07 05:33:41 | DEBUG    | utils.llm_utils | [run_llm_with_tokens] Done — input_tokens=505 output_tokens=2
+2026-04-07 05:33:41 | INFO     | feature_modules.obligation_detection | [ac4f3b1e] Step 1/4 — classified as 'legal_notice' (1.76s)
+2026-04-07 05:33:41 | INFO     | feature_modules.obligation_detection | [ac4f3b1e] Step 2/4 — preparing extraction
+2026-04-07 05:33:41 | INFO     | feature_modules.obligation_detection | [ac4f3b1e] Step 3/4 — running inference
+2026-04-07 05:33:41 | DEBUG    | utils.llm_utils | [run_llm_with_tokens] Sending request to LLM...
+2026-04-07 05:33:41 | DEBUG    | openai._base_client | Request options: {'method': 'post', 'url': '/chat/completions', 'files': None, 'idempotency_key': 'stainless-python-retry-c6264751-227b-4d05-ba63-47d674aebd0f', 'content': None, 'json_data': {'messages': [{'role': 'system', 'content': '\nYou are an expert legal obligation extraction system.\n\n\nExtract ALL obligations from the document.\n\nIMPORTANT:\n- Be exhaustive\n- Do NOT miss implicit obligations\n- Split multiple obligations in one sentence\n- Clearly identify who owes obligation to whom\n\n\nFocus on deadlines, mandatory actions, penalties, legal consequences.\n\n-----------------------------------\n\nFor EACH obligation extract:\n\n- obligation_id (POS-001, NEG-001...)\n- type → must_do or must_not_do\n- party_responsible\n- counterparty\n- relationship → "owes_to"\n\n- action (single verb)\n- normalized_action (normalized verb)\n- object\n- condition\n\n- obligation_text (clear sentence)\n\n- deadline\n- normalized_deadline (YYYY-MM-DD or null)\n\n- schedule:\n  {\n    "is_recurring": boolean,\n    "frequency": daily/weekly/monthly/yearly/null,\n    "interval": number/null,\n    "day_of_month": number/null,\n    "day_of_week": string/null,\n    "time": null,\n    "start_date": null,\n    "end_date": null\n  }\n\n- duration\n- consequence\n- clause_reference\n\n- priority (High/Medium/Low)\n- confidence (0 to 1)\n\n- source_text (exact sentence)\n\n-----------------------------------\n\nOUTPUT FORMAT (STRICT JSON ONLY):\n\n{\n  "summary": {\n    "total_obligations": 0,\n    "positive": 0,\n    "negative": 0,\n    "high_priority": 0\n  },\n  "parties_identified": [],\n  "obligations": [],\n  "high_priority_obligation_ids": [],\n  "obligations_by_party": {}\n}\n\nDocument:\n---\nLEGAL SUMMONS NOTICE\nIN THE DISTRICT COURT OF SINGAPORE\nCase No: DC/2026/1452\nPlaintiff: Mr. Rajesh Kumar (NRIC: S1234567A)\nDefendant: Mr. Daniel Tan Wei Ming (NRIC: S7654321B)\nYou, Mr. Daniel Tan Wei Ming, are hereby summoned and required to appear before the District Court\nat 1 Havelock Square, Singapore, on the 15th day of May 2026 at 10:00 AM.\nYou must attend the hearing in person and bring all relevant documents, including contracts,\ncommunication records, and financial statements related to the dispute.\nFailure to comply with this summons shall result in legal consequences, including but not limited to the\nissuance of a warrant for your arrest or a default judgment being entered against you.\nYou are obligated to inform the Court Registry at least 3 working days in advance if you are unable to\nattend, stating valid reasons and providing supporting documentation.\nAll parties must comply with the Rules of Court and maintain proper conduct during proceedings.\n---\n'}, {'role': 'user', 'content': 'Document:\n----------------\nLEGAL SUMMONS NOTICE\nIN THE DISTRICT COURT OF SINGAPORE\nCase No: DC/2026/1452\nPlaintiff: Mr. Rajesh Kumar (NRIC: S1234567A)\nDefendant: Mr. Daniel Tan Wei Ming (NRIC: S7654321B)\nYou, Mr. Daniel Tan Wei Ming, are hereby summoned and required to appear before the District Court\nat 1 Havelock Square, Singapore, on the 15th day of May 2026 at 10:00 AM.\nYou must attend the hearing in person and bring all relevant documents, including contracts,\ncommunication records, and financial statements related to the dispute.\nFailure to comply with this summons shall result in legal consequences, including but not limited to the\nissuance of a warrant for your arrest or a default judgment being entered against you.\nYou are obligated to inform the Court Registry at least 3 working days in advance if you are unable to\nattend, stating valid reasons and providing supporting documentation.\nAll parties must comply with the Rules of Court and maintain proper conduct during proceedings.\n----------------'}], 'model': 'gpt-4o', 'max_tokens': 4096, 'seed': 42, 'temperature': 0.0}}
+2026-04-07 05:33:41 | DEBUG    | openai._base_client | Sending HTTP Request: POST https://api.openai.com/v1/chat/completions
+2026-04-07 05:33:41 | DEBUG    | httpcore.http11 | send_request_headers.started request=<Request [b'POST']>
+2026-04-07 05:33:41 | DEBUG    | httpcore.http11 | send_request_headers.complete
+2026-04-07 05:33:41 | DEBUG    | httpcore.http11 | send_request_body.started request=<Request [b'POST']>
+2026-04-07 05:33:41 | DEBUG    | httpcore.http11 | send_request_body.complete
+2026-04-07 05:33:41 | DEBUG    | httpcore.http11 | receive_response_headers.started request=<Request [b'POST']>
+2026-04-07 05:33:58 | DEBUG    | httpcore.http11 | receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'OK', [(b'Date', b'Tue, 07 Apr 2026 11:33:58 GMT'), (b'Content-Type', b'application/json'), (b'Transfer-Encoding', b'chunked'), (b'Connection', b'keep-alive'), (b'CF-Ray', b'9e88b807fe7ff8ce-SIN'), (b'CF-Cache-Status', b'DYNAMIC'), (b'Server', b'cloudflare'), (b'Strict-Transport-Security', b'max-age=31536000; includeSubDomains; preload'), (b'X-Content-Type-Options', b'nosniff'), (b'access-control-expose-headers', b'X-Request-ID'), (b'openai-organization', b'eazeesign'), (b'openai-processing-ms', b'16328'), (b'openai-project', b'proj_rJsGacJJVwdG1AN4nwZqWGZJ'), (b'openai-version', b'2020-10-01'), (b'x-openai-proxy-wasm', b'v0.1'), (b'x-ratelimit-limit-requests', b'500'), (b'x-ratelimit-limit-tokens', b'30000'), (b'x-ratelimit-remaining-requests', b'499'), (b'x-ratelimit-remaining-tokens', b'29145'), (b'x-ratelimit-reset-requests', b'120ms'), (b'x-ratelimit-reset-tokens', b'1.71s'), (b'x-request-id', b'req_fe91d47076374b4da1b22e2a62178348'), (b'Content-Encoding', b'br'), (b'alt-svc', b'h3=":443"; ma=86400')])
+2026-04-07 05:33:58 | INFO     | httpx | HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-04-07 05:33:58 | DEBUG    | httpcore.http11 | receive_response_body.started request=<Request [b'POST']>
+2026-04-07 05:33:58 | DEBUG    | httpcore.http11 | receive_response_body.complete
+2026-04-07 05:33:58 | DEBUG    | httpcore.http11 | response_closed.started
+2026-04-07 05:33:58 | DEBUG    | httpcore.http11 | response_closed.complete
+2026-04-07 05:33:58 | DEBUG    | openai._base_client | HTTP Response: POST https://api.openai.com/v1/chat/completions "200 OK" Headers({'date': 'Tue, 07 Apr 2026 11:33:58 GMT', 'content-type': 'application/json', 'transfer-encoding': 'chunked', 'connection': 'keep-alive', 'cf-ray': '9e88b807fe7ff8ce-SIN', 'cf-cache-status': 'DYNAMIC', 'server': 'cloudflare', 'strict-transport-security': 'max-age=31536000; includeSubDomains; preload', 'x-content-type-options': 'nosniff', 'access-control-expose-headers': 'X-Request-ID', 'openai-organization': 'eazeesign', 'openai-processing-ms': '16328', 'openai-project': 'proj_rJsGacJJVwdG1AN4nwZqWGZJ', 'openai-version': '2020-10-01', 'x-openai-proxy-wasm': 'v0.1', 'x-ratelimit-limit-requests': '500', 'x-ratelimit-limit-tokens': '30000', 'x-ratelimit-remaining-requests': '499', 'x-ratelimit-remaining-tokens': '29145', 'x-ratelimit-reset-requests': '120ms', 'x-ratelimit-reset-tokens': '1.71s', 'x-request-id': 'req_fe91d47076374b4da1b22e2a62178348', 'content-encoding': 'br', 'alt-svc': 'h3=":443"; ma=86400'})
+2026-04-07 05:33:58 | DEBUG    | openai._base_client | request_id: req_fe91d47076374b4da1b22e2a62178348
+2026-04-07 05:33:58 | INFO     | llm_model.ai_model | [run_llm_with_tokens] in=812 out=1697 in 16.59s
+2026-04-07 05:33:58 | DEBUG    | utils.llm_utils | [run_llm_with_tokens] Done — input_tokens=812 output_tokens=1697
+2026-04-07 05:33:58 | INFO     | feature_modules.obligation_detection | [ac4f3b1e] Step 3/4 — done (16.59s)
+2026-04-07 05:33:58 | INFO     | feature_modules.obligation_detection | [ac4f3b1e] Step 4/4 — extracted 5 obligations
+2026-04-07 05:33:58 | INFO     | feature_modules.obligation_detection | [ac4f3b1e] obligations=5 tokens=1317in/1699out
+2026-04-07 05:33:58 | INFO     | feature_modules.obligation_detection | [ac4f3b1e] ── COMPLETE — 18.36s ──────
+2026-04-07 05:33:58 | INFO     | routes.route | [822c5b17] Obligation Detection complete — tokens=1317in/1699out
+2026-04-07 05:33:58 | DEBUG    | routes.route | [822c5b17] Temp file deleted
+2026-04-07 05:34:02 | ERROR    | db_files.db | [db] log_request failed for 822c5b17: Multiple exceptions: [Errno 10061] Connect call failed ('::1', 5432, 0, 0), [Errno 10061] Connect call failed ('127.0.0.1', 5432)
+2026-04-07 05:46:34 | INFO     | s_main | Shutting down.
+2026-04-07 05:46:40 | INFO     | s_main | Starting up...
+2026-04-07 05:46:54 | INFO     | s_main | Shutting down.
+2026-04-07 05:47:00 | INFO     | s_main | Starting up...
+2026-04-07 05:47:12 | DEBUG    | python_multipart.multipart | Calling on_part_begin with no data
+2026-04-07 05:47:12 | DEBUG    | python_multipart.multipart | Calling on_header_field with data[42:61]
+2026-04-07 05:47:12 | DEBUG    | python_multipart.multipart | Calling on_header_value with data[63:128]
+2026-04-07 05:47:12 | DEBUG    | python_multipart.multipart | Calling on_header_end with no data
+2026-04-07 05:47:12 | DEBUG    | python_multipart.multipart | Calling on_header_field with data[130:142]
+2026-04-07 05:47:12 | DEBUG    | python_multipart.multipart | Calling on_header_value with data[144:159]
+2026-04-07 05:47:12 | DEBUG    | python_multipart.multipart | Calling on_header_end with no data
+2026-04-07 05:47:12 | DEBUG    | python_multipart.multipart | Calling on_headers_finished with no data
+2026-04-07 05:47:12 | DEBUG    | python_multipart.multipart | Calling on_part_data with data[163:2592]
+2026-04-07 05:47:12 | DEBUG    | python_multipart.multipart | Calling on_part_end with no data
+2026-04-07 05:47:12 | DEBUG    | python_multipart.multipart | Calling on_end with no data
+2026-04-07 05:47:12 | INFO     | feature_modules.key_clause_extraction | Received file: detailed_legal_summons (1).pdf for endpoint: /detect-obligations
+2026-04-07 05:47:12 | DEBUG    | utils.pdf_utils | [pdf_utils] get_page_count: 1 page(s)
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] load_pdf: 'C:\Users\arshdeepsingh\pdf_ai_review\temp\97724742-11c4-4732-866a-619f40de040b.pdf' max_pages=1
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] 1 total page(s), processing 1 (all)
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] PDF type: sampled 1 page(s), 1 had native text -> 'native'
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] Pass 1 -- parallel native extraction (4 workers)
+2026-04-07 05:47:12 | DEBUG    | utils.pdf_utils | [pdf_utils] clean_text: 975 -> 975 chars
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] Pass 1 done (0.00s) -- native=1, need_ocr=0
+2026-04-07 05:47:12 | DEBUG    | utils.pdf_utils | [pdf_utils] Page 1: native (975 chars)
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] -- EXTRACTION COMPLETE --------------------------
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] PDF type         : native
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] Pages processed  : 1/1
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] Native text       : 1 page(s)
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] PaddleOCR-VL      : 0 page(s)
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] Placeholders      : 0 page(s)
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] Blank pages        : 0 page(s)
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] Total loaded      : 1 page(s)
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] Time              : 0.02s
+2026-04-07 05:47:12 | INFO     | utils.pdf_utils | [pdf_utils] ------------------------------------------------------
+2026-04-07 05:47:12 | INFO     | routes.route | [202f4cae] Starting Obligation Detection...
+2026-04-07 05:47:12 | INFO     | feature_modules.obligation_detection | [92bb22b9] ── OBLIGATION DETECTION ─────────────────────
+2026-04-07 05:47:12 | INFO     | feature_modules.obligation_detection | [92bb22b9] Step 1/4 — classifying document
+2026-04-07 05:47:12 | DEBUG    | utils.llm_utils | [run_llm_with_tokens] Sending request to LLM...
+2026-04-07 05:47:13 | DEBUG    | openai._base_client | Request options: {'method': 'post', 'url': '/chat/completions', 'files': None, 'idempotency_key': 'stainless-python-retry-f8d93a2e-4ef4-45fa-84b7-686eca584c83', 'content': None, 'json_data': {'messages': [{'role': 'system', 'content': '\nClassify this document into ONE:\n\nnda\nrent_agreement\nemployment_contract\nlegal_notice\ngeneral_contract\nother\n\nReturn ONLY one word.\n\nText:\n"""LEGAL SUMMONS NOTICE\nIN THE DISTRICT COURT OF SINGAPORE\nCase No: DC/2026/1452\nPlaintiff: Mr. Rajesh Kumar (NRIC: S1234567A)\nDefendant: Mr. Daniel Tan Wei Ming (NRIC: S7654321B)\nYou, Mr. Daniel Tan Wei Ming, are hereby summoned and required to appear before the District Court\nat 1 Havelock Square, Singapore, on the 15th day of May 2026 at 10:00 AM.\nYou must attend the hearing in person and bring all relevant documents, including contracts,\ncommunication records, and financial statements related to the dispute.\nFailure to comply with this summons shall result in legal consequences, including but not limited to the\nissuance of a warrant for your arrest or a default judgment being entered against you.\nYou are obligated to inform the Court Registry at least 3 working days in advance if you are unable to\nattend, stating valid reasons and providing supporting documentation.\nAll parties must comply with the Rules of Court and maintain proper conduct during proceedings."""\n'}, {'role': 'user', 'content': 'Document:\n----------------\nLEGAL SUMMONS NOTICE\nIN THE DISTRICT COURT OF SINGAPORE\nCase No: DC/2026/1452\nPlaintiff: Mr. Rajesh Kumar (NRIC: S1234567A)\nDefendant: Mr. Daniel Tan Wei Ming (NRIC: S7654321B)\nYou, Mr. Daniel Tan Wei Ming, are hereby summoned and required to appear before the District Court\nat 1 Havelock Square, Singapore, on the 15th day of May 2026 at 10:00 AM.\nYou must attend the hearing in person and bring all relevant documents, including contracts,\ncommunication records, and financial statements related to the dispute.\nFailure to comply with this summons shall result in legal consequences, including but not limited to the\nissuance of a warrant for your arrest or a default judgment being entered against you.\nYou are obligated to inform the Court Registry at least 3 working days in advance if you are unable to\nattend, stating valid reasons and providing supporting documentation.\nAll parties must comply with the Rules of Court and maintain proper conduct during proceedings.\n----------------'}], 'model': 'gpt-4o', 'max_tokens': 4096, 'seed': 42, 'temperature': 0.0}}
+2026-04-07 05:47:13 | DEBUG    | openai._base_client | Sending HTTP Request: POST https://api.openai.com/v1/chat/completions
+2026-04-07 05:47:13 | DEBUG    | httpcore.connection | connect_tcp.started host='api.openai.com' port=443 local_address=None timeout=5.0 socket_options=None
+2026-04-07 05:47:13 | DEBUG    | httpcore.connection | connect_tcp.complete return_value=<httpcore._backends.anyio.AnyIOStream object at 0x00000192FAAF5690>
+2026-04-07 05:47:13 | DEBUG    | httpcore.connection | start_tls.started ssl_context=<ssl.SSLContext object at 0x00000192F9AC6E70> server_hostname='api.openai.com' timeout=5.0
+2026-04-07 05:47:13 | DEBUG    | httpcore.connection | start_tls.complete return_value=<httpcore._backends.anyio.AnyIOStream object at 0x00000192F9B5F090>
+2026-04-07 05:47:13 | DEBUG    | httpcore.http11 | send_request_headers.started request=<Request [b'POST']>
+2026-04-07 05:47:13 | DEBUG    | httpcore.http11 | send_request_headers.complete
+2026-04-07 05:47:13 | DEBUG    | httpcore.http11 | send_request_body.started request=<Request [b'POST']>
+2026-04-07 05:47:13 | DEBUG    | httpcore.http11 | send_request_body.complete
+2026-04-07 05:47:13 | DEBUG    | httpcore.http11 | receive_response_headers.started request=<Request [b'POST']>
+2026-04-07 05:47:14 | DEBUG    | httpcore.http11 | receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'OK', [(b'Date', b'Tue, 07 Apr 2026 11:47:14 GMT'), (b'Content-Type', b'application/json'), (b'Transfer-Encoding', b'chunked'), (b'Connection', b'keep-alive'), (b'CF-Ray', b'9e88cbd72ac7a8fa-SIN'), (b'CF-Cache-Status', b'DYNAMIC'), (b'Server', b'cloudflare'), (b'Strict-Transport-Security', b'max-age=31536000; includeSubDomains; preload'), (b'X-Content-Type-Options', b'nosniff'), (b'access-control-expose-headers', b'X-Request-ID'), (b'openai-organization', b'eazeesign'), (b'openai-processing-ms', b'425'), (b'openai-project', b'proj_rJsGacJJVwdG1AN4nwZqWGZJ'), (b'openai-version', b'2020-10-01'), (b'x-openai-proxy-wasm', b'v0.1'), (b'x-ratelimit-limit-requests', b'500'), (b'x-ratelimit-limit-tokens', b'30000'), (b'x-ratelimit-remaining-requests', b'499'), (b'x-ratelimit-remaining-tokens', b'29461'), (b'x-ratelimit-reset-requests', b'120ms'), (b'x-ratelimit-reset-tokens', b'1.078s'), (b'x-request-id', b'req_c07d193db9f44719b8166dcbacd74998'), (b'set-cookie', b'__cf_bm=PG4OmJgfXPuyHm7RyXEQMyxJXzLst00GHK7c84zDPfM-1775562433.15023-1.0.1.1-l3g0GEcjEiq320GEXExXmaWJDkGSt6j9cEzvAi2O3jCz_vsNtwxmv_RQ84X_hViMJc303LJB1zoI40qEa.ktQ_Z7tFR83Mns9hcubAXNLziFYQiQitmqReYHeBavxJ2y; HttpOnly; Secure; Path=/; Domain=api.openai.com; Expires=Tue, 07 Apr 2026 12:17:14 GMT'), (b'Content-Encoding', b'br'), (b'alt-svc', b'h3=":443"; ma=86400')])
+2026-04-07 05:47:14 | INFO     | httpx | HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-04-07 05:47:14 | DEBUG    | httpcore.http11 | receive_response_body.started request=<Request [b'POST']>
+2026-04-07 05:47:14 | DEBUG    | httpcore.http11 | receive_response_body.complete
+2026-04-07 05:47:14 | DEBUG    | httpcore.http11 | response_closed.started
+2026-04-07 05:47:14 | DEBUG    | httpcore.http11 | response_closed.complete
+2026-04-07 05:47:14 | DEBUG    | openai._base_client | HTTP Response: POST https://api.openai.com/v1/chat/completions "200 OK" Headers({'date': 'Tue, 07 Apr 2026 11:47:14 GMT', 'content-type': 'application/json', 'transfer-encoding': 'chunked', 'connection': 'keep-alive', 'cf-ray': '9e88cbd72ac7a8fa-SIN', 'cf-cache-status': 'DYNAMIC', 'server': 'cloudflare', 'strict-transport-security': 'max-age=31536000; includeSubDomains; preload', 'x-content-type-options': 'nosniff', 'access-control-expose-headers': 'X-Request-ID', 'openai-organization': 'eazeesign', 'openai-processing-ms': '425', 'openai-project': 'proj_rJsGacJJVwdG1AN4nwZqWGZJ', 'openai-version': '2020-10-01', 'x-openai-proxy-wasm': 'v0.1', 'x-ratelimit-limit-requests': '500', 'x-ratelimit-limit-tokens': '30000', 'x-ratelimit-remaining-requests': '499', 'x-ratelimit-remaining-tokens': '29461', 'x-ratelimit-reset-requests': '120ms', 'x-ratelimit-reset-tokens': '1.078s', 'x-request-id': 'req_c07d193db9f44719b8166dcbacd74998', 'set-cookie': '__cf_bm=PG4OmJgfXPuyHm7RyXEQMyxJXzLst00GHK7c84zDPfM-1775562433.15023-1.0.1.1-l3g0GEcjEiq320GEXExXmaWJDkGSt6j9cEzvAi2O3jCz_vsNtwxmv_RQ84X_hViMJc303LJB1zoI40qEa.ktQ_Z7tFR83Mns9hcubAXNLziFYQiQitmqReYHeBavxJ2y; HttpOnly; Secure; Path=/; Domain=api.openai.com; Expires=Tue, 07 Apr 2026 12:17:14 GMT', 'content-encoding': 'br', 'alt-svc': 'h3=":443"; ma=86400'})
+2026-04-07 05:47:14 | DEBUG    | openai._base_client | request_id: req_c07d193db9f44719b8166dcbacd74998
+2026-04-07 05:47:14 | INFO     | llm_model.ai_model | [run_llm_with_tokens] in=505 out=2 in 1.76s
+2026-04-07 05:47:14 | DEBUG    | utils.llm_utils | [run_llm_with_tokens] Done — input_tokens=505 output_tokens=2
+2026-04-07 05:47:14 | INFO     | feature_modules.obligation_detection | [92bb22b9] Step 1/4 — classified as 'legal_notice' (1.76s)
+2026-04-07 05:47:14 | INFO     | feature_modules.obligation_detection | [92bb22b9] Step 2/4 — preparing extraction
+2026-04-07 05:47:14 | INFO     | feature_modules.obligation_detection | [92bb22b9] Step 3/4 — running inference
+2026-04-07 05:47:14 | DEBUG    | utils.llm_utils | [run_llm_with_tokens] Sending request to LLM...
+2026-04-07 05:47:14 | DEBUG    | openai._base_client | Request options: {'method': 'post', 'url': '/chat/completions', 'files': None, 'idempotency_key': 'stainless-python-retry-5c9994cd-6c18-482a-bedd-3c395966eb8e', 'content': None, 'json_data': {'messages': [{'role': 'system', 'content': '\nYou are an expert legal obligation extraction system.\n\n\nExtract ALL obligations from the document.\n\nIMPORTANT:\n- Be exhaustive\n- Do NOT miss implicit obligations\n- Split multiple obligations in one sentence\n- Clearly identify who owes obligation to whom\n\n\nFocus on deadlines, mandatory actions, penalties, legal consequences.\n\n-----------------------------------\n\nFor EACH obligation extract:\n\n- obligation_id (POS-001, NEG-001...)\n- type → must_do or must_not_do\n- party_responsible\n- counterparty\n- relationship → "owes_to"\n\n- action (single verb)\n- normalized_action (normalized verb)\n- object\n- condition\n\n- obligation_text (clear sentence)\n\n- deadline\n- normalized_deadline (YYYY-MM-DD or null)\n\n- schedule:\n  {\n    "is_recurring": boolean,\n    "frequency": daily/weekly/monthly/yearly/null,\n    "interval": number/null,\n    "day_of_month": number/null,\n    "day_of_week": string/null,\n    "time": null,\n    "start_date": null,\n    "end_date": null\n  }\n\n- duration\n- consequence\n- clause_reference\n\n- priority (High/Medium/Low)\n- confidence (0 to 1)\n\n- source_text (exact sentence)\n\n-----------------------------------\n\nOUTPUT FORMAT (STRICT JSON ONLY):\n\n{\n  "summary": {\n    "total_obligations": 0,\n    "positive": 0,\n    "negative": 0,\n    "high_priority": 0\n  },\n  "parties_identified": [],\n  "obligations": [],\n  "high_priority_obligation_ids": [],\n  "obligations_by_party": {}\n}\n\nDocument:\n---\nLEGAL SUMMONS NOTICE\nIN THE DISTRICT COURT OF SINGAPORE\nCase No: DC/2026/1452\nPlaintiff: Mr. Rajesh Kumar (NRIC: S1234567A)\nDefendant: Mr. Daniel Tan Wei Ming (NRIC: S7654321B)\nYou, Mr. Daniel Tan Wei Ming, are hereby summoned and required to appear before the District Court\nat 1 Havelock Square, Singapore, on the 15th day of May 2026 at 10:00 AM.\nYou must attend the hearing in person and bring all relevant documents, including contracts,\ncommunication records, and financial statements related to the dispute.\nFailure to comply with this summons shall result in legal consequences, including but not limited to the\nissuance of a warrant for your arrest or a default judgment being entered against you.\nYou are obligated to inform the Court Registry at least 3 working days in advance if you are unable to\nattend, stating valid reasons and providing supporting documentation.\nAll parties must comply with the Rules of Court and maintain proper conduct during proceedings.\n---\n'}, {'role': 'user', 'content': 'Document:\n----------------\nLEGAL SUMMONS NOTICE\nIN THE DISTRICT COURT OF SINGAPORE\nCase No: DC/2026/1452\nPlaintiff: Mr. Rajesh Kumar (NRIC: S1234567A)\nDefendant: Mr. Daniel Tan Wei Ming (NRIC: S7654321B)\nYou, Mr. Daniel Tan Wei Ming, are hereby summoned and required to appear before the District Court\nat 1 Havelock Square, Singapore, on the 15th day of May 2026 at 10:00 AM.\nYou must attend the hearing in person and bring all relevant documents, including contracts,\ncommunication records, and financial statements related to the dispute.\nFailure to comply with this summons shall result in legal consequences, including but not limited to the\nissuance of a warrant for your arrest or a default judgment being entered against you.\nYou are obligated to inform the Court Registry at least 3 working days in advance if you are unable to\nattend, stating valid reasons and providing supporting documentation.\nAll parties must comply with the Rules of Court and maintain proper conduct during proceedings.\n----------------'}], 'model': 'gpt-4o', 'max_tokens': 4096, 'seed': 42, 'temperature': 0.0}}
+2026-04-07 05:47:14 | DEBUG    | openai._base_client | Sending HTTP Request: POST https://api.openai.com/v1/chat/completions
+2026-04-07 05:47:14 | DEBUG    | httpcore.http11 | send_request_headers.started request=<Request [b'POST']>
+2026-04-07 05:47:14 | DEBUG    | httpcore.http11 | send_request_headers.complete
+2026-04-07 05:47:14 | DEBUG    | httpcore.http11 | send_request_body.started request=<Request [b'POST']>
+2026-04-07 05:47:14 | DEBUG    | httpcore.http11 | send_request_body.complete
+2026-04-07 05:47:14 | DEBUG    | httpcore.http11 | receive_response_headers.started request=<Request [b'POST']>
+2026-04-07 05:47:28 | DEBUG    | httpcore.http11 | receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'OK', [(b'Date', b'Tue, 07 Apr 2026 11:47:28 GMT'), (b'Content-Type', b'application/json'), (b'Transfer-Encoding', b'chunked'), (b'Connection', b'keep-alive'), (b'CF-Ray', b'9e88cbdd6864a8fa-SIN'), (b'CF-Cache-Status', b'DYNAMIC'), (b'Server', b'cloudflare'), (b'Strict-Transport-Security', b'max-age=31536000; includeSubDomains; preload'), (b'X-Content-Type-Options', b'nosniff'), (b'access-control-expose-headers', b'X-Request-ID'), (b'openai-organization', b'eazeesign'), (b'openai-processing-ms', b'13624'), (b'openai-project', b'proj_rJsGacJJVwdG1AN4nwZqWGZJ'), (b'openai-version', b'2020-10-01'), (b'x-openai-proxy-wasm', b'v0.1'), (b'x-ratelimit-limit-requests', b'500'), (b'x-ratelimit-limit-tokens', b'30000'), (b'x-ratelimit-remaining-requests', b'499'), (b'x-ratelimit-remaining-tokens', b'29057'), (b'x-ratelimit-reset-requests', b'120ms'), (b'x-ratelimit-reset-tokens', b'1.885s'), (b'x-request-id', b'req_9d13ae0ac3244b20aaa707904a7e1c1a'), (b'Content-Encoding', b'br'), (b'alt-svc', b'h3=":443"; ma=86400')])
+2026-04-07 05:47:28 | INFO     | httpx | HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-04-07 05:47:28 | DEBUG    | httpcore.http11 | receive_response_body.started request=<Request [b'POST']>
+2026-04-07 05:47:28 | DEBUG    | httpcore.http11 | receive_response_body.complete
+2026-04-07 05:47:28 | DEBUG    | httpcore.http11 | response_closed.started
+2026-04-07 05:47:28 | DEBUG    | httpcore.http11 | response_closed.complete
+2026-04-07 05:47:28 | DEBUG    | openai._base_client | HTTP Response: POST https://api.openai.com/v1/chat/completions "200 OK" Headers({'date': 'Tue, 07 Apr 2026 11:47:28 GMT', 'content-type': 'application/json', 'transfer-encoding': 'chunked', 'connection': 'keep-alive', 'cf-ray': '9e88cbdd6864a8fa-SIN', 'cf-cache-status': 'DYNAMIC', 'server': 'cloudflare', 'strict-transport-security': 'max-age=31536000; includeSubDomains; preload', 'x-content-type-options': 'nosniff', 'access-control-expose-headers': 'X-Request-ID', 'openai-organization': 'eazeesign', 'openai-processing-ms': '13624', 'openai-project': 'proj_rJsGacJJVwdG1AN4nwZqWGZJ', 'openai-version': '2020-10-01', 'x-openai-proxy-wasm': 'v0.1', 'x-ratelimit-limit-requests': '500', 'x-ratelimit-limit-tokens': '30000', 'x-ratelimit-remaining-requests': '499', 'x-ratelimit-remaining-tokens': '29057', 'x-ratelimit-reset-requests': '120ms', 'x-ratelimit-reset-tokens': '1.885s', 'x-request-id': 'req_9d13ae0ac3244b20aaa707904a7e1c1a', 'content-encoding': 'br', 'alt-svc': 'h3=":443"; ma=86400'})
+2026-04-07 05:47:28 | DEBUG    | openai._base_client | request_id: req_9d13ae0ac3244b20aaa707904a7e1c1a
+2026-04-07 05:47:28 | INFO     | llm_model.ai_model | [run_llm_with_tokens] in=812 out=1697 in 14.03s
+2026-04-07 05:47:28 | DEBUG    | utils.llm_utils | [run_llm_with_tokens] Done — input_tokens=812 output_tokens=1697
+2026-04-07 05:47:28 | INFO     | feature_modules.obligation_detection | [92bb22b9] Step 3/4 — done (14.03s)
+2026-04-07 05:47:28 | INFO     | feature_modules.obligation_detection | [92bb22b9] Step 4/4 — extracted 5 obligations
+2026-04-07 05:47:28 | INFO     | feature_modules.obligation_detection | [92bb22b9] obligations=5 tokens=1317in/1699out
+2026-04-07 05:47:28 | INFO     | feature_modules.obligation_detection | [92bb22b9] ── COMPLETE — 15.79s ──────
+2026-04-07 05:47:28 | INFO     | routes.route | [202f4cae] Obligation Detection complete — tokens=1317in/1699out
+2026-04-07 05:47:28 | DEBUG    | routes.route | [202f4cae] Temp file deleted
+2026-04-07 05:47:32 | ERROR    | db_files.db | [db] log_request failed for 202f4cae: Multiple exceptions: [Errno 10061] Connect call failed ('::1', 5432, 0, 0), [Errno 10061] Connect call failed ('127.0.0.1', 5432)
+2026-04-07 05:49:23 | INFO     | s_main | Shutting down.

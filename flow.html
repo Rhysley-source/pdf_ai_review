@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DocLens — AI Document Analyzer</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0f0f11;
+  --bg2: #16161a;
+  --bg3: #1e1e24;
+  --bg4: #26262e;
+  --border: rgba(255,255,255,0.07);
+  --border2: rgba(255,255,255,0.13);
+  --text: #f0efe8;
+  --text2: #9896a4;
+  --text3: #5e5d6a;
+  --accent: #c8b8ff;
+  --accent2: #7c6ff7;
+  --teal: #3ecfaa;
+  --red: #ff6b6b;
+  --amber: #f5a623;
+  --green: #5ec96e;
+  --r: 10px;
+  --rlg: 14px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ── Header ── */
+header {
+  padding: 0 24px;
+  height: 50px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  background: var(--bg);
+  z-index: 20;
+  position: relative;
+}
+.logo { font-family: 'DM Serif Display', serif; font-size: 19px; color: var(--text); letter-spacing: -0.02em; }
+.logo span { color: var(--accent); font-style: italic; }
+.hbadge { font-size: 11px; color: var(--text3); border: 1px solid var(--border2); padding: 3px 10px; border-radius: 20px; }
+
+/* ── Landing ── */
+#landing {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
+}
+.eyebrow { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--text3); margin-bottom: 18px; }
+.l-title { font-family: 'DM Serif Display', serif; font-size: clamp(28px,5vw,48px); line-height: 1.12; text-align: center; letter-spacing: -0.02em; margin-bottom: 12px; }
+.l-title em { color: var(--accent); font-style: italic; }
+.l-sub { font-size: 15px; color: var(--text2); text-align: center; max-width: 400px; line-height: 1.65; margin-bottom: 40px; }
+.ai-btn {
+  position: relative;
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 14px 36px;
+  background: var(--accent2); color: #fff;
+  border: none; border-radius: 40px;
+  font-size: 15px; font-weight: 500; font-family: 'DM Sans', sans-serif;
+  cursor: pointer; transition: opacity .2s, transform .15s; letter-spacing: .01em;
+}
+.ai-btn:hover { opacity: .88; transform: translateY(-2px); }
+.ai-btn:active { transform: scale(.97); }
+.ai-btn svg { width: 18px; height: 18px; flex-shrink: 0; }
+.glow { position: absolute; inset: 0; border-radius: 40px; background: var(--accent2); filter: blur(20px); opacity: .28; z-index: -1; transition: opacity .2s; }
+.ai-btn:hover .glow { opacity: .48; }
+.feats { display: flex; gap: 24px; margin-top: 44px; flex-wrap: wrap; justify-content: center; }
+.feat { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text3); }
+.fdot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent2); flex-shrink: 0; }
+
+/* ── Upload Modal ── */
+#modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.76); z-index: 200; align-items: center; justify-content: center; }
+#modal.show { display: flex; }
+.mcard {
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: 20px;
+  padding: 36px 32px 28px; width: 100%; max-width: 410px;
+  text-align: center; position: relative;
+  animation: mIn .24s cubic-bezier(.34,1.56,.64,1);
+}
+@keyframes mIn { from { opacity: 0; transform: scale(.9) translateY(12px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+.mclose { position: absolute; top: 13px; right: 15px; background: none; border: none; color: var(--text3); cursor: pointer; font-size: 22px; line-height: 1; padding: 2px 8px; border-radius: 6px; transition: color .15s; }
+.mclose:hover { color: var(--text); }
+.micon { width: 56px; height: 56px; border-radius: 50%; background: rgba(124,111,247,.12); border: 1px solid rgba(124,111,247,.22); display: flex; align-items: center; justify-content: center; margin: 0 auto 18px; }
+.micon svg { width: 24px; height: 24px; stroke: var(--accent); fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.mtitle { font-family: 'DM Serif Display', serif; font-size: 22px; color: var(--text); margin-bottom: 8px; }
+.msub { font-size: 13px; color: var(--text2); margin-bottom: 22px; line-height: 1.6; }
+.dzone { border: 1.5px dashed var(--border2); border-radius: var(--rlg); padding: 26px 20px; cursor: pointer; transition: border-color .2s, background .2s; margin-bottom: 13px; }
+.dzone:hover, .dzone.drag { border-color: var(--accent2); background: rgba(124,111,247,.05); }
+.dzone-t { font-size: 13px; color: var(--text2); margin-bottom: 4px; }
+.dzone-s { font-size: 11px; color: var(--text3); }
+.or-div { display: flex; align-items: center; gap: 12px; margin-bottom: 13px; font-size: 11px; color: var(--text3); }
+.or-div::before, .or-div::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.mbtn { width: 100%; padding: 11px; background: var(--accent2); color: #fff; border: none; border-radius: var(--r); font-size: 14px; font-weight: 500; font-family: 'DM Sans', sans-serif; cursor: pointer; transition: opacity .2s; }
+.mbtn:hover { opacity: .88; }
+.mfmt { margin-top: 13px; font-size: 11px; color: var(--text3); }
+
+/* ── Processing bar ── */
+#procBar { display: none; padding: 8px 20px; background: rgba(124,111,247,.06); border-bottom: 1px solid rgba(124,111,247,.18); font-size: 12px; color: var(--accent); align-items: center; gap: 12px; flex-shrink: 0; }
+#procBar.show { display: flex; }
+.ptrack { flex: 1; height: 2px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.pfill { height: 100%; background: var(--accent2); border-radius: 2px; width: 0%; transition: width .35s ease; }
+
+/* ── Workspace ── */
+#workspace { display: none; flex: 1; flex-direction: column; overflow: hidden; min-height: 0; }
+#workspace.show { display: flex; }
+
+/* Scrollable content + sticky bottom */
+.ws-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 28px 24px 0;
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
+}
+
+/* File pill */
+.file-pill {
+  display: inline-flex; align-items: center; gap: 7px;
+  background: var(--bg3); border: 1px solid var(--border2);
+  border-radius: 20px; padding: 5px 14px;
+  font-size: 12px; color: var(--text2);
+  margin-bottom: 24px;
+}
+.file-pill svg { width: 13px; height: 13px; stroke: var(--red); fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+
+/* Section label */
+.sec-label {
+  font-size: 10px; font-weight: 500; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--text3);
+  margin-bottom: 10px;
+  display: flex; align-items: center; gap: 8px;
+}
+.sec-label::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+/* Overview block */
+.overview-text {
+  font-size: 14px; color: var(--text2); line-height: 1.8;
+  margin-bottom: 28px;
+}
+.overview-text strong { color: var(--text); font-weight: 500; }
+
+/* Summary block */
+.summary-text {
+  font-size: 13px; color: var(--text2); line-height: 1.8;
+  margin-bottom: 28px;
+  padding: 16px 18px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent2);
+  border-radius: var(--r);
+}
+.summary-text strong { color: var(--text); font-weight: 500; }
+
+/* Highlights list */
+.hl-list { list-style: none; margin-bottom: 32px; display: flex; flex-direction: column; gap: 9px; }
+.hl-item {
+  display: flex; align-items: flex-start; gap: 11px;
+  font-size: 13px; color: var(--text2); line-height: 1.65;
+}
+.hl-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  flex-shrink: 0; margin-top: 6px;
+}
+.hl-item strong { color: var(--text); font-weight: 500; }
+.hl-item .tag {
+  display: inline-block; font-size: 10px; font-weight: 500;
+  padding: 1px 7px; border-radius: 10px; margin-left: 5px;
+  vertical-align: middle; letter-spacing: .03em;
+}
+.tag-high { background: rgba(255,107,107,.12); color: var(--red); }
+.tag-med  { background: rgba(245,166,35,.12);  color: var(--amber); }
+.tag-ok   { background: rgba(62,207,170,.1);   color: var(--teal); }
+.tag-info { background: rgba(200,184,255,.1);  color: var(--accent); }
+
+/* ── Sticky bottom input zone ── */
+.input-zone {
+  flex-shrink: 0;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  padding: 14px 24px 18px;
+}
+.input-inner { max-width: 760px; margin: 0 auto; }
+.sug-row { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 10px; }
+.sug-chip {
+  padding: 6px 14px; background: var(--bg3);
+  border: 1px solid var(--border); border-radius: 20px;
+  font-size: 12px; color: var(--text2); cursor: pointer;
+  font-family: 'DM Sans', sans-serif; white-space: nowrap;
+  transition: border-color .18s, color .18s, background .18s;
+}
+.sug-chip:hover { border-color: var(--accent2); color: var(--text); background: var(--bg4); }
+.textarea-wrap { position: relative; }
+textarea#chatInput {
+  width: 100%;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: var(--rlg);
+  padding: 12px 52px 12px 16px;
+  font-size: 13px; color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  outline: none; resize: none;
+  line-height: 1.6; min-height: 48px; max-height: 130px;
+  overflow-y: auto; display: block;
+  transition: border-color .2s;
+  scrollbar-width: thin;
+}
+textarea#chatInput::placeholder { color: var(--text3); }
+textarea#chatInput:focus { border-color: var(--accent2); }
+.send-btn {
+  position: absolute; bottom: 9px; right: 10px;
+  width: 32px; height: 32px; border-radius: 50%;
+  background: var(--accent2); border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: opacity .2s, transform .15s;
+}
+.send-btn:hover { opacity: .85; }
+.send-btn:active { transform: scale(.92); }
+.send-btn svg { width: 14px; height: 14px; }
+
+/* Chat messages (appended below highlights, inside ws-scroll) */
+.chat-divider {
+  font-size: 10px; font-weight: 500; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--text3);
+  margin: 28px 0 16px;
+  display: flex; align-items: center; gap: 8px;
+}
+.chat-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.msg { max-width: 86%; padding: 10px 14px; border-radius: 14px; font-size: 13px; line-height: 1.65; animation: fu .22s ease; margin-bottom: 10px; }
+@keyframes fu { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+.msg-u { margin-left: auto; background: var(--accent2); color: #fff; border-bottom-right-radius: 4px; }
+.msg-a { margin-right: auto; background: var(--bg3); color: var(--text); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.cite { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text3); display: flex; align-items: center; gap: 5px; }
+.cite::before { content: ''; width: 4px; height: 4px; border-radius: 50%; background: var(--teal); flex-shrink: 0; }
+.typing { display: flex; gap: 4px; align-items: center; padding: 11px 14px; background: var(--bg3); border-radius: 14px; border-bottom-left-radius: 4px; border: 1px solid var(--border); margin-bottom: 10px; width: fit-content; }
+.typing span { width: 5px; height: 5px; border-radius: 50%; background: var(--text3); animation: bl 1.3s infinite; }
+.typing span:nth-child(2) { animation-delay: .2s; }
+.typing span:nth-child(3) { animation-delay: .4s; }
+@keyframes bl { 0%,70%,100%{opacity:.2} 35%{opacity:1} }
+.chat-spacer { height: 16px; }
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Doc<span>Lens</span></div>
+  <div class="hbadge">AI Document Analyzer</div>
+</header>
+
+<div id="procBar">
+  <span id="procLabel">Parsing document…</span>
+  <div class="ptrack"><div class="pfill" id="pfill"></div></div>
+  <span id="procPct">0%</span>
+</div>
+
+<!-- ══ LANDING ══ -->
+<div id="landing">
+  <div class="eyebrow">Powered by AI</div>
+  <h1 class="l-title">Understand any document<br>with <em>one click</em></h1>
+  <p class="l-sub">Upload a PDF or Word document and instantly get a summary, highlights, and a chat interface to ask anything.</p>
+  <button class="ai-btn" onclick="openModal()">
+    <div class="glow"></div>
+    <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/>
+      <path d="M9.5 9.5c.4-1 1.4-1.5 2.5-1.5s2 .7 2 2c0 2-3 2-3 4"/>
+      <circle cx="12" cy="17" r=".5" fill="white" stroke="none"/>
+    </svg>
+    AI Assist
+  </button>
+  <div class="feats">
+    <div class="feat"><div class="fdot"></div>Document overview</div>
+    <div class="feat"><div class="fdot"></div>Summary</div>
+    <div class="feat"><div class="fdot"></div>Key highlights</div>
+    <div class="feat"><div class="fdot"></div>Chat with document</div>
+  </div>
+</div>
+
+<!-- ══ UPLOAD MODAL ══ -->
+<div id="modal">
+  <div class="mcard">
+    <button class="mclose" onclick="closeModal()">&#x2715;</button>
+    <div class="micon">
+      <svg viewBox="0 0 24 24"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
+    </div>
+    <div class="mtitle">Upload your document</div>
+    <p class="msub">Drop a file or browse your device.<br>Analysis begins immediately.</p>
+    <div class="dzone" id="dzone"
+      ondragover="event.preventDefault();this.classList.add('drag')"
+      ondragleave="this.classList.remove('drag')"
+      ondrop="handleDrop(event)"
+      onclick="document.getElementById('fi').click()">
+      <div class="dzone-t">Drag &amp; drop your file here</div>
+      <div class="dzone-s">PDF · DOCX · TXT</div>
+    </div>
+    <div class="or-div">or</div>
+    <button class="mbtn" onclick="document.getElementById('fi').click()">Browse files</button>
+    <input type="file" id="fi" accept=".pdf,.docx,.txt" style="display:none" onchange="handleFileSelect(this)">
+    <div class="mfmt">PDF, DOCX, TXT — up to 50 MB</div>
+  </div>
+</div>
+
+<!-- ══ WORKSPACE ══ -->
+<div id="workspace">
+
+  <div class="ws-scroll" id="wsScroll">
+
+    <!-- File pill -->
+    <div class="file-pill">
+      <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      <span id="fileName">document.pdf</span>
+    </div>
+
+    <!-- Overview -->
+    <div class="sec-label">Overview</div>
+    <div class="overview-text">
+      This is a <strong>Service Agreement</strong> between <strong>Acme Corp</strong> ("Client") and <strong>Vendor Ltd</strong> ("Provider") for the provision of software development services, effective <strong>January 1, 2025</strong>. The document spans <strong>42 pages</strong> and is governed by <strong>English law</strong>, with disputes to be resolved in the courts of London. The agreement establishes the commercial terms, obligations, and risk allocation between both parties for the duration of the engagement.
+    </div>
+
+    <!-- Summary -->
+    <div class="sec-label">Summary</div>
+    <div class="summary-text">
+      The contract sets out standard commercial terms for a software development engagement. Payment is due within 30 days of invoice, with late interest at 1.5% per month. <strong>Provider's liability is heavily capped</strong> at three months of fees with all indirect damages excluded — a significant concern for Client. The indemnification clause is one-sided, placing most exposure on Client. IP ownership transfers to Client only upon full payment. Confidentiality obligations run for five years post-termination, and either party may terminate with 30 days' written notice.
+    </div>
+
+    <!-- Highlights -->
+    <div class="sec-label">Highlights</div>
+    <ul class="hl-list">
+      <li class="hl-item">
+        <div class="hl-dot" style="background:var(--red)"></div>
+        <div><strong>Liability cap is very low</strong><span class="tag tag-high">High risk</span><br>Provider's aggregate liability is limited to fees paid in the preceding 3 months, with all indirect and consequential damages fully excluded. <span style="color:var(--text3);font-size:12px">§4</span></div>
+      </li>
+      <li class="hl-item">
+        <div class="hl-dot" style="background:var(--amber)"></div>
+        <div><strong>One-sided indemnification</strong><span class="tag tag-med">Medium risk</span><br>Client is required to defend and indemnify Provider against all third-party claims arising from use of the services, with no reciprocal obligation on Provider. <span style="color:var(--text3);font-size:12px">§7</span></div>
+      </li>
+      <li class="hl-item">
+        <div class="hl-dot" style="background:var(--green)"></div>
+        <div><strong>Standard payment terms</strong><span class="tag tag-ok">Low risk</span><br>Invoices are payable within 30 days. Late payments attract 1.5% monthly interest. All fees are non-refundable once services commence. <span style="color:var(--text3);font-size:12px">§2</span></div>
+      </li>
+      <li class="hl-item">
+        <div class="hl-dot" style="background:var(--green)"></div>
+        <div><strong>IP assigned to Client on full payment</strong><span class="tag tag-ok">Favourable</span><br>All work product and deliverables are exclusively assigned to Client, contingent on full payment of fees. <span style="color:var(--text3);font-size:12px">§10</span></div>
+      </li>
+      <li class="hl-item">
+        <div class="hl-dot" style="background:var(--accent)"></div>
+        <div><strong>Confidentiality: 5-year duration</strong><span class="tag tag-info">Note</span><br>Both parties are bound to maintain confidentiality of proprietary information for five years following termination or expiry of the Agreement. <span style="color:var(--text3);font-size:12px">§8</span></div>
+      </li>
+      <li class="hl-item">
+        <div class="hl-dot" style="background:var(--accent)"></div>
+        <div><strong>Termination on 30 days' notice</strong><span class="tag tag-info">Note</span><br>Either party may terminate with 30 days written notice. Provider may also terminate immediately upon material breach. Outstanding fees become due immediately on termination. <span style="color:var(--text3);font-size:12px">§12</span></div>
+      </li>
+      <li class="hl-item">
+        <div class="hl-dot" style="background:var(--text3)"></div>
+        <div><strong>Governing law: English law</strong><br>The Agreement is governed by the laws of England and Wales. All disputes are subject to the exclusive jurisdiction of the London courts. <span style="color:var(--text3);font-size:12px">§15</span></div>
+      </li>
+    </ul>
+
+    <!-- Chat messages injected here -->
+    <div id="chatMessages"></div>
+    <div class="chat-spacer"></div>
+
+  </div><!-- /ws-scroll -->
+
+  <!-- Sticky input zone -->
+  <div class="input-zone">
+    <div class="input-inner">
+      <div class="sug-row">
+        <button class="sug-chip" onclick="askQ('What are the key risks in this contract?')">Key risks</button>
+        <button class="sug-chip" onclick="askQ('Extract all key clauses')">Extract key clauses</button>
+        <button class="sug-chip" onclick="askQ('Explain the liability clause in §4')">Liability clause</button>
+        <button class="sug-chip" onclick="askQ('Is the indemnification clause fair?')">Indemnification</button>
+        <button class="sug-chip" onclick="askQ('Summarise payment terms')">Payment terms</button>
+        <button class="sug-chip" onclick="askQ('Who owns the IP?')">IP ownership</button>
+      </div>
+      <div class="textarea-wrap">
+        <textarea id="chatInput" rows="1" placeholder="Ask anything about your document…"></textarea>
+        <button class="send-btn" onclick="sendMsg()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"/>
+            <polygon points="22 2 15 22 11 13 2 9 22 2" fill="white" stroke="none"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /workspace -->
+
+<script>
+var docReady = false;
+var chatStarted = false;
+
+var QA = {
+  'What are the key risks in this contract?': {
+    t: 'I identified <strong>3 risk areas</strong> in this contract:<br><br>1. <strong style="color:var(--red)">High —</strong> §4 caps Provider liability at just 3 months of fees and excludes all indirect damages. Very low protection for Client.<br><br>2. <strong style="color:var(--amber)">Medium —</strong> §7 indemnification is one-sided; Client must defend Provider against all third-party claims with no reciprocal obligation.<br><br>3. <strong style="color:var(--green)">Low —</strong> §2 payment terms are standard (Net 30, 1.5%/month late interest).',
+    c: '§2, §4, §7 — Risk analysis'
+  },
+  'Extract all key clauses': {
+    t: 'Key clauses extracted from the document:<br><br>• <strong>Termination</strong> (§12): 30 days written notice; immediate for material breach.<br>• <strong>Confidentiality</strong> (§8): 5 years post-termination duration.<br>• <strong>IP Ownership</strong> (§10): All deliverables assigned to Client on full payment.<br>• <strong>Governing Law</strong> (§15): English law, London courts exclusively.<br>• <strong>Payment</strong> (§2): Net 30 days, 1.5%/month late interest.',
+    c: '§2, §8, §10, §12, §15 — Clause extraction'
+  },
+  'Explain the liability clause in §4': {
+    t: '§4 is a <strong style="color:var(--red)">high-risk clause</strong>. Provider\'s total liability is capped at fees paid in the preceding <strong>3 months only</strong>.<br><br>All indirect damages are excluded — lost profits, data loss, business interruption. If you paid £10k/month, the maximum recoverable is £30k regardless of actual losses. This is heavily skewed in Provider\'s favour and should be renegotiated.',
+    c: '§4 — Limitation of liability'
+  },
+  'Is the indemnification clause fair?': {
+    t: '§7 places a <strong style="color:var(--amber)">broad one-sided indemnity</strong> on Client to defend Provider from any third-party claims arising from use of the service.<br><br>Typically indemnities should be <strong>mutual</strong> — Provider should also indemnify Client for IP infringement, negligence, or Provider\'s own breaches. This clause is one-sided and worth renegotiating.',
+    c: '§7 — Indemnification'
+  },
+  'Summarise payment terms': {
+    t: '§2 establishes standard payment terms:<br><br>• Invoices must be paid within <strong>30 days</strong> of receipt<br>• Late payments accrue interest at <strong>1.5% per month</strong><br>• All fees are <strong>non-refundable</strong> once services commence<br><br>These are low-risk, market-standard terms with no unusual provisions.',
+    c: '§2 — Payment terms'
+  },
+  'Who owns the IP?': {
+    t: '§10 assigns all work product, inventions, and deliverables created under this Agreement <strong>exclusively to Client</strong> upon full payment of applicable fees.<br><br>This is favourable for Client. Note the key condition — ownership only transfers on <strong>full payment</strong>, so outstanding invoices could complicate IP ownership.',
+    c: '§10 — Intellectual property'
+  },
+  'default': {
+    t: 'I can help you analyse this Service Agreement between Acme Corp and Vendor Ltd. The document covers payment, liability, confidentiality, IP ownership, termination, and governing law. What would you like to know?',
+    c: '§1–§15 — Full document'
+  }
+};
+
+function openModal() {
+  document.getElementById('modal').style.display = 'flex';
+  setTimeout(function(){ document.getElementById('modal').classList.add('show'); }, 10);
+}
+function closeModal() {
+  document.getElementById('modal').classList.remove('show');
+  setTimeout(function(){ document.getElementById('modal').style.display = 'none'; }, 200);
+}
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('dzone').classList.remove('drag');
+  if (e.dataTransfer.files[0]) processFile(e.dataTransfer.files[0]);
+}
+function handleFileSelect(inp) {
+  if (inp.files[0]) processFile(inp.files[0]);
+}
+function processFile(file) {
+  closeModal();
+  document.getElementById('fileName').textContent = file.name;
+  document.getElementById('landing').style.display = 'none';
+  document.getElementById('procBar').classList.add('show');
+  var fill = document.getElementById('pfill');
+  var lbl  = document.getElementById('procLabel');
+  var pct  = document.getElementById('procPct');
+  var steps = [
+    [12, 'Parsing document…'],
+    [30, 'Extracting text chunks…'],
+    [52, 'Building vector index…'],
+    [74, 'Running risk analysis…'],
+    [90, 'Extracting key clauses…'],
+    [100,'Ready']
+  ];
+  var i = 0;
+  (function step(){
+    if (i >= steps.length) { setTimeout(activateWorkspace, 300); return; }
+    fill.style.width = steps[i][0] + '%';
+    lbl.textContent  = steps[i][1];
+    pct.textContent  = steps[i][0] + '%';
+    i++; setTimeout(step, 430);
+  })();
+}
+function activateWorkspace() {
+  document.getElementById('procBar').classList.remove('show');
+  document.getElementById('workspace').classList.add('show');
+  docReady = true;
+}
+
+// Auto-grow textarea
+document.addEventListener('DOMContentLoaded', function(){
+  var ta = document.getElementById('chatInput');
+  ta.addEventListener('input', function(){
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 130) + 'px';
+  });
+  ta.addEventListener('keydown', function(e){
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); }
+  });
+});
+
+function askQ(q) {
+  if (!docReady) return;
+  document.getElementById('chatInput').value = q;
+  sendMsg();
+}
+// Keyword aliases — maps typed words/phrases to QA keys
+var ALIASES = [
+  { keys: ['key risk','risks','risk analysis','main risk','contract risk'], qa: 'What are the key risks in this contract?' },
+  { keys: ['key clause','extract clause','all clause','clause extraction','list clause','important clause'], qa: 'Extract all key clauses' },
+  { keys: ['liability','liability clause','§4','section 4','limit of liability','limitation'], qa: 'Explain the liability clause in §4' },
+  { keys: ['indemnif','indemnity','fair','one-sided','§7','section 7'], qa: 'Is the indemnification clause fair?' },
+  { keys: ['payment','pay term','payment term','invoice','net 30','§2','section 2'], qa: 'Summarise payment terms' },
+  { keys: ['ip','intellectual property','who own','ip owner','ip ownership','§10','section 10'], qa: 'Who owns the IP?' }
+];
+
+function resolveAnswer(q) {
+  var norm = q.toLowerCase().trim();
+  // Exact match first
+  if (QA[q]) return QA[q];
+  // Alias match
+  for (var i = 0; i < ALIASES.length; i++) {
+    var a = ALIASES[i];
+    for (var j = 0; j < a.keys.length; j++) {
+      if (norm.indexOf(a.keys[j]) !== -1) return QA[a.qa];
+    }
+  }
+  return QA['default'];
+}
+
+function sendMsg() {
+  if (!docReady) return;
+  var inp = document.getElementById('chatInput');
+  var q = inp.value.trim();
+  if (!q) return;
+  inp.value = '';
+  inp.style.height = 'auto';
+
+  var container = document.getElementById('chatMessages');
+
+  // Insert chat divider the first time
+  if (!chatStarted) {
+    chatStarted = true;
+    var div = document.createElement('div');
+    div.className = 'chat-divider';
+    div.textContent = 'Conversation';
+    container.appendChild(div);
+  }
+
+  // User message
+  var u = document.createElement('div');
+  u.className = 'msg msg-u';
+  u.textContent = q;
+  container.appendChild(u);
+
+  // Typing indicator
+  var t = document.createElement('div');
+  t.className = 'typing'; t.id = 'typing';
+  t.innerHTML = '<span></span><span></span><span></span>';
+  container.appendChild(t);
+
+  // Scroll to bottom
+  var scroll = document.getElementById('wsScroll');
+  scroll.scrollTop = scroll.scrollHeight;
+
+  setTimeout(function(){
+    var el = document.getElementById('typing');
+    if (el) el.remove();
+    var r = resolveAnswer(q);
+    var ai = document.createElement('div');
+    ai.className = 'msg msg-a';
+    ai.innerHTML = r.t + '<div class="cite">' + r.c + '</div>';
+    container.appendChild(ai);
+    scroll.scrollTop = scroll.scrollHeight;
+  }, 900);
+}
+</script>
+</body>
+</html>

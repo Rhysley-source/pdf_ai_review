@@ -1,0 +1,15 @@
+ai_env/
+
+__pycache__/
+
+.env
+/.env
+
+.venv/
+.venv
+
+venv/
+venv
+
+*.log
+
