@@ -374,13 +374,16 @@ async def scan_red_flags(text: str) -> dict:
     )
 
     return {
-        "document_type":     doc_type,
-        "detected_flags":    flags,
+        "document_type":      doc_type,
+        "detected_flags":     flags,
         "overall_risk_level": overall,
-        "summary": (
-            f"Scanned {len(checklist)} checklist items for {doc_type.replace('_', ' ')}. "
-            f"Found {len(flags)} flag(s): "
-            f"{dangerous} dangerous, {unusual} unusual, {missing} missing protection(s). "
-            f"Overall risk: {overall}."
-        ),
+        "summary": {
+            "scanned_items":       len(checklist),
+            "document_type":       doc_type.replace("_", " ").title(),
+            "total_red_flags":     len(flags),
+            "dangerous":           dangerous,
+            "unusual":             unusual,
+            "missing_protections": missing,
+            "overall_risk":        overall,
+        },
     }

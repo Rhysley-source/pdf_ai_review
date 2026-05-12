@@ -592,7 +592,7 @@ async def red_flag_scanner(
         return {
             "status":             "success",
             "overall_risk_level": result.get("overall_risk_level", "Low"),
-            "summary":            result.get("summary", ""),
+            "summary":            result.get("summary", {}),
             "counts": {
                 "total":     len(flags),
                 "dangerous": sum(1 for f in flags if f.get("category") == "dangerous"),
