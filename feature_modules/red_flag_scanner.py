@@ -1,5 +1,5 @@
 import logging
-from llm_model.ai_model import _run_inference_json_mini as _run_inference_json
+from llm_model.ai_model import _run_inference_json_gpt41 as _run_inference_json
 from utils.json_utils import extract_json_raw
 
 logger = logging.getLogger(__name__)
@@ -135,6 +135,24 @@ _CHECKLISTS: dict[str, list[dict]] = {
         {"id": "no_probation_terms",           "cat": "missing",   "sev": "Medium",   "label": "No probation period terms",                 "check": "Is the probation period, its duration, or the terms during probation NOT mentioned?"},
     ],
 
+    "identity_document": [
+        {"id": "invalid_dob",             "cat": "dangerous", "sev": "Critical", "label": "Invalid date of birth",             "check": "Is the date of birth logically impossible (e.g. day > 31, month > 12, day 32, or a date that cannot exist on a calendar)?"},
+        {"id": "invalid_email",           "cat": "dangerous", "sev": "High",     "label": "Invalid email address",             "check": "Is the email address missing the '@' symbol or otherwise malformed (e.g. rahul.mail.com with no @ sign)?"},
+        {"id": "invalid_id_number",       "cat": "dangerous", "sev": "High",     "label": "Invalid or malformed ID number",    "check": "Does the ID number appear invalid, randomly mixed (letters+numbers in unusual pattern), or not matching any recognisable ID format?"},
+        {"id": "expired_document",        "cat": "dangerous", "sev": "Critical", "label": "Document is expired",               "check": "Is the expiry date in the past relative to the issue date or a clearly historical date?"},
+        {"id": "invalid_expiry_date",     "cat": "dangerous", "sev": "High",     "label": "Expiry date logically invalid",     "check": "Is the expiry date impossible (e.g. day > 31, month > 12) or earlier than the issue date?"},
+        {"id": "invalid_issue_date",      "cat": "dangerous", "sev": "High",     "label": "Issue date logically invalid",      "check": "Is the issue date impossible (e.g. day > 31, month > 12) or in the future?"},
+        {"id": "invalid_phone",           "cat": "dangerous", "sev": "Medium",   "label": "Invalid phone number",              "check": "Is the phone number too short, too long, or containing non-numeric characters that make it invalid?"},
+        {"id": "placeholder_fields",      "cat": "unusual",   "sev": "High",     "label": "Unfilled placeholder fields",       "check": "Are any fields left with placeholder text such as [empty], [missing], [N/A], TBD, or blank brackets?"},
+        {"id": "mismatched_dates",        "cat": "unusual",   "sev": "Medium",   "label": "Mismatched issue and expiry dates", "check": "Is the gap between issue date and expiry date unusually short (< 1 year) or suspiciously long (> 20 years) for this document type?"},
+        {"id": "missing_address",         "cat": "missing",   "sev": "High",     "label": "Address field empty or missing",    "check": "Is the address field empty, blank, or marked as [empty] or missing?"},
+        {"id": "missing_signature",       "cat": "missing",   "sev": "High",     "label": "Signature missing",                 "check": "Is the signature field absent, blank, or marked as [missing]?"},
+        {"id": "missing_name",            "cat": "missing",   "sev": "Critical", "label": "Name field missing",                "check": "Is the full name of the person missing or empty?"},
+        {"id": "missing_dob",             "cat": "missing",   "sev": "High",     "label": "Date of birth missing",             "check": "Is the date of birth field missing or empty?"},
+        {"id": "missing_id_number",       "cat": "missing",   "sev": "Critical", "label": "ID number missing",                 "check": "Is the ID number field missing or empty?"},
+        {"id": "missing_expiry",          "cat": "missing",   "sev": "High",     "label": "Expiry date missing",               "check": "Is the document expiry date missing or empty?"},
+    ],
+
     # ── Fallback — used for any document type not in the list above ──────
     "general": [
         {"id": "unlimited_liability",          "cat": "dangerous", "sev": "Critical", "label": "Unlimited liability",                       "check": "Is there no cap on financial damages owed by one party?"},
@@ -168,81 +186,62 @@ _SLUG_TO_CHECKLIST: dict[str, str] = {
     "consulting_agreement":  "consulting_agreement",
     "lease_agreement":       "lease_agreement",
     "employment_contract":   "employment_contract",
+    "identity_document":     "identity_document",
 }
 
 # ---------------------------------------------------------------------------
-# Step 1 — detect document type from text
-# Uses _run_inference_json for clean, stable output
-# "json" appears in the system prompt → response_format=json_object is safe
+# Single-call prompt — detect type + evaluate checklist in one gpt-4.1 call
 # ---------------------------------------------------------------------------
 
-_DETECT_SYSTEM = (
-    "You are a legal document classifier. "
-    "Read the contract and return a JSON object identifying the document type. "
-    "Supported slugs: nda, job_offer, freelancer_agreement, service_agreement, "
-    "consulting_agreement, lease_agreement, employment_contract, general. "
-    "Return ONLY this JSON: {\"doc_type\": \"<slug>\"}"
-)
-
-_DETECT_EXAMPLES = """
-Examples:
-- Non-Disclosure Agreement between two companies → nda
-- Job offer letter for a software engineer → job_offer
-- Freelance design project contract → freelancer_agreement
-- Cloud hosting SLA or vendor agreement → service_agreement
-- Strategy advisor retainer contract → consulting_agreement
-- Apartment rent or lease deed → lease_agreement
-- Full-time employment contract → employment_contract
-- Any other document → general
-"""
-
-async def _detect_doc_type(text: str) -> str:
-    messages = [
-        {"role": "system", "content": _DETECT_SYSTEM},
-        {"role": "user",   "content": f"{_DETECT_EXAMPLES}\n\nDocument (first 1500 chars):\n---\n{text[:1500]}\n---"},
-    ]
-    try:
-        raw, _, _ = await _run_inference_json(messages, "red_flag_detect_type")
-        parsed    = extract_json_raw(raw)
-        slug      = (parsed.get("doc_type") or "general").lower().strip()
-        checklist_key = _SLUG_TO_CHECKLIST.get(slug, "general")
-        logger.info(f"[red_flag_scanner] detected doc_type='{slug}' → checklist='{checklist_key}'")
-        return checklist_key
-    except Exception as e:
-        logger.warning(f"[red_flag_scanner] type detection failed ({e}) — using general")
-        return "general"
-
-
-# ---------------------------------------------------------------------------
-# Step 2 — evaluate checklist for the detected document type
-# ---------------------------------------------------------------------------
-
-_EVAL_SYSTEM = (
-    "You are a contract risk lawyer. "
-    "For each checklist item evaluate the contract and answer with exactly one status: "
-    "present (found in document), absent (not found), or not_applicable (irrelevant to this document type). "
-    "You MUST evaluate every single item. "
+_SINGLE_CALL_SYSTEM = (
+    "You are an AI-powered Red Flag Detection Engine for document verification and compliance review. "
+    "Read the document, identify its type, select the correct checklist, "
+    "and evaluate every checklist item in a single response. "
     "Return ONLY the JSON object — no markdown, no backticks, no explanation."
 )
 
 
-def _build_eval_messages(checklist: list[dict], text: str) -> list[dict]:
-    checklist_lines = "\n".join(
-        f'{i+1}. id="{item["id"]}" — {item["check"]}'
-        for i, item in enumerate(checklist)
+def _build_single_call_messages(text: str) -> list[dict]:
+    # Build checklist block for all known types
+    checklist_block = ""
+    for slug, items in _CHECKLISTS.items():
+        lines = "\n".join(
+            f'  - id="{item["id"]}" — {item["check"]}'
+            for item in items
+        )
+        checklist_block += f'\n\n{slug.upper()} checklist:\n{lines}'
+
+    slug_examples = (
+        "nda → Non-Disclosure Agreement | "
+        "job_offer → Job offer letter | "
+        "freelancer_agreement → Freelance contract | "
+        "service_agreement → Service / vendor / SLA agreement | "
+        "consulting_agreement → Consulting retainer | "
+        "lease_agreement → Lease / rent agreement | "
+        "employment_contract → Full-time employment contract | "
+        "identity_document → ID card, passport, KYC, driving licence, Aadhaar, PAN, voter ID | "
+        "general → anything else"
     )
 
-    user = f"""Evaluate every item below against the contract.
+    user = f"""Document:
+---
+{text[:80_000]}
+---
 
-For each item return:
-  "id"             : item id exactly as given
+Step 1 — Identify the document type from: {slug_examples}
+
+Step 2 — Using ONLY the checklist for the detected type, evaluate every item.
+
+For each checklist item return:
+  "id"             : item id exactly as listed
   "status"         : "present" | "absent" | "not_applicable"
-  "clause_excerpt" : exact quote from the contract (max 150 chars) if status=present, else null
-  "why_dangerous"  : one sentence on the risk to the signer if status=present, else null
+  "clause_excerpt" : exact quote from document (max 150 chars) if status=present, else null
+  "why_dangerous"  : one sentence on the risk if status=present, else null
   "recommendation" : one concrete fix or negotiation step if status=present, else null
 
 Return ONLY this JSON:
 {{
+  "doc_type": "<slug>",
   "results": [
     {{
       "id": "<item id>",
@@ -254,16 +253,11 @@ Return ONLY this JSON:
   ]
 }}
 
-Checklist ({len(checklist)} items — evaluate ALL {len(checklist)}):
-{checklist_lines}
-
-Contract:
----
-{text[:80_000]}
----"""
+Checklists (use ONLY the one matching the detected doc_type):{checklist_block}
+"""
 
     return [
-        {"role": "system", "content": _EVAL_SYSTEM},
+        {"role": "system", "content": _SINGLE_CALL_SYSTEM},
         {"role": "user",   "content": user},
     ]
 
@@ -311,48 +305,48 @@ def _build_flags(results: list, checklist: list[dict]) -> list[dict]:
 
 async def scan_red_flags(text: str) -> dict:
     """
-    Step 1 — detect document type (nda / job_offer / freelancer_agreement /
-             service_agreement / consulting_agreement / lease_agreement /
-             employment_contract / general)
-    Step 2 — evaluate the type-specific checklist (present / absent / not_applicable)
-    Step 3 — build flags; severity assigned from hardcoded map (not the model)
+    Single gpt-4.1 call: detect document type + evaluate full checklist in one shot.
 
     Consistent count guarantee:
     - Fixed checklist per document type → same questions every call
     - AI only answers present/absent/not_applicable → no free-form list
     - Severity comes from hardcoded map → deterministic
-    - _run_inference_json → response_format=json_object → clean JSON every time
+    - response_format=json_object → clean JSON every time
     """
-    # Step 1 — detect type
-    doc_type  = await _detect_doc_type(text)
-    checklist = _CHECKLISTS[doc_type]
-
-    logger.info(f"[red_flag_scanner] doc_type={doc_type} | checklist={len(checklist)} items")
-
-    # Step 2 — evaluate checklist
-    messages = _build_eval_messages(checklist, text)
-    raw, in_tok, out_tok = await _run_inference_json(messages, "red_flag_eval")
+    messages = _build_single_call_messages(text)
+    raw, in_tok, out_tok = await _run_inference_json(messages, "red_flag_scan")
     logger.info(f"[red_flag_scanner] tokens in={in_tok} out={out_tok}")
 
-    parsed  = extract_json_raw(raw)
-    results = parsed.get("results", []) if isinstance(parsed, dict) else []
+    parsed   = extract_json_raw(raw) or {}
+    slug     = (parsed.get("doc_type") or "general").lower().strip()
+    doc_type = _SLUG_TO_CHECKLIST.get(slug, "general")
+    checklist = _CHECKLISTS[doc_type]
+    results   = parsed.get("results", []) if isinstance(parsed, dict) else []
+
+    logger.info(f"[red_flag_scanner] doc_type={doc_type} | {len(results)}/{len(checklist)} items returned")
 
     # Retry if fewer than half the items came back
     if len(results) < len(checklist) // 2:
-        logger.warning(
-            f"[red_flag_scanner] Only {len(results)}/{len(checklist)} items — retrying"
-        )
-        raw, _, _ = await _run_inference_json(messages, "red_flag_eval_retry")
-        parsed    = extract_json_raw(raw)
+        logger.warning(f"[red_flag_scanner] Only {len(results)}/{len(checklist)} items — retrying")
+        raw, _, _ = await _run_inference_json(messages, "red_flag_scan_retry")
+        parsed    = extract_json_raw(raw) or {}
         results   = parsed.get("results", []) if isinstance(parsed, dict) else []
 
     if not results:
         logger.error("[red_flag_scanner] No results — returning safe default")
         return {
-            "document_type":     doc_type,
-            "detected_flags":    [],
+            "document_type":      doc_type,
+            "detected_flags":     [],
             "overall_risk_level": "Low",
-            "summary":           "Red flag scan could not be completed for this document.",
+            "summary": {
+                "scanned_items":       len(checklist),
+                "document_type":       doc_type.replace("_", " ").title(),
+                "total_red_flags":     0,
+                "dangerous":           0,
+                "unusual":             0,
+                "missing_protections": 0,
+                "overall_risk":        "Low",
+            },
         }
 
     # Step 3 — build flags

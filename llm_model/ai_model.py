@@ -501,6 +501,43 @@ async def _run_inference_json_mini(
         raise
 
 
+async def _run_inference_json_gpt41(
+    messages: list[dict],
+    label:    str = "",
+) -> tuple[str, int, int]:
+    """
+    Single LLM call using gpt-4.1 (COMPARISON_MODEL) with response_format=json_object.
+    Used by the red flag scanner for maximum accuracy in a single pass.
+    Returns (content, input_tokens, output_tokens).
+    """
+    tag         = f"[{label}] " if label else ""
+    t0          = time.perf_counter()
+    model       = os.environ.get("COMPARISON_MODEL", COMPARISON_MODEL)
+    token_kwarg = "max_completion_tokens" if model in _MAX_COMPLETION_TOKENS_MODELS else "max_tokens"
+
+    kwargs: dict = {
+        "model":           model,
+        "messages":        messages,
+        "seed":            _messages_seed(messages),
+        token_kwarg:       16000,
+        "response_format": {"type": "json_object"},
+    }
+    if model not in _FIXED_TEMPERATURE_MODELS:
+        kwargs["temperature"] = 0.0
+
+    try:
+        response      = await _client.chat.completions.create(**kwargs)
+        elapsed       = time.perf_counter() - t0
+        content       = response.choices[0].message.content or ""
+        input_tokens  = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        logger.info(f"{tag}[{model}] in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
+        return content, input_tokens, output_tokens
+    except Exception as e:
+        logger.exception(f"{tag}[{model}] OpenAI API call failed: {e}")
+        raise
+
+
 # ---------------------------------------------------------------------------
 # _run_inference_text
 #
