@@ -18,7 +18,7 @@ from feature_modules.key_clause_extraction import classify_document, extract_key
 from feature_modules.risk_detection import analyze_document_risks
 from feature_modules.red_flag_scanner import scan_red_flags
 from feature_modules.obligation_detection import analyze_document_obligations
-from feature_modules.document_comparison import compare_documents, get_incompatibility_description
+from feature_modules.document_comparison import compare_documents, get_incompatibility_insights
 from utils.session_store import create_session, get_session
 from auth import verify_api_key
 
@@ -1022,13 +1022,15 @@ async def compare_documents_api(
             "clauses":       extraction2.get("key_clauses", []),
         }
 
-        # ── Step 3: Type check — if different, return early ───────────────
+        # ── Step 3: Type check — if different, return early with insights ───
         if slug1 != slug2:
-            description = await get_incompatibility_description(
+            description, incompatibility_insights = await get_incompatibility_insights(
                 extraction1["document_type"],
                 extraction2["document_type"],
                 file1.filename or "document_1.pdf",
                 file2.filename or "document_2.pdf",
+                extraction1.get("key_clauses", []),
+                extraction2.get("key_clauses", []),
             )
             elapsed = time.perf_counter() - t_start
             logger.info(
@@ -1043,6 +1045,7 @@ async def compare_documents_api(
                     f"Comparison cannot be performed."
                 ),
                 "incompatibility_description": description,
+                "insights":                    incompatibility_insights,
                 "document_1":                  doc1_info,
                 "document_2":                  doc2_info,
                 "comparison":                  None,

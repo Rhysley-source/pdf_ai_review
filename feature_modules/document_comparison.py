@@ -92,9 +92,9 @@ def _build_diff_blocks(text1: str, text2: str) -> tuple[list[dict], dict]:
 # ---------------------------------------------------------------------------
 
 _INSIGHTS_SYSTEM = (
-    "You are a senior document analyst. "
-    "Given a list of changes between two documents, provide concise, specific insights. "
-    "Quote exact values (amounts, dates, terms) that changed. "
+    "You are a senior document analyst and legal reviewer. "
+    "Analyse the changes between two versions of the same document type. "
+    "Be specific — quote exact values (amounts, dates, durations, party names) that changed. "
     "Return ONLY valid JSON — no markdown, no explanation."
 )
 
@@ -130,14 +130,18 @@ async def _get_insights(
     prompt = (
         f'Changes between "{doc1_filename}" (Doc1) and "{doc2_filename}" (Doc2):\n\n'
         + "\n".join(lines)
-        + '\n\nReturn ONLY this JSON:\n'
+        + '\n\nAnalyse these changes thoroughly and return ONLY this JSON:\n'
         '{\n'
         '  "semantic_insights": [\n'
-        '    "<key observation with exact quoted values>",\n'
-        '    "<another observation>",\n'
-        '    "<which party benefits and why>"\n'
+        '    "<financial changes — exact amounts, rates, fees, or payment terms that changed>",\n'
+        '    "<timeline changes — dates, durations, notice periods, or deadlines that changed>",\n'
+        '    "<obligation changes — new duties added or existing duties removed for either party>",\n'
+        '    "<risk changes — clauses that increase or decrease legal or financial risk>",\n'
+        '    "<protection changes — clauses added or removed that protect one party>",\n'
+        '    "<which party benefits most from Doc2 changes and why>",\n'
+        '    "<any missing standard clauses or red flags introduced by the changes>"\n'
         '  ],\n'
-        '  "recommendation": "<2-3 actionable sentences>"\n'
+        '  "recommendation": "<3-4 actionable sentences: what to negotiate, what to accept, what to reject>"\n'
         '}'
     )
 
@@ -156,38 +160,80 @@ async def _get_insights(
 
 
 # ---------------------------------------------------------------------------
-# Incompatibility description — LLM explains why two doc types can't compare
+# Incompatibility analysis — description + structured insights for mismatched types
 # ---------------------------------------------------------------------------
 
 _INCOMPATIBILITY_SYSTEM = (
-    "You are a document analyst. "
-    "Explain clearly and concisely why two documents are incompatible for direct comparison. "
-    "Return ONLY plain text — no JSON, no markdown, no bullet points."
+    "You are a senior document analyst. "
+    "Analyse two documents of different types and explain why they cannot be compared. "
+    "Return ONLY valid JSON — no markdown, no explanation."
 )
 
 
-async def get_incompatibility_description(
+async def get_incompatibility_insights(
     doc1_type: str,
     doc2_type: str,
     doc1_filename: str,
     doc2_filename: str,
-) -> str:
+    clauses1: list,
+    clauses2: list,
+) -> tuple[str, dict]:
+    """
+    Returns (description: str, insights: dict) for incompatible document pairs.
+    insights has the same shape as compatible-comparison insights:
+      {"semantic_insights": [...], "recommendation": "..."}
+    Both are generated in a single LLM call.
+    """
+    clauses1_text = "\n".join(
+        f"- {c['clause_name']}: {c['excerpt'][:120]}" for c in clauses1[:8]
+    )
+    clauses2_text = "\n".join(
+        f"- {c['clause_name']}: {c['excerpt'][:120]}" for c in clauses2[:8]
+    )
+
     prompt = (
         f'Document 1: "{doc1_filename}" — type: {doc1_type}\n'
-        f'Document 2: "{doc2_filename}" — type: {doc2_type}\n\n'
-        "In 2-3 sentences explain: what each document is and its purpose, "
-        "and why comparing these two document types produces unreliable or misleading results."
+        f'Key clauses:\n{clauses1_text}\n\n'
+        f'Document 2: "{doc2_filename}" — type: {doc2_type}\n'
+        f'Key clauses:\n{clauses2_text}\n\n'
+        'Return ONLY this JSON:\n'
+        '{\n'
+        '  "description": "<2-3 sentences: what each document is, why they cannot be compared>",\n'
+        '  "semantic_insights": [\n'
+        '    "<what Document 1 covers and its key obligations>",\n'
+        '    "<what Document 2 covers and its key obligations>",\n'
+        '    "<key clauses present in Doc 1 that are absent in Doc 2>",\n'
+        '    "<key clauses present in Doc 2 that are absent in Doc 1>",\n'
+        '    "<overall risk or concern from mixing these document types>"\n'
+        '  ],\n'
+        '  "recommendation": "<2-3 actionable sentences on what the user should do instead>"\n'
+        '}'
     )
+
+    empty_insights: dict = {"semantic_insights": [], "recommendation": ""}
     try:
-        raw = await run_llm_comparison(prompt, _INCOMPATIBILITY_SYSTEM, max_output_tokens=300)
-        return raw.strip()
+        raw    = await run_llm_comparison(prompt, _INCOMPATIBILITY_SYSTEM, max_output_tokens=800)
+        result = extract_json_from_text(raw) or {}
+        description = (result.get("description") or "").strip()
+        insights    = {
+            "semantic_insights": result.get("semantic_insights") or [],
+            "recommendation":    result.get("recommendation") or "",
+        }
+        if not description:
+            description = (
+                f"'{doc1_type}' and '{doc2_type}' serve entirely different legal purposes. "
+                f"Their clauses, obligations, and structure are unrelated, making a direct "
+                f"comparison unreliable and potentially misleading."
+            )
+        return description, insights
     except Exception as e:
-        logger.error(f"[comparison] incompatibility description failed: {e}")
-        return (
-            f"'{doc1_type}' and '{doc2_type}' serve entirely different purposes and have "
-            f"different structures, clauses, and legal frameworks. Comparing them directly "
-            f"produces unreliable results as their content is not functionally equivalent."
+        logger.error(f"[comparison] incompatibility insights failed: {e}")
+        fallback = (
+            f"'{doc1_type}' and '{doc2_type}' serve entirely different legal purposes. "
+            f"Their clauses, obligations, and structure are unrelated, making a direct "
+            f"comparison unreliable and potentially misleading."
         )
+        return fallback, empty_insights
 
 
 # ---------------------------------------------------------------------------
