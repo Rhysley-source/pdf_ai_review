@@ -18,7 +18,7 @@ from feature_modules.key_clause_extraction import classify_document, extract_key
 from feature_modules.risk_detection import analyze_document_risks
 from feature_modules.red_flag_scanner import scan_red_flags
 from feature_modules.obligation_detection import analyze_document_obligations
-from feature_modules.document_comparison import compare_documents
+from feature_modules.document_comparison import compare_documents, get_incompatibility_description
 from utils.session_store import create_session, get_session
 from auth import verify_api_key
 
@@ -1024,21 +1024,28 @@ async def compare_documents_api(
 
         # ── Step 3: Type check — if different, return early ───────────────
         if slug1 != slug2:
+            description = await get_incompatibility_description(
+                extraction1["document_type"],
+                extraction2["document_type"],
+                file1.filename or "document_1.pdf",
+                file2.filename or "document_2.pdf",
+            )
             elapsed = time.perf_counter() - t_start
             logger.info(
                 f"[{request_id}] ── COMPARE ABORTED — type mismatch: {slug1} vs {slug2} | {elapsed:.2f}s"
             )
             return {
-                "status":               "success",
-                "documents_compatible": False,
-                "compatibility_message": (
+                "status":                      "success",
+                "documents_compatible":        False,
+                "compatibility_message":       (
                     f"These documents are not of the same type — "
                     f"'{extraction1['document_type']}' vs '{extraction2['document_type']}'. "
                     f"Comparison cannot be performed."
                 ),
-                "document_1":  doc1_info,
-                "document_2":  doc2_info,
-                "comparison":  None,
+                "incompatibility_description": description,
+                "document_1":                  doc1_info,
+                "document_2":                  doc2_info,
+                "comparison":                  None,
             }
 
         # ── Step 4: Same type — run full comparison ───────────────────────
@@ -1059,22 +1066,23 @@ async def compare_documents_api(
         )
 
         return {
-            "status":                      "success",
-            "documents_compatible":        documents_compatible,
-            "compatibility_message":       compatibility_message,
-            "incompatibility_description": comp_result.get("incompatibility_description", ""),
-            "document_1":                  doc1_info,
-            "document_2":                  doc2_info,
-            "doc1_text":                   text1,
-            "doc2_text":                   text2,
-            "stats":                       comp_result.get("stats"),
-            "diff_blocks":                 comp_result.get("diff_blocks"),
-            "insights":                    comp_result.get("insights"),
-            "comparison_notice":           comp_result.get("comparison_notice"),
-            "document_1_type":             comp_result.get("document_1_type"),
-            "document_2_type":             comp_result.get("document_2_type"),
-            "compared_at":                 comp_result.get("compared_at"),
-            "duration_ms":                 comp_result.get("duration_ms"),
+            "status":               "success",
+            "documents_compatible": True,
+            "compatibility_message": (
+                f"Both documents are '{extraction1['document_type']}' — comparison is available."
+            ),
+            "document_1":           doc1_info,
+            "document_2":           doc2_info,
+            "doc1_text":            text1,
+            "doc2_text":            text2,
+            "stats":                comp_result.get("stats"),
+            "diff_blocks":          comp_result.get("diff_blocks"),
+            "insights":             comp_result.get("insights"),
+            "comparison_notice":    comp_result.get("comparison_notice"),
+            "document_1_type":      comp_result.get("document_1_type"),
+            "document_2_type":      comp_result.get("document_2_type"),
+            "compared_at":          comp_result.get("compared_at"),
+            "duration_ms":          comp_result.get("duration_ms"),
         }
  
     except HTTPException:

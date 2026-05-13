@@ -166,7 +166,7 @@ _INCOMPATIBILITY_SYSTEM = (
 )
 
 
-async def _get_incompatibility_description(
+async def get_incompatibility_description(
     doc1_type: str,
     doc2_type: str,
     doc1_filename: str,
@@ -225,21 +225,13 @@ async def compare_documents(
         f"similarity={stats['similarity_percent']}"
     )
 
-    # 2. Document type / compatibility check
+    # 2. LLM insights only on the changed spans
+    insights = await _get_insights(diff_blocks, doc1_filename, doc2_filename)
+
+    # 3. Document type / compatibility notice
     doc1_type   = extraction1.get("document_type", "")
     doc2_type   = extraction2.get("document_type", "")
     types_match = _norm(doc1_type) == _norm(doc2_type)
-
-    # 3. LLM calls — insights always, incompatibility description only when types differ
-    if types_match:
-        insights                   = await _get_insights(diff_blocks, doc1_filename, doc2_filename)
-        incompatibility_description = ""
-    else:
-        insights, incompatibility_description = await asyncio.gather(
-            _get_insights(diff_blocks, doc1_filename, doc2_filename),
-            _get_incompatibility_description(doc1_type, doc2_type, doc1_filename, doc2_filename),
-        )
-
     comparison_notice = (
         f"Both documents are of the same type ({doc1_type}). Comparison results are reliable."
         if types_match else
@@ -251,14 +243,13 @@ async def compare_documents(
     logger.info(f"[comparison] Done — {duration_ms}ms")
 
     return {
-        "status":                      "success",
-        "duration_ms":                 duration_ms,
-        "compared_at":                 datetime.now(timezone.utc).isoformat(),
-        "document_1_type":             doc1_type,
-        "document_2_type":             doc2_type,
-        "comparison_notice":           comparison_notice,
-        "incompatibility_description": incompatibility_description,
-        "stats":                       stats,
-        "diff_blocks":                 diff_blocks,
-        "insights":                    insights,
+        "status":            "success",
+        "duration_ms":       duration_ms,
+        "compared_at":       datetime.now(timezone.utc).isoformat(),
+        "document_1_type":   doc1_type,
+        "document_2_type":   doc2_type,
+        "comparison_notice": comparison_notice,
+        "stats":             stats,
+        "diff_blocks":       diff_blocks,
+        "insights":          insights,
     }
