@@ -1022,26 +1022,15 @@ async def compare_documents_api(
             "clauses":       extraction2.get("key_clauses", []),
         }
 
-        # ── Step 3: Type check — if different, return early ───────────────
-        if slug1 != slug2:
-            elapsed = time.perf_counter() - t_start
+        # ── Step 3: Type check (warning only — always run comparison) ────
+        documents_compatible = (slug1 == slug2)
+        if not documents_compatible:
             logger.info(
-                f"[{request_id}] ── COMPARE ABORTED — type mismatch: {slug1} vs {slug2} | {elapsed:.2f}s"
+                f"[{request_id}] type mismatch: {slug1} vs {slug2} — "
+                f"proceeding with comparison (with warning)"
             )
-            return {
-                "status":               "success",
-                "documents_compatible": False,
-                "compatibility_message": (
-                    f"These documents are not of the same type — "
-                    f"'{extraction1['document_type']}' vs '{extraction2['document_type']}'. "
-                    f"Comparison cannot be performed."
-                ),
-                "document_1":  doc1_info,
-                "document_2":  doc2_info,
-                "comparison":  None,
-            }
 
-        # ── Step 4: Same type — run full comparison ───────────────────────
+        # ── Step 4: Run full comparison (always, regardless of type) ──────
         comp_result = await compare_documents(
             extraction1, extraction2,
             text1, text2,
@@ -1058,12 +1047,17 @@ async def compare_documents_api(
             f"added={stats.get('added_words')} removed={stats.get('removed_words')}"
         )
 
+        compatibility_message = (
+            f"Both documents are '{extraction1['document_type']}' — comparison is reliable."
+            if documents_compatible else
+            f"Warning: Document types differ — '{extraction1['document_type']}' vs "
+            f"'{extraction2['document_type']}'. Results may be incomplete."
+        )
+
         return {
             "status":               "success",
-            "documents_compatible": True,
-            "compatibility_message": (
-                f"Both documents are '{extraction1['document_type']}' — comparison is available."
-            ),
+            "documents_compatible": documents_compatible,
+            "compatibility_message": compatibility_message,
             "document_1":           doc1_info,
             "document_2":           doc2_info,
             "doc1_text":            text1,
