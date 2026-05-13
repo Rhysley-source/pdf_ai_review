@@ -307,6 +307,20 @@ async def extract_key_clauses_for_compare(text: str) -> dict:
 # OCR runs in thread pool — event loop is never blocked.
 # ---------------------------------------------------------------------------
 
+def _extract_text_from_docx(file_path: str) -> str:
+    """Extract plain text from a DOCX file using python-docx."""
+    from docx import Document as DocxDocument
+    doc   = DocxDocument(file_path)
+    paras = [p.text for p in doc.paragraphs if p.text.strip()]
+    # Also pull text from tables
+    for table in doc.tables:
+        for row in table.rows:
+            row_text = "  ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+            if row_text:
+                paras.append(row_text)
+    return "\n\n".join(paras)
+
+
 async def extract_text_from_upload(
     file: UploadFile,
     *,
@@ -317,16 +331,33 @@ async def extract_text_from_upload(
     request_id = str(uuid.uuid4())[:8]
     t_start    = time.perf_counter()
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+    fname = (file.filename or "").lower()
+    if not fname.endswith(".pdf") and not fname.endswith(".docx"):
+        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are accepted.")
 
-    safe_name = f"{uuid.uuid4()}.pdf"
+    is_docx   = fname.endswith(".docx")
+    ext       = ".docx" if is_docx else ".pdf"
+    safe_name = f"{uuid.uuid4()}{ext}"
     file_path = os.path.join(UPLOAD_FOLDER, safe_name)
 
     content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
 
+    if is_docx:
+        try:
+            loop = asyncio.get_running_loop()
+            text = await loop.run_in_executor(None, _extract_text_from_docx, file_path)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Could not read DOCX file: {e}")
+
+        if not text.strip():
+            raise HTTPException(status_code=422, detail="No extractable text found in DOCX.")
+
+        # DOCX has no page concept — report 1 page for compatibility
+        return text, 1, 1, request_id, t_start, file_path
+
+    # PDF path
     total_pages   = get_page_count(file_path)
     pages_to_read = total_pages if max_pages is None else min(total_pages, max_pages)
 

@@ -121,8 +121,8 @@ async def analyze_pdf(
     logger.info(f"[{request_id}] ── NEW REQUEST ──────────────────────────────")
     logger.info(f"[{request_id}] filename='{file.filename}' analysis_type={analysis_type}")
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+    if not file.filename or not (file.filename.lower().endswith(".pdf") or file.filename.lower().endswith(".docx")):
+        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are accepted.")
 
     safe_name = f"{uuid.uuid4()}.pdf"
     file_path = os.path.join(UPLOAD_FOLDER, safe_name)
@@ -649,9 +649,9 @@ async def analyze_pdf_stream(
     logger.info(f"[{request_id}] ── NEW STREAM REQUEST ───────────────────────")
     logger.info(f"[{request_id}] filename='{file.filename}' analysis_type={analysis_type}")
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
+    if not file.filename or not (file.filename.lower().endswith(".pdf") or file.filename.lower().endswith(".docx")):
         async def _err():
-            yield _sse("error", {"message": "Only PDF files are accepted."})
+            yield _sse("error", {"message": "Only PDF and DOCX files are accepted."})
         return StreamingResponse(_err(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
