@@ -1009,17 +1009,14 @@ async def compare_documents_api(
         )
 
         # Always build both doc content blocks for the response
-        doc1_name = file1.filename or "document_1.pdf"
-        doc2_name = file2.filename or "document_2.pdf"
-
         doc1_info = {
-            "filename":      doc1_name,
+            "filename":      file1.filename or "document_1.pdf",
             "document_type": extraction1.get("document_type", ""),
             "total_clauses": extraction1.get("total_clauses", 0),
             "clauses":       extraction1.get("key_clauses", []),
         }
         doc2_info = {
-            "filename":      doc2_name,
+            "filename":      file2.filename or "document_2.pdf",
             "document_type": extraction2.get("document_type", ""),
             "total_clauses": extraction2.get("total_clauses", 0),
             "clauses":       extraction2.get("key_clauses", []),
@@ -1030,8 +1027,8 @@ async def compare_documents_api(
             description, incompatibility_insights = await get_incompatibility_insights(
                 extraction1["document_type"],
                 extraction2["document_type"],
-                doc1_name,
-                doc2_name,
+                file1.filename or "document_1.pdf",
+                file2.filename or "document_2.pdf",
                 extraction1.get("key_clauses", []),
                 extraction2.get("key_clauses", []),
             )
@@ -1049,8 +1046,8 @@ async def compare_documents_api(
                 ),
                 "incompatibility_description": description,
                 "insights":                    incompatibility_insights,
-                doc1_name:                     doc1_info,
-                doc2_name:                     doc2_info,
+                "document_1":                  doc1_info,
+                "document_2":                  doc2_info,
                 "comparison":                  None,
             }
 
@@ -1058,8 +1055,8 @@ async def compare_documents_api(
         comp_result = await compare_documents(
             extraction1, extraction2,
             text1, text2,
-            doc1_filename=doc1_name,
-            doc2_filename=doc2_name,
+            doc1_filename=file1.filename or "document_1.pdf",
+            doc2_filename=file2.filename or "document_2.pdf",
             session_id=session_id,
         )
 
@@ -1077,8 +1074,8 @@ async def compare_documents_api(
             "compatibility_message": (
                 f"Both documents are '{extraction1['document_type']}' — comparison is available."
             ),
-            doc1_name:              doc1_info,
-            doc2_name:              doc2_info,
+            "document_1":           doc1_info,
+            "document_2":           doc2_info,
             "doc1_text":            text1,
             "doc2_text":            text2,
             "stats":                comp_result.get("stats"),
