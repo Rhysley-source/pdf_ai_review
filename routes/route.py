@@ -1022,15 +1022,26 @@ async def compare_documents_api(
             "clauses":       extraction2.get("key_clauses", []),
         }
 
-        # ── Step 3: Type check (warning only — always run comparison) ────
-        documents_compatible = (slug1 == slug2)
-        if not documents_compatible:
+        # ── Step 3: Type check — if different, return early ───────────────
+        if slug1 != slug2:
+            elapsed = time.perf_counter() - t_start
             logger.info(
-                f"[{request_id}] type mismatch: {slug1} vs {slug2} — "
-                f"proceeding with comparison (with warning)"
+                f"[{request_id}] ── COMPARE ABORTED — type mismatch: {slug1} vs {slug2} | {elapsed:.2f}s"
             )
+            return {
+                "status":               "success",
+                "documents_compatible": False,
+                "compatibility_message": (
+                    f"These documents are not of the same type — "
+                    f"'{extraction1['document_type']}' vs '{extraction2['document_type']}'. "
+                    f"Comparison cannot be performed."
+                ),
+                "document_1":  doc1_info,
+                "document_2":  doc2_info,
+                "comparison":  None,
+            }
 
-        # ── Step 4: Run full comparison (always, regardless of type) ──────
+        # ── Step 4: Same type — run full comparison ───────────────────────
         comp_result = await compare_documents(
             extraction1, extraction2,
             text1, text2,
@@ -1047,29 +1058,23 @@ async def compare_documents_api(
             f"added={stats.get('added_words')} removed={stats.get('removed_words')}"
         )
 
-        compatibility_message = (
-            f"Both documents are '{extraction1['document_type']}' — comparison is reliable."
-            if documents_compatible else
-            f"Warning: Document types differ — '{extraction1['document_type']}' vs "
-            f"'{extraction2['document_type']}'. Results may be incomplete."
-        )
-
         return {
-            "status":               "success",
-            "documents_compatible": documents_compatible,
-            "compatibility_message": compatibility_message,
-            "document_1":           doc1_info,
-            "document_2":           doc2_info,
-            "doc1_text":            text1,
-            "doc2_text":            text2,
-            "stats":                comp_result.get("stats"),
-            "diff_blocks":          comp_result.get("diff_blocks"),
-            "insights":             comp_result.get("insights"),
-            "comparison_notice":    comp_result.get("comparison_notice"),
-            "document_1_type":      comp_result.get("document_1_type"),
-            "document_2_type":      comp_result.get("document_2_type"),
-            "compared_at":          comp_result.get("compared_at"),
-            "duration_ms":          comp_result.get("duration_ms"),
+            "status":                      "success",
+            "documents_compatible":        documents_compatible,
+            "compatibility_message":       compatibility_message,
+            "incompatibility_description": comp_result.get("incompatibility_description", ""),
+            "document_1":                  doc1_info,
+            "document_2":                  doc2_info,
+            "doc1_text":                   text1,
+            "doc2_text":                   text2,
+            "stats":                       comp_result.get("stats"),
+            "diff_blocks":                 comp_result.get("diff_blocks"),
+            "insights":                    comp_result.get("insights"),
+            "comparison_notice":           comp_result.get("comparison_notice"),
+            "document_1_type":             comp_result.get("document_1_type"),
+            "document_2_type":             comp_result.get("document_2_type"),
+            "compared_at":                 comp_result.get("compared_at"),
+            "duration_ms":                 comp_result.get("duration_ms"),
         }
  
     except HTTPException:
