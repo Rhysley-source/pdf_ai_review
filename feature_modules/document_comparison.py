@@ -95,7 +95,8 @@ _INSIGHTS_SYSTEM = (
     "You are a senior document analyst and legal reviewer. "
     "Analyse the changes between two versions of the same document type. "
     "Be specific — quote exact values (amounts, dates, durations, party names) that changed. "
-    "Return ONLY valid JSON — no markdown, no explanation."
+    "Formatting rules: wrap every document filename in **filename** and every changed value in **value**. "
+    "Return ONLY valid JSON — no extra markdown outside string values, no explanation."
 )
 
 _MAX_CHANGE_CHARS = 8000
@@ -131,20 +132,22 @@ async def _get_insights(
         f'Changes between "{doc1_filename}" and "{doc2_filename}":\n\n'
         + "\n".join(lines)
         + f'\n\nAnalyse these changes thoroughly. '
-        f'IMPORTANT: In every insight, refer to the documents by their actual names '
-        f'"{doc1_filename}" and "{doc2_filename}" — never use generic labels like Doc1 or Doc2.\n\n'
+        f'IMPORTANT:\n'
+        f'- Always refer to documents by their actual filenames — never use Doc1 or Doc2.\n'
+        f'- Wrap every filename in **filename** and every changed value in **value**.\n'
+        f'- Example: "**{doc1_filename}** sets rent at **SGD 2,500**, changed to **SGD 3,200** in **{doc2_filename}**"\n\n'
         'Return ONLY this JSON:\n'
         '{\n'
-        f'  "semantic_insights": [\n'
-        f'    "<financial changes — exact amounts, rates, fees that changed, name the file where each appears>",\n'
-        f'    "<timeline changes — dates, durations, notice periods that changed, name the file>",\n'
-        f'    "<obligation changes — new duties added or removed, name the file responsible>",\n'
-        f'    "<risk changes — clauses that increase or decrease legal or financial risk, name the file>",\n'
-        f'    "<protection changes — clauses added or removed that protect one party, name the file>",\n'
-        f'    "<which file benefits most from these changes and why>",\n'
-        f'    "<any missing standard clauses or red flags introduced by the changes, name the file>"\n'
+        '  "semantic_insights": [\n'
+        '    "<financial: exact **amounts** that changed and which **filename** each belongs to>",\n'
+        '    "<timeline: **dates**, **durations**, **notice periods** that changed and which **filename**>",\n'
+        '    "<obligations: new duties added or removed, referencing **filename**>",\n'
+        '    "<risk: clauses increasing or decreasing risk, referencing **filename**>",\n'
+        '    "<protections: clauses added or removed, referencing **filename**>",\n'
+        '    "<which **filename** benefits most from the changes and why>",\n'
+        '    "<missing clauses or red flags introduced, referencing **filename**>"\n'
         '  ],\n'
-        '  "recommendation": "<3-4 actionable sentences referencing the actual filenames>"\n'
+        '  "recommendation": "<3-4 actionable sentences referencing **filenames** and **values**>"\n'
         '}'
     )
 
@@ -169,7 +172,8 @@ async def _get_insights(
 _INCOMPATIBILITY_SYSTEM = (
     "You are a senior document analyst. "
     "Analyse two documents of different types and explain why they cannot be compared. "
-    "Return ONLY valid JSON — no markdown, no explanation."
+    "Formatting rules: wrap every document filename in **filename** and every key term or value in **value**. "
+    "Return ONLY valid JSON — no extra markdown outside string values, no explanation."
 )
 
 
@@ -199,19 +203,21 @@ async def get_incompatibility_insights(
         f'Key clauses:\n{clauses1_text}\n\n'
         f'Document 2: "{doc2_filename}" — type: {doc2_type}\n'
         f'Key clauses:\n{clauses2_text}\n\n'
-        f'IMPORTANT: In every insight and in the description, always refer to the documents by their '
-        f'actual filenames "{doc1_filename}" and "{doc2_filename}" — never use generic labels.\n\n'
+        f'IMPORTANT:\n'
+        f'- Always refer to documents by their actual filenames — never use generic labels.\n'
+        f'- Wrap every filename in **filename** and every key term or value in **value**.\n'
+        f'- Example: "**{doc1_filename}** is a **Rental Agreement** governing **rent and deposits**"\n\n'
         'Return ONLY this JSON:\n'
         '{\n'
-        f'  "description": "<2-3 sentences using the actual filenames: what each document is, why they cannot be compared>",\n'
+        f'  "description": "<2-3 sentences with **{doc1_filename}** and **{doc2_filename}** highlighted: what each is, why they cannot be compared>",\n'
         '  "semantic_insights": [\n'
-        f'    "<what \'{doc1_filename}\' covers and its key obligations>",\n'
-        f'    "<what \'{doc2_filename}\' covers and its key obligations>",\n'
-        f'    "<key clauses present in \'{doc1_filename}\' that are absent in \'{doc2_filename}\'>",\n'
-        f'    "<key clauses present in \'{doc2_filename}\' that are absent in \'{doc1_filename}\'>",\n'
-        '    "<overall risk or concern from mixing these document types>"\n'
+        f'    "<what **{doc1_filename}** covers — highlight key **obligations** and **values**>",\n'
+        f'    "<what **{doc2_filename}** covers — highlight key **obligations** and **values**>",\n'
+        f'    "<key **clauses** in **{doc1_filename}** absent from **{doc2_filename}**>",\n'
+        f'    "<key **clauses** in **{doc2_filename}** absent from **{doc1_filename}**>",\n'
+        '    "<overall **risk** or concern from mixing these document types>"\n'
         '  ],\n'
-        '  "recommendation": "<2-3 actionable sentences referencing the actual filenames>"\n'
+        '  "recommendation": "<2-3 actionable sentences with **filenames** and **key terms** highlighted>"\n'
         '}'
     )
 
