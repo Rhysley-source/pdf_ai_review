@@ -18,7 +18,7 @@ from feature_modules.key_clause_extraction import classify_document, extract_key
 from feature_modules.risk_detection import analyze_document_risks
 from feature_modules.red_flag_scanner import scan_red_flags
 from feature_modules.obligation_detection import analyze_document_obligations
-from feature_modules.document_comparison import compare_documents
+from feature_modules.document_comparison import compare_documents, get_incompatibility_insights
 from utils.session_store import create_session, get_session
 from auth import verify_api_key
 
@@ -121,8 +121,8 @@ async def analyze_pdf(
     logger.info(f"[{request_id}] ── NEW REQUEST ──────────────────────────────")
     logger.info(f"[{request_id}] filename='{file.filename}' analysis_type={analysis_type}")
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+    if not file.filename or not (file.filename.lower().endswith(".pdf") or file.filename.lower().endswith(".docx")):
+        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are accepted.")
 
     safe_name = f"{uuid.uuid4()}.pdf"
     file_path = os.path.join(UPLOAD_FOLDER, safe_name)
@@ -593,7 +593,7 @@ async def red_flag_scanner(
             "status":             "success",
             "document_type":      result.get("document_type", ""),
             "overall_risk_level": result.get("overall_risk_level", "Low"),
-            "summary":            result.get("summary", ""),
+            "summary":            result.get("summary", {}),
             "counts": {
                 "total":     len(flags),
                 "dangerous": sum(1 for f in flags if f.get("category") == "dangerous"),
@@ -660,9 +660,9 @@ async def analyze_pdf_stream(
     logger.info(f"[{request_id}] ── NEW STREAM REQUEST ───────────────────────")
     logger.info(f"[{request_id}] filename='{file.filename}' analysis_type={analysis_type}")
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
+    if not file.filename or not (file.filename.lower().endswith(".pdf") or file.filename.lower().endswith(".docx")):
         async def _err():
-            yield _sse("error", {"message": "Only PDF files are accepted."})
+            yield _sse("error", {"message": "Only PDF and DOCX files are accepted."})
         return StreamingResponse(_err(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -1033,23 +1033,33 @@ async def compare_documents_api(
             "clauses":       extraction2.get("key_clauses", []),
         }
 
-        # ── Step 3: Type check — if different, return early ───────────────
+        # ── Step 3: Type check — if different, return early with insights ───
         if slug1 != slug2:
+            description, incompatibility_insights = await get_incompatibility_insights(
+                extraction1["document_type"],
+                extraction2["document_type"],
+                file1.filename or "document_1.pdf",
+                file2.filename or "document_2.pdf",
+                extraction1.get("key_clauses", []),
+                extraction2.get("key_clauses", []),
+            )
             elapsed = time.perf_counter() - t_start
             logger.info(
                 f"[{request_id}] ── COMPARE ABORTED — type mismatch: {slug1} vs {slug2} | {elapsed:.2f}s"
             )
             return {
-                "status":               "success",
-                "documents_compatible": False,
-                "compatibility_message": (
+                "status":                      "success",
+                "documents_compatible":        False,
+                "compatibility_message":       (
                     f"These documents are not of the same type — "
                     f"'{extraction1['document_type']}' vs '{extraction2['document_type']}'. "
                     f"Comparison cannot be performed."
                 ),
-                "document_1":  doc1_info,
-                "document_2":  doc2_info,
-                "comparison":  None,
+                "incompatibility_description": description,
+                "insights":                    incompatibility_insights,
+                "document_1":                  doc1_info,
+                "document_2":                  doc2_info,
+                "comparison":                  None,
             }
 
         # ── Step 4: Same type — run full comparison ───────────────────────
@@ -1062,9 +1072,11 @@ async def compare_documents_api(
         )
 
         elapsed = time.perf_counter() - t_start
+        stats   = comp_result.get("stats", {})
         logger.info(
             f"[{request_id}] ── COMPARE DONE — {elapsed:.2f}s | "
-            f"changes={comp_result['comparison']['header']['total_changes']}"
+            f"similarity={stats.get('similarity_percent')} | "
+            f"added={stats.get('added_words')} removed={stats.get('removed_words')}"
         )
 
         return {
@@ -1073,9 +1085,18 @@ async def compare_documents_api(
             "compatibility_message": (
                 f"Both documents are '{extraction1['document_type']}' — comparison is available."
             ),
-            "document_1":  doc1_info,
-            "document_2":  doc2_info,
-            "comparison":  comp_result.get("comparison"),
+            "document_1":           doc1_info,
+            "document_2":           doc2_info,
+            "doc1_text":            text1,
+            "doc2_text":            text2,
+            "stats":                comp_result.get("stats"),
+            "diff_blocks":          comp_result.get("diff_blocks"),
+            "insights":             comp_result.get("insights"),
+            "comparison_notice":    comp_result.get("comparison_notice"),
+            "document_1_type":      comp_result.get("document_1_type"),
+            "document_2_type":      comp_result.get("document_2_type"),
+            "compared_at":          comp_result.get("compared_at"),
+            "duration_ms":          comp_result.get("duration_ms"),
         }
  
     except HTTPException:

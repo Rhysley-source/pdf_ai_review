@@ -1,24 +1,21 @@
 """
-document_comparison.py  — v2
+document_comparison.py — v4
 
-Simplified pipeline:
-    extract_key_clauses(text1) + extract_key_clauses(text2)   [parallel, called from route]
-        → compare_documents(result1, result2)
-            → fuzzy clause matching
-            → word-level diff per clause
-            → severity × change_type risk scoring
-            → LLM enrichment (summaries + insights + recommendation)
+Side-by-side diff pipeline:
+    compare_documents(extraction1, extraction2, text1, text2)
+        → word-level diff via difflib.SequenceMatcher  (no LLM, instant)
+        → LLM semantic insights on just the changed portions
+        → returns diff_blocks covering the COMPLETE content of both documents
 
-Response shape per clause:
-    {
-        "clause_name": "Payment Terms",
-        "status":      "modified",          # added | removed | modified
-        "severity":    "high",
-        "doc1":        {"excerpt": "...", "significance": "..."},
-        "doc2":        {"excerpt": "...", "significance": "..."},
-        "word_diff":   [{"text": "word", "tag": "equal|insert|delete"}, ...],
-        "summary":     "LLM one-liner about what changed and why it matters."
-    }
+diff_blocks shape (one block per contiguous equal/changed span):
+    {"type": "equal",   "text": "..."}                          unchanged in both
+    {"type": "replace", "doc1_text": "...", "doc2_text": "..."}  modified
+    {"type": "insert",  "text": "..."}                          added only in Doc2
+    {"type": "delete",  "text": "..."}                          removed from Doc1
+
+Frontend rendering:
+  Doc1 column → render "equal" + "delete" + replace.doc1_text   (red highlight on delete/replace)
+  Doc2 column → render "equal" + "insert" + replace.doc2_text   (green highlight on insert/replace)
 """
 
 import asyncio
@@ -28,364 +25,224 @@ import time
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
-from llm_model.ai_model import run_llm_mini
+from llm_model.ai_model import run_llm_comparison
 from utils.json_utils import extract_json_raw as extract_json_from_text
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Risk tables
-# ---------------------------------------------------------------------------
-
-HIGH_RISK_NAMES = {
-    "payment", "liability", "termination", "indemnif", "penalt",
-    "pricing", "intellectual property", "ip rights", "ip ownership",
-    "liquidated damages", "damages",
-}
-MEDIUM_RISK_NAMES = {
-    "term", "renewal", "scope", "deliverable", "timeline", "deadline",
-    "non-compete", "non compete", "warranty", "warranties", "force majeure",
-    "data protection", "privacy", "confidential",
-}
-
-# Weight matrix: severity × change_type → risk points
-_RISK_WEIGHTS = {
-    ("high",   "removed"):  40,
-    ("high",   "modified"): 30,
-    ("high",   "added"):    20,
-    ("medium", "removed"):  20,
-    ("medium", "modified"): 15,
-    ("medium", "added"):    10,
-    ("low",    "removed"):  10,
-    ("low",    "modified"):  5,
-    ("low",    "added"):     3,
-}
-
-
-def _severity(clause_name: str) -> str:
-    n = clause_name.lower()
-    if any(k in n for k in HIGH_RISK_NAMES):
-        return "high"
-    if any(k in n for k in MEDIUM_RISK_NAMES):
-        return "medium"
-    return "low"
 
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").lower().strip())
 
 
-def _sim(a: str, b: str) -> float:
-    return SequenceMatcher(None, _norm(a), _norm(b)).ratio()
-
-
 # ---------------------------------------------------------------------------
-# Clause matching
-# Matches clauses from doc2 → doc1 by name similarity + excerpt similarity.
-# Returns list of (clause1_or_None, clause2_or_None, match_score).
+# Word-level diff — returns diff_blocks covering complete content
 # ---------------------------------------------------------------------------
 
-_NAME_WEIGHT    = 0.6
-_EXCERPT_WEIGHT = 0.4
-_MATCH_THRESHOLD = 0.45
+def _tokenize(text: str) -> list[str]:
+    """Split text into word + whitespace tokens so join() reproduces the original."""
+    return re.findall(r"\S+|\s+", text or "")
 
 
-def _match_clauses(
-    clauses1: list[dict],
-    clauses2: list[dict],
-) -> list[tuple[dict | None, dict | None]]:
+def _build_diff_blocks(text1: str, text2: str) -> tuple[list[dict], dict]:
     """
-    Greedy best-match pairing between two clause lists.
-    Each clause from doc1 is paired with at most one clause from doc2.
-    Unmatched clauses from either side are appended as added/removed.
+    Word-level diff of text1 vs text2.
+
+    Returns:
+        diff_blocks — list of {"type": ..., ...} dicts (see module docstring)
+        stats       — {"added_words", "removed_words", "similarity_percent"}
     """
-    used2 = set()
-    pairs: list[tuple[dict | None, dict | None]] = []
+    tokens1 = _tokenize(text1)
+    tokens2 = _tokenize(text2)
 
-    for c1 in clauses1:
-        best_idx, best_score = -1, 0.0
-        for i, c2 in enumerate(clauses2):
-            if i in used2:
-                continue
-            score = (
-                _NAME_WEIGHT    * _sim(c1["clause_name"], c2["clause_name"]) +
-                _EXCERPT_WEIGHT * _sim(c1.get("excerpt", ""), c2.get("excerpt", ""))
-            )
-            if score > best_score:
-                best_score, best_idx = score, i
+    sm = SequenceMatcher(None, tokens1, tokens2, autojunk=False)
+    blocks: list[dict] = []
+    added_words = removed_words = 0
 
-        if best_idx >= 0 and best_score >= _MATCH_THRESHOLD:
-            used2.add(best_idx)
-            pairs.append((c1, clauses2[best_idx]))
-        else:
-            pairs.append((c1, None))  # removed in doc2
-
-    for i, c2 in enumerate(clauses2):
-        if i not in used2:
-            pairs.append((None, c2))  # added in doc2
-
-    return pairs
-
-
-# ---------------------------------------------------------------------------
-# Word-level diff
-# Operates on the excerpt fields of the paired clauses.
-# Returns a list of {"text": str, "tag": "equal"|"insert"|"delete"}.
-# "insert" = present in doc2 only, "delete" = present in doc1 only.
-# ---------------------------------------------------------------------------
-
-def _word_diff(text1: str, text2: str) -> list[dict]:
-    words1 = (text1 or "").split()
-    words2 = (text2 or "").split()
-
-    sm  = SequenceMatcher(None, words1, words2, autojunk=False)
-    out = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
-            for w in words1[i1:i2]:
-                out.append({"text": w, "tag": "equal"})
-        elif tag == "insert":
-            for w in words2[j1:j2]:
-                out.append({"text": w, "tag": "insert"})
+            blocks.append({"type": "equal", "text": "".join(tokens1[i1:i2])})
         elif tag == "delete":
-            for w in words1[i1:i2]:
-                out.append({"text": w, "tag": "delete"})
-        elif tag == "replace":
-            for w in words1[i1:i2]:
-                out.append({"text": w, "tag": "delete"})
-            for w in words2[j1:j2]:
-                out.append({"text": w, "tag": "insert"})
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Build raw clause changes from matched pairs
-# ---------------------------------------------------------------------------
-
-def _build_raw_changes(
-    pairs: list[tuple[dict | None, dict | None]],
-) -> list[dict]:
-    changes = []
-    for c1, c2 in pairs:
-        if c1 is None and c2 is None:
-            continue
-
-        name     = (c1 or c2)["clause_name"]
-        severity = _severity(name)
-
-        if c1 is None:
-            status = "added"
-        elif c2 is None:
-            status = "removed"
-        else:
-            # Both present — check if content actually changed
-            ratio = _sim(c1.get("excerpt", ""), c2.get("excerpt", ""))
-            if ratio > 0.97:
-                continue  # identical — skip
-            status = "modified"
-
-        e1 = (c1 or {}).get("excerpt", "")
-        e2 = (c2 or {}).get("excerpt", "")
-
-        changes.append({
-            "clause_name":      name,
-            "status":           status,
-            "severity":         severity,
-            "doc1": {
-                "excerpt":      e1,
-                "significance": (c1 or {}).get("significance", ""),
-            },
-            "doc2": {
-                "excerpt":      e2,
-                "significance": (c2 or {}).get("significance", ""),
-            },
-            "word_diff":        _word_diff(e1, e2) if status == "modified" else [],
-            "summary":          "",   # filled by LLM enrichment
-            "difference_points": [],  # filled by LLM enrichment
-        })
-    return changes
-
-
-# ---------------------------------------------------------------------------
-# Risk scoring (severity × change_type weighted)
-# ---------------------------------------------------------------------------
-
-def _risk_score(changes: list[dict]) -> dict:
-    score = 0
-    high_count = 0
-    for c in changes:
-        pts = _RISK_WEIGHTS.get((c["severity"], c["status"]), 0)
-        score += pts
-        if c["severity"] == "high":
-            high_count += 1
-
-    score = min(score, 100)
-    level = "high" if score >= 70 else "medium" if score >= 30 else "low"
-    return {
-        "risk_score":        score,
-        "overall_risk_level": level,
-        "high_risk_changes": high_count,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Text-level diff stats (line-based, for the summary block)
-# ---------------------------------------------------------------------------
-
-def _text_diff_stats(text1: str, text2: str) -> dict:
-    lines1, lines2 = text1.splitlines(), text2.splitlines()
-    sm = SequenceMatcher(None, lines1, lines2)
-    added = removed = changed = unchanged = 0
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == "equal":
-            unchanged += i2 - i1
+            t = "".join(tokens1[i1:i2])
+            blocks.append({"type": "delete", "text": t})
+            removed_words += sum(1 for tok in tokens1[i1:i2] if tok.strip())
         elif tag == "insert":
-            added += j2 - j1
-        elif tag == "delete":
-            removed += i2 - i1
+            t = "".join(tokens2[j1:j2])
+            blocks.append({"type": "insert", "text": t})
+            added_words += sum(1 for tok in tokens2[j1:j2] if tok.strip())
         elif tag == "replace":
-            ch = min(i2 - i1, j2 - j1)
-            changed += ch
-            removed += (i2 - i1) - ch
-            added   += (j2 - j1) - ch
-    ratio = round(sm.ratio(), 4)
-    return {
-        "lines_added":       added,
-        "lines_removed":     removed,
-        "lines_changed":     changed,
-        "lines_unchanged":   unchanged,
-        "similarity_score":  ratio,
+            d1 = "".join(tokens1[i1:i2])
+            d2 = "".join(tokens2[j1:j2])
+            blocks.append({"type": "replace", "doc1_text": d1, "doc2_text": d2})
+            removed_words += sum(1 for tok in tokens1[i1:i2] if tok.strip())
+            added_words   += sum(1 for tok in tokens2[j1:j2] if tok.strip())
+
+    ratio = sm.ratio()
+    stats = {
+        "added_words":        added_words,
+        "removed_words":      removed_words,
         "similarity_percent": f"{round(ratio * 100, 1)}%",
+        "similarity_score":   round(ratio, 4),
     }
+    return blocks, stats
 
 
 # ---------------------------------------------------------------------------
-# LLM enrichment — per-clause summaries + insights + recommendation
+# LLM semantic insights — only on the changed spans, not full documents
 # ---------------------------------------------------------------------------
 
-_ENRICHMENT_SYSTEM = (
-    "You are a senior legal analyst specialising in contract risk review. "
-    "Analyse the clause changes provided and return a JSON object with exact difference points per clause. "
-    "Return ONLY valid JSON — no markdown, no explanation."
+_INSIGHTS_SYSTEM = (
+    "You are a senior document analyst and legal reviewer. "
+    "Analyse the changes between two versions of the same document type. "
+    "Be specific — quote exact values (amounts, dates, durations, party names) that changed. "
+    "Formatting rules: wrap every document filename in **filename** and every changed value in **value**. "
+    "Return ONLY valid JSON — no extra markdown outside string values, no explanation."
+)
+
+_MAX_CHANGE_CHARS = 8000
+
+
+async def _get_insights(
+    diff_blocks: list[dict],
+    doc1_filename: str,
+    doc2_filename: str,
+) -> dict:
+    empty = {"semantic_insights": [], "recommendation": ""}
+
+    changed = [b for b in diff_blocks if b["type"] != "equal"]
+    if not changed:
+        return empty
+
+    lines: list[str] = []
+    total_chars = 0
+    for i, b in enumerate(changed, 1):
+        if b["type"] == "replace":
+            line = f"{i}. MODIFIED — Doc1: {b['doc1_text'][:300].strip()} | Doc2: {b['doc2_text'][:300].strip()}"
+        elif b["type"] == "insert":
+            line = f"{i}. ADDED in Doc2 — {b['text'][:300].strip()}"
+        else:
+            line = f"{i}. REMOVED from Doc1 — {b['text'][:300].strip()}"
+        lines.append(line)
+        total_chars += len(line)
+        if total_chars >= _MAX_CHANGE_CHARS:
+            lines.append(f"... ({len(changed) - i} more changes not shown)")
+            break
+
+    prompt = (
+        f'Changes between "{doc1_filename}" and "{doc2_filename}":\n\n'
+        + "\n".join(lines)
+        + f'\n\nWrite specific insights about what actually changed. '
+        f'Rules:\n'
+        f'1. Only write an insight if something actually changed in that area — skip irrelevant categories entirely.\n'
+        f'2. Always refer to documents by their real filenames: "{doc1_filename}" and "{doc2_filename}".\n'
+        f'3. Bold formatting: wrap filenames and specific changed words/values using **text** — '
+        f'for example: "**{doc1_filename}** uses **JUnit** but **{doc2_filename}** adds **rest assured**"\n'
+        f'4. Be concrete — state exactly what was added, removed, or changed and in which file.\n\n'
+        'Return ONLY this JSON (include only non-empty, relevant insights — no blank strings):\n'
+        '{\n'
+        '  "semantic_insights": [\n'
+        '    "insight about a real change with bolded filenames and values",\n'
+        '    "another insight about a different real change"\n'
+        '  ],\n'
+        '  "recommendation": "3-4 actionable sentences with bolded filenames and key terms"\n'
+        '}'
+    )
+
+    try:
+        raw    = await run_llm_comparison(prompt, _INSIGHTS_SYSTEM, max_output_tokens=2000)
+        result = extract_json_from_text(raw) or {}
+        insights = [s for s in (result.get("semantic_insights") or []) if s and s.strip()]
+        if insights:
+            return {
+                "semantic_insights": insights,
+                "recommendation":    result.get("recommendation") or "",
+            }
+    except Exception as e:
+        logger.error(f"[comparison] insights LLM error: {e}")
+
+    return empty
+
+
+# ---------------------------------------------------------------------------
+# Incompatibility analysis — description + structured insights for mismatched types
+# ---------------------------------------------------------------------------
+
+_INCOMPATIBILITY_SYSTEM = (
+    "You are a senior document analyst. "
+    "Analyse two documents of different types and explain why they cannot be compared. "
+    "Formatting rules: wrap every document filename in **filename** and every key term or value in **value**. "
+    "Return ONLY valid JSON — no extra markdown outside string values, no explanation."
 )
 
 
-def _build_enrichment_prompt(changes: list[dict], doc1_text: str, doc2_text: str) -> str:
-    sorted_changes = sorted(
-        changes[:20],
-        key=lambda c: {"high": 0, "medium": 1, "low": 2}.get(c["severity"], 3),
+async def get_incompatibility_insights(
+    doc1_type: str,
+    doc2_type: str,
+    doc1_filename: str,
+    doc2_filename: str,
+    clauses1: list,
+    clauses2: list,
+) -> tuple[str, dict]:
+    """
+    Returns (description: str, insights: dict) for incompatible document pairs.
+    insights has the same shape as compatible-comparison insights:
+      {"semantic_insights": [...], "recommendation": "..."}
+    Both are generated in a single LLM call.
+    """
+    clauses1_text = "\n".join(
+        f"- {c['clause_name']}: {c['excerpt'][:120]}" for c in clauses1[:8]
     )
-    lines = []
-    for i, c in enumerate(sorted_changes, 1):
-        e1 = (c["doc1"].get("excerpt") or "")[:500].replace("\n", " ")
-        e2 = (c["doc2"].get("excerpt") or "")[:500].replace("\n", " ")
-        lines.append(
-            f"{i}. CLAUSE: {c['clause_name'].upper()}\n"
-            f"   Status: {c['status']} | Severity: {c['severity']}\n"
-            f"   Doc1 (original) : {e1 or '[absent]'}\n"
-            f"   Doc2 (revised)  : {e2 or '[absent]'}"
-        )
+    clauses2_text = "\n".join(
+        f"- {c['clause_name']}: {c['excerpt'][:120]}" for c in clauses2[:8]
+    )
 
-    if len(changes) > 20:
-        logger.warning(f"[comparison] {len(changes)} changes — enriching top 20 by severity")
+    prompt = (
+        f'Document 1: "{doc1_filename}" — type: {doc1_type}\n'
+        f'Key clauses:\n{clauses1_text}\n\n'
+        f'Document 2: "{doc2_filename}" — type: {doc2_type}\n'
+        f'Key clauses:\n{clauses2_text}\n\n'
+        f'IMPORTANT:\n'
+        f'- Always refer to documents by their actual filenames — never use generic labels.\n'
+        f'- Wrap every filename in **filename** and every key term or value in **value**.\n'
+        f'- Example: "**{doc1_filename}** is a **Rental Agreement** governing **rent and deposits**"\n\n'
+        'Return ONLY this JSON:\n'
+        '{\n'
+        f'  "description": "<2-3 sentences with **{doc1_filename}** and **{doc2_filename}** highlighted: what each is, why they cannot be compared>",\n'
+        '  "semantic_insights": [\n'
+        f'    "<what **{doc1_filename}** covers — highlight key **obligations** and **values**>",\n'
+        f'    "<what **{doc2_filename}** covers — highlight key **obligations** and **values**>",\n'
+        f'    "<key **clauses** in **{doc1_filename}** absent from **{doc2_filename}**>",\n'
+        f'    "<key **clauses** in **{doc2_filename}** absent from **{doc1_filename}**>",\n'
+        '    "<overall **risk** or concern from mixing these document types>"\n'
+        '  ],\n'
+        '  "recommendation": "<2-3 actionable sentences with **filenames** and **key terms** highlighted>"\n'
+        '}'
+    )
 
-    changes_block = "\n\n".join(lines) or "No changes detected."
-
-    return f"""DETECTED CLAUSE CHANGES ({len(sorted_changes)} shown, sorted by severity):
-{changes_block}
-
-DOCUMENT 1 EXCERPT (original):
-{doc1_text[:1500]}
-
-DOCUMENT 2 EXCERPT (revised):
-{doc2_text[:1500]}
-
-Return ONLY this JSON:
-
-{{
-  "clause_details": {{
-    "<clause_name exactly as written above>": {{
-      "summary": "<one sentence: what changed and the business impact>",
-      "difference_points": [
-        "<specific point 1 — name exact value/term that changed, e.g. 'Payment period changed from Net 30 to Net 15'>",
-        "<specific point 2 — another concrete difference>",
-        "<specific point 3 — add more if needed>"
-      ]
-    }}
-  }},
-  "semantic_insights": [
-    "<quantified insight referencing exact values — e.g. 'Liability cap reduced from $500K to $100K'>",
-    "<another insight on a different clause>",
-    "<which party benefits from these changes and why — name 2-3 specific reasons>"
-  ],
-  "recommendation": "<2-3 actionable sentences naming specific clauses to negotiate and the target outcome>"
-}}
-
-Rules:
-- clause_details key must exactly match the clause_name from the change list
-- difference_points must be specific and concrete — name exact values, dates, amounts, percentages
-- Every modified clause must have at least 2 difference_points
-- Added clauses: difference_points should describe what the new clause introduces
-- Removed clauses: difference_points should describe what protection is lost"""
-
-
-async def _llm_enrichment(changes: list[dict], text1: str, text2: str) -> dict:
-    empty = {"clause_details": {}, "semantic_insights": [], "recommendation": ""}
-    if not changes:
-        return empty
-
+    empty_insights: dict = {"semantic_insights": [], "recommendation": ""}
     try:
-        prompt = _build_enrichment_prompt(changes, text1, text2)
-
-        # Attempt 1
-        raw = await run_llm_mini(prompt, _ENRICHMENT_SYSTEM, max_output_tokens=6000)
-        result = extract_json_from_text(raw)
-        if result and result.get("clause_details"):
-            logger.info(
-                f"[comparison] LLM OK — "
-                f"clause_details={len(result.get('clause_details', {}))} "
-                f"insights={len(result.get('semantic_insights', []))}"
+        raw    = await run_llm_comparison(prompt, _INCOMPATIBILITY_SYSTEM, max_output_tokens=800)
+        result = extract_json_from_text(raw) or {}
+        description = (result.get("description") or "").strip()
+        insights    = {
+            "semantic_insights": result.get("semantic_insights") or [],
+            "recommendation":    result.get("recommendation") or "",
+        }
+        if not description:
+            description = (
+                f"'{doc1_type}' and '{doc2_type}' serve entirely different legal purposes. "
+                f"Their clauses, obligations, and structure are unrelated, making a direct "
+                f"comparison unreliable and potentially misleading."
             )
-            return result
-
-        # Attempt 2 — retry with worked example
-        logger.warning("[comparison] LLM attempt 1 weak — retrying with example")
-        ex      = changes[0]
-        ex_name = ex["clause_name"]
-        ex_e1   = (ex["doc1"].get("excerpt") or "original text")[:60]
-        ex_e2   = (ex["doc2"].get("excerpt") or "revised text")[:60]
-
-        retry_prompt = (
-            "Return ONLY valid JSON — no markdown.\n\n"
-            "Required format example:\n"
-            "{\n"
-            f'  "clause_details": {{"{ex_name}": {{\n'
-            f'    "summary": "{ex_name} changed — increases risk for signer.",\n'
-            f'    "difference_points": [\n'
-            f'      "Original: {ex_e1[:40]} | Revised: {ex_e2[:40]}",\n'
-            f'      "Impact: financial exposure increased"\n'
-            f'    ]\n'
-            f'  }}}},\n'
-            '  "semantic_insights": ["Specific change with exact values.", "Which party benefits and why."],\n'
-            '  "recommendation": "Negotiate to restore [clause] before signing."\n'
-            "}\n\n"
-            "Now produce the real analysis:\n\n"
-            + prompt
-        )
-
-        raw2   = await run_llm_mini(retry_prompt, _ENRICHMENT_SYSTEM, max_output_tokens=6000)
-        result2 = extract_json_from_text(raw2)
-        if result2 and result2.get("clause_details"):
-            logger.info("[comparison] Retry succeeded")
-            return result2
-
-        logger.error("[comparison] Both LLM enrichment attempts failed — returning empty")
-        return empty
-
+        return description, insights
     except Exception as e:
-        logger.exception(f"[comparison] Enrichment error: {e}")
-        return empty
+        logger.error(f"[comparison] incompatibility insights failed: {e}")
+        fallback = (
+            f"'{doc1_type}' and '{doc2_type}' serve entirely different legal purposes. "
+            f"Their clauses, obligations, and structure are unrelated, making a direct "
+            f"comparison unreliable and potentially misleading."
+        )
+        return fallback, empty_insights
 
 
 # ---------------------------------------------------------------------------
@@ -403,162 +260,51 @@ async def compare_documents(
     session_id: str = "",
 ) -> dict:
     """
-    Compare two documents given their extract_key_clauses() results.
+    Side-by-side diff of two documents.
 
-    Parameters
-    ----------
-    extraction1 : output of extract_key_clauses(text1)
-    extraction2 : output of extract_key_clauses(text2)
-    text1       : raw text of document 1 (for text-diff stats + LLM context)
-    text2       : raw text of document 2
-    doc1_filename, doc2_filename : original filenames for display
-    session_id  : caller-supplied session identifier
-
-    Returns
-    -------
-    Structured comparison dict — see module docstring for shape.
+    Returns diff_blocks covering the COMPLETE content of both documents so the
+    frontend can render a full highlighted view:
+      - Doc1 column: equal + delete + replace.doc1_text  (red on delete/replace)
+      - Doc2 column: equal + insert + replace.doc2_text  (green on insert/replace)
     """
     t_start = time.perf_counter()
+    logger.info(f"[comparison] Starting — doc1={doc1_filename} | doc2={doc2_filename}")
 
-    clauses1: list[dict] = extraction1.get("key_clauses", [])
-    clauses2: list[dict] = extraction2.get("key_clauses", [])
+    # 1. Word-level diff (pure Python, no LLM)
+    diff_blocks, stats = await asyncio.to_thread(_build_diff_blocks, text1, text2)
 
+    changed_count = sum(1 for b in diff_blocks if b["type"] != "equal")
     logger.info(
-        f"[comparison] Starting — "
-        f"doc1={doc1_filename} ({len(clauses1)} clauses) | "
-        f"doc2={doc2_filename} ({len(clauses2)} clauses)"
+        f"[comparison] Diff done — "
+        f"{len(diff_blocks)} blocks | {changed_count} changed | "
+        f"similarity={stats['similarity_percent']}"
     )
 
-    # 1. Match clauses across the two documents
-    pairs = _match_clauses(clauses1, clauses2)
+    # 2. LLM insights only on the changed spans
+    insights = await _get_insights(diff_blocks, doc1_filename, doc2_filename)
 
-    # 2. Build raw change list (CPU-bound, run in thread)
-    # text_diff_stats and risk_score are disabled for v1
-    raw_changes = await asyncio.to_thread(_build_raw_changes, pairs)
-
-    # 3. LLM enrichment — summaries, difference_points, insights, recommendation
-    llm_data  = await _llm_enrichment(raw_changes, text1, text2)
-    details   = llm_data.get("clause_details", {})
-    insights  = llm_data.get("semantic_insights", [])
-    rec       = llm_data.get("recommendation", "")
-
-    # 4. Attach LLM enrichment + build side_by_side row per clause
-    clause_changes = []
-    for c in raw_changes:
-        name        = c["clause_name"]
-        llm_entry   = details.get(name, {})
-        summary     = (llm_entry.get("summary") or "").strip()
-        diff_points = llm_entry.get("difference_points") or []
-
-        if not summary:
-            if c["status"] == "added":
-                summary = f"{name} is a new clause added in the revised document."
-            elif c["status"] == "removed":
-                summary = f"{name} has been removed from the revised document."
-            else:
-                summary = f"{name} has been modified in the revised document."
-
-        e1      = c["doc1"].get("excerpt") or None
-        e2      = c["doc2"].get("excerpt") or None
-        wdiff   = c.get("word_diff", [])
-
-        # Split word_diff into left (doc1) and right (doc2) token lists
-        # Left  pane: equal + delete  (what was in doc1)
-        # Right pane: equal + insert  (what is  in doc2)
-        left_tokens  = [{"text": w["text"], "tag": w["tag"]} for w in wdiff if w["tag"] in ("equal", "delete")]
-        right_tokens = [{"text": w["text"], "tag": w["tag"]} for w in wdiff if w["tag"] in ("equal", "insert")]
-
-        clause_changes.append({
-            "clause_name":  name,
-            "status":       c["status"],
-            "severity":     c["severity"],
-            "summary":      summary,
-            "side_by_side": {
-                "left": {
-                    "filename":    doc1_filename,
-                    "present":     e1 is not None,
-                    "excerpt":     e1,
-                    "significance": c["doc1"].get("significance", ""),
-                    "tokens":      left_tokens,   # equal + delete — render delete in red strikethrough
-                },
-                "right": {
-                    "filename":    doc2_filename,
-                    "present":     e2 is not None,
-                    "excerpt":     e2,
-                    "significance": c["doc2"].get("significance", ""),
-                    "tokens":      right_tokens,  # equal + insert — render insert in green
-                },
-                "difference_points": diff_points,
-            },
-        })
-
-    # 5. Document type compatibility message
-    doc1_type = extraction1.get("document_type", "")
-    doc2_type = extraction2.get("document_type", "")
+    # 3. Document type / compatibility notice
+    doc1_type   = extraction1.get("document_type", "")
+    doc2_type   = extraction2.get("document_type", "")
     types_match = _norm(doc1_type) == _norm(doc2_type)
-    if types_match:
-        comparison_notice = (
-            f"Both documents are of the same type ({doc1_type}). "
-            "Comparison results are reliable."
-        )
-    else:
-        comparison_notice = (
-            f"Warning: Document types differ — '{doc1_type}' vs '{doc2_type}'. "
-            "Comparing different document types may produce incomplete or inaccurate results."
-        )
+    comparison_notice = (
+        f"Both documents are of the same type ({doc1_type}). Comparison results are reliable."
+        if types_match else
+        f"Warning: Document types differ — '{doc1_type}' vs '{doc2_type}'. "
+        "Results may be incomplete."
+    )
 
     duration_ms = int((time.perf_counter() - t_start) * 1000)
-    logger.info(
-        f"[comparison] Done — {duration_ms}ms | "
-        f"changes={len(clause_changes)} | "
-        f"types_match={types_match}"
-    )
-
-    high_count   = sum(1 for c in clause_changes if c["severity"] == "high")
-    medium_count = sum(1 for c in clause_changes if c["severity"] == "medium")
-    low_count    = sum(1 for c in clause_changes if c["severity"] == "low")
-    added_count  = sum(1 for c in clause_changes if c["status"] == "added")
-    removed_count= sum(1 for c in clause_changes if c["status"] == "removed")
-    modified_count=sum(1 for c in clause_changes if c["status"] == "modified")
+    logger.info(f"[comparison] Done — {duration_ms}ms")
 
     return {
-        "status":      "success",
-        "duration_ms": duration_ms,
-        "comparison": {
-            "session_id":       session_id,
-            "compared_at":      datetime.now(timezone.utc).isoformat(),
-            "comparison_notice": comparison_notice,
-
-            # Header block — drives the top bar of the UI
-            "header": {
-                "document_1": {
-                    "filename":      doc1_filename,
-                    "document_type": doc1_type,
-                },
-                "document_2": {
-                    "filename":      doc2_filename,
-                    "document_type": doc2_type,
-                },
-                "total_changes":  len(clause_changes),
-                "by_severity": {
-                    "high":   high_count,
-                    "medium": medium_count,
-                    "low":    low_count,
-                },
-                "by_status": {
-                    "modified": modified_count,
-                    "added":    added_count,
-                    "removed":  removed_count,
-                },
-            },
-
-            # Insights + recommendation — top section above clause rows
-            "insights": {
-                "semantic_insights": insights,
-                "recommendation":    rec,
-            },
-
-            # Clause rows — each has side_by_side block ready for UI rendering
-            "clause_changes": clause_changes,
-        },
+        "status":            "success",
+        "duration_ms":       duration_ms,
+        "compared_at":       datetime.now(timezone.utc).isoformat(),
+        "document_1_type":   doc1_type,
+        "document_2_type":   doc2_type,
+        "comparison_notice": comparison_notice,
+        "stats":             stats,
+        "diff_blocks":       diff_blocks,
+        "insights":          insights,
     }
