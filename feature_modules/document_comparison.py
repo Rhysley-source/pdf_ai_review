@@ -131,32 +131,30 @@ async def _get_insights(
     prompt = (
         f'Changes between "{doc1_filename}" and "{doc2_filename}":\n\n'
         + "\n".join(lines)
-        + f'\n\nAnalyse these changes thoroughly. '
-        f'IMPORTANT:\n'
-        f'- Always refer to documents by their actual filenames — never use Doc1 or Doc2.\n'
-        f'- Wrap every filename in **filename** and every changed value in **value**.\n'
-        f'- Example: "**{doc1_filename}** sets rent at **SGD 2,500**, changed to **SGD 3,200** in **{doc2_filename}**"\n\n'
-        'Return ONLY this JSON:\n'
+        + f'\n\nWrite specific insights about what actually changed. '
+        f'Rules:\n'
+        f'1. Only write an insight if something actually changed in that area — skip irrelevant categories entirely.\n'
+        f'2. Always refer to documents by their real filenames: "{doc1_filename}" and "{doc2_filename}".\n'
+        f'3. Bold formatting: wrap filenames and specific changed words/values using **text** — '
+        f'for example: "**{doc1_filename}** uses **JUnit** but **{doc2_filename}** adds **rest assured**"\n'
+        f'4. Be concrete — state exactly what was added, removed, or changed and in which file.\n\n'
+        'Return ONLY this JSON (include only non-empty, relevant insights — no blank strings):\n'
         '{\n'
         '  "semantic_insights": [\n'
-        '    "<financial: exact **amounts** that changed and which **filename** each belongs to>",\n'
-        '    "<timeline: **dates**, **durations**, **notice periods** that changed and which **filename**>",\n'
-        '    "<obligations: new duties added or removed, referencing **filename**>",\n'
-        '    "<risk: clauses increasing or decreasing risk, referencing **filename**>",\n'
-        '    "<protections: clauses added or removed, referencing **filename**>",\n'
-        '    "<which **filename** benefits most from the changes and why>",\n'
-        '    "<missing clauses or red flags introduced, referencing **filename**>"\n'
+        '    "insight about a real change with bolded filenames and values",\n'
+        '    "another insight about a different real change"\n'
         '  ],\n'
-        '  "recommendation": "<3-4 actionable sentences referencing **filenames** and **values**>"\n'
+        '  "recommendation": "3-4 actionable sentences with bolded filenames and key terms"\n'
         '}'
     )
 
     try:
         raw    = await run_llm_comparison(prompt, _INSIGHTS_SYSTEM, max_output_tokens=2000)
         result = extract_json_from_text(raw) or {}
-        if result.get("semantic_insights"):
+        insights = [s for s in (result.get("semantic_insights") or []) if s and s.strip()]
+        if insights:
             return {
-                "semantic_insights": result.get("semantic_insights") or [],
+                "semantic_insights": insights,
                 "recommendation":    result.get("recommendation") or "",
             }
     except Exception as e:
