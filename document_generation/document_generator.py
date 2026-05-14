@@ -276,50 +276,52 @@ async def _call_llm_fast(system_prompt: str, user_message: str) -> str:
 
 
 _INTENT_CHECK_SYSTEM_PROMPT = """\
-You are a document intent classifier. Your job is to decide what the user wants.
+You are a document query router. Read the user input and decide how to handle it.
 
-There are exactly 3 possible intents:
+There are exactly 3 outcomes:
 
-━━━ 1. "request" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The user wants to CREATE or GENERATE a document — any type, any phrasing.
+━━━ 1. "request" — user wants to generate a document ━━━━━━━━━━━━━━━━━━━━
+Return "request" when the input is asking to create, write, draft, prepare, or generate
+ANY kind of document, letter, form, agreement, or professional writing — in any phrasing,
+any length, any style (short, detailed, formal, informal).
 
-Trigger words (any of these = "request"):
-  create, make, generate, build, draft, write, prepare, give me, need a, want a
+Be VERY generous. If there is any reasonable interpretation that the user wants a document
+→ return "request". When in doubt → return "request".
 
-Document types (mentioning one = "request" even without a trigger word):
-  resume, cv, curriculum vitae, invoice, bill, receipt, contract, agreement,
-  offer letter, employment letter, appointment letter, nda, non-disclosure,
-  lease, rent agreement, certificate, report, proposal, purchase order,
-  letter, memo, quotation, payslip, salary slip, experience letter,
-  relieving letter, joining letter, termination letter, internship letter
+Examples (all → "request"):
+  "resume"
+  "invoice for 5000"
+  "nda between two companies"
+  "Write a professional business proposal with executive summary and budget"
+  "Draft an employment contract with probation period and termination clauses"
+  "I need a rent agreement for 11 months with monthly rent 15000"
+  "prepare a formal letter to my landlord"
+  "make a certificate for rahul for completing python course"
+  "salary slip for employee john doe january 2025"
+  "a simple agreement between two friends for lending money"
+  "write something for my job application"
+  "create a document for my business"
 
-Informal / short phrasings are valid:
-  "resume sujeet python developer"           → request
-  "create resume for John as Python dev"     → request
-  "invoice 5000 to ABC Corp"                 → request
-  "nda between Acme and Beta"                → request
-  "offer letter priya manager 80k"           → request
-  "make me a contract for freelance work"    → request
-  "certificate of completion for rahul"      → request
+━━━ 2. "raw_document" — user has pasted an existing document ━━━━━━━━━━━━
+Return "raw_document" ONLY when the input IS an actual filled-in document (not a request).
+Signals: long text (500+ chars) with real names/dates/amounts already filled in,
+formal headings, signature lines, clauses, address blocks — looks like a real document.
 
-━━━ 2. "raw_document" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The user has PASTED the actual text of an existing document — long structured
-content with headings, clauses, dates, addresses, signature lines, tables, etc.
-It looks like a real document, not a request to make one.
+━━━ 3. "not_document" — completely unrelated to documents ━━━━━━━━━━━━━━━
+Return "not_document" ONLY when you are CERTAIN the input has NOTHING to do with
+any document, letter, form, agreement, or professional writing.
 
-━━━ 3. "unrelated" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The input is completely unrelated to any document:
-  general questions, math, greetings, jokes, coding help, weather, etc.
-  "what is python" → unrelated
-  "hello" → unrelated
-  "2 + 2" → unrelated
+Examples (→ "not_document"):
+  "what is machine learning"
+  "hello how are you"
+  "2 + 2 = ?"
+  "fix my python code"
+  "what is the weather today"
 
 ━━━ RULE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-If the input mentions a document type OR asks to make anything that could
-be a document → always return "request". Only return "unrelated" when you
-are certain the input has nothing to do with documents.
+Default to "request". Only use "not_document" when you are 100% certain.
 
-Return ONLY: {"intent": "<request|raw_document|unrelated>"}"""
+Return ONLY: {"intent": "<request|raw_document|not_document>"}"""
 
 
 async def _check_document_intent(user_prompt: str) -> str:
@@ -342,7 +344,7 @@ async def _check_document_intent(user_prompt: str) -> str:
         )
         parsed = json.loads(content.strip())
         intent = parsed.get("intent", "request")
-        if intent not in ("request", "raw_document", "unrelated"):
+        if intent not in ("request", "raw_document", "not_document"):
             intent = "request"
         return intent
     except Exception:
@@ -539,25 +541,29 @@ def _is_gibberish(text: str) -> bool:
 
     Checks:
     1. Too short after stripping whitespace.
-    2. Alphabetic characters make up less than 50 % of the text
-       (catches strings like "123 @@@ !!!" or random symbols).
-    3. Fewer than 2 words that are at least 3 alphabetic characters long
-       (catches single-char spam like "a b c d e" or keyboard mashing).
+    2. Alphabetic characters make up less than 50% of the text.
+    3. Fewer than 2 words that are at least 3 alphabetic characters long.
+    4. Vowel ratio below 15% — catches random consonant-heavy keyboard mashing
+       like "fvffv fgdfgrf ghggfsd" which passes checks 1-3 but has almost no vowels.
     """
     stripped = text.strip()
 
-    # Too short to mean anything
     if len(stripped) < 5:
         return True
 
-    # Low alphabetic ratio — mostly numbers / symbols / spaces
     alpha_count = sum(1 for c in stripped if c.isalpha())
     if len(stripped) > 0 and (alpha_count / len(stripped)) < 0.50:
         return True
 
-    # Not enough real words (3+ consecutive alpha chars)
-    real_words = re.findall(r"[A-Za-z]{3,}", stripped)
+    # Count words with 2+ chars to handle abbreviations like "jd", "hr", "cv", "nda"
+    real_words = re.findall(r"[A-Za-z]{2,}", stripped)
     if len(real_words) < 2:
+        return True
+
+    # Vowel ratio — real language has ~35-40% vowels; random mashing has <15%
+    # Skip vowel check for short queries (≤15 chars) — abbreviations like "jd", "cv" have no vowels but are valid
+    vowel_count = sum(1 for c in stripped.lower() if c in "aeiou")
+    if alpha_count > 0 and len(stripped) > 15 and (vowel_count / alpha_count) < 0.15:
         return True
 
     return False
@@ -1295,78 +1301,163 @@ async def generate_document_html(
         )
 
 
+_DIRECT_TEXT_SYSTEM_PROMPT = """\
+You are an expert document writer. Generate a COMPLETE, fully detailed, beautifully structured document in Markdown tailored to the document type.
+
+━━━ CONTENT RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Write full professional/legal language — complete sentences, proper clauses, rights, obligations.
+- Every section must be a proper paragraph or numbered clause set (3–6 sentences minimum). No one-liners.
+- Use [Placeholder] brackets ONLY for missing sensitive/user-specific values: [Name], [Address], [Amount], [Date], [Governing State].
+- All standard boilerplate, legal language, and conditions must be fully written out — never replaced by placeholders.
+
+━━━ MARKDOWN STRUCTURE (apply per document type) ━━━━━━━━━━━━━━━━━━━━━━━━
+# Document Title                         ← H1, always first line
+**[Key metadata as bold label: value pairs]**
+
+---                                      ← horizontal rule after header block
+
+## Section Name                          ← H2 for every major section
+### Sub-section                          ← H3 for sub-topics within a section
+
+━━━ DOCUMENT-TYPE SPECIFIC FORMATTING ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📄 RESUME / CV:
+- Name as # H1, contact info as **bold label:** value on separate lines
+- Skills as grouped bullet lists under ### categories
+- Experience entries: **Job Title** | *Company* | `Start – End` then bullet points
+- Education: **Degree** | *Institution* | `Year`
+- Use `---` between major sections (Summary, Skills, Experience, Education)
+
+📄 INVOICE / BILL:
+- Header block: **Invoice #**, **Date**, **Due Date**, **From/To** as bold pairs
+- Line items as a Markdown table: | # | Description | Qty | Rate | Amount |
+- Totals section: bold **Subtotal**, **Tax**, **Total Due**
+- Payment instructions in a > blockquote
+
+📄 CONTRACT / AGREEMENT / NDA / LEASE:
+- Opening recital as italic *"This Agreement is entered into..."*
+- Numbered clauses: `1.`, `2.`, `3.` with **bold clause titles**
+- Definitions in a table: | Term | Definition |
+- Sub-clauses as indented `  a)`, `  b)` lists
+- Signature block with `___` lines and **Party Name** labels
+
+📄 OFFER LETTER / EMPLOYMENT LETTER:
+- Date and recipient address as bold block at top
+- Body paragraphs with **key terms bolded** (role, salary, start date)
+- Bullet list for benefits/conditions
+- Closing with signature block
+
+📄 CERTIFICATE:
+- Centered title as # with decorative `---` above and below
+- Award statement as a large bold paragraph
+- Issued by / date as bold pairs
+- Signature line at bottom
+
+📄 REPORT / PROPOSAL:
+- Executive Summary as first section after title
+- Each section with ## heading, body paragraphs, and supporting bullet lists
+- Data/comparisons in Markdown tables
+- Conclusion/Recommendation as final ## section
+
+━━━ UNIVERSAL FORMATTING RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Output Markdown only — no HTML tags, no wrapping code fences.
+- Use **bold** for key terms, labels, party names, amounts, and important dates.
+- Use *italic* for definitions, recitals, and document-type labels.
+- Use `---` horizontal rules to visually separate major sections.
+- Use tables for any structured data (line items, comparisons, schedules).
+- Use > blockquotes for notices, important warnings, or declarations.
+- Signature blocks: **Party Name:** `___________________________` on its own line.
+
+━━━ SPACING RULES (critical for frontend rendering) ━━━━━━━━━━━━━━━━━━━━━
+- Always add ONE blank line after every heading (# ## ###) before content starts.
+- Always add ONE blank line between every paragraph.
+- Always add ONE blank line before and after every `---` horizontal rule.
+- Always add ONE blank line before and after every table.
+- Always add ONE blank line before and after every blockquote (>).
+- Always add ONE blank line between each bullet/numbered list item when the item has more than one line.
+- Always add TWO blank lines before every ## section heading to create clear visual separation.
+- Never place two headings back-to-back without a blank line between them.
+- Never place text immediately after a heading on the same line.
+- Do not add any preamble, explanation, or closing note — output the document only.\
+"""
+
+
+def _prompt_cache_key(prompt: str) -> str:
+    """Stable cache key derived from the normalised prompt text."""
+    normalised = prompt.strip().lower()
+    return "cache_" + hashlib.sha256(normalised.encode()).hexdigest()[:24]
+
+
 @router.post("/generate-text/stream")
 async def generate_document_text_stream(
     request: DocumentGenerationRequest,
     _: None = Depends(verify_api_key),
 ):
     """
-    Streams a plain-text document to the client as it is generated.
-
-    Same Steps 1+2 pipeline as /generate-html (classify + blueprint), but
-    Step 3 produces structured plain text instead of HTML — no tags, no markdown.
-    Response is streamed chunk-by-chunk as text/plain.
-    The X-Document-Id header carries the document ID (same namespace as /generate-html).
+    Streams a complete Markdown document directly from the user prompt.
+    Cache hit: streams stored result instantly — no LLM call.
+    Cache miss: streams from LLM, saves result keyed by prompt hash.
     """
-    intent = await _check_document_intent(request.user_prompt)
-    logger.info(f"[doc-gen] /generate-text/stream intent={intent!r}")
-
-    if intent == "unrelated":
+    if _is_gibberish(request.user_prompt):
         raise HTTPException(
             status_code=422,
             detail=_err_invalid_prompt(request.user_prompt),
         )
-    elif intent == "raw_document":
-        analysis_prompt = (
-            "The following is a complete existing document. "
-            "Analyze it, identify its type, extract all field values, "
-            "and generate a new complete document of the same type:\n\n"
+
+    intent = await _check_document_intent(request.user_prompt)
+    logger.info(f"[doc-gen] /generate-text/stream intent={intent!r}")
+
+    if intent == "not_document":
+        raise HTTPException(
+            status_code=422,
+            detail=_err_not_document_request(request.user_prompt),
+        )
+
+    user_message = request.user_prompt
+    if intent == "raw_document":
+        user_message = (
+            "The following is an existing document. "
+            "Reformat and reproduce it with proper professional structure and Markdown formatting. "
+            "Preserve ALL original data exactly as-is — names, dates, amounts, addresses, skills, experience, everything. "
+            "Do NOT replace any real values with placeholders. Only use [placeholder] for fields that are already blank or missing in the original.\n\n"
             + request.user_prompt
         )
-    else:
-        analysis_prompt = request.user_prompt
 
-    doc_id = request.document_id or str(uuid.uuid4())
+    doc_id      = request.document_id or str(uuid.uuid4())
+    cache_key   = _prompt_cache_key(request.user_prompt)
     request_started = time.perf_counter()
-    logger.info(f"[doc-gen] /generate-text/stream start doc_id={doc_id}")
 
-    try:
-        step_started = time.perf_counter()
-        try:
-            context = await _analyze_and_build(analysis_prompt)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("[doc-gen] /generate-text/stream Steps 1+2 failed")
-            raise HTTPException(
-                status_code=502,
-                detail=_err_model_failed("Analysis + Blueprint", request.user_prompt, str(e)),
-            )
-        logger.info(
-            f"[doc-gen] /generate-text/stream Steps 1+2 done in "
-            f"{time.perf_counter() - step_started:.2f}s "
-            f"doc_label='{context.get('doc_label', 'Document')}'"
+    # ── Cache hit: stream stored document without LLM call ──────────────────
+    cached = await asyncio.to_thread(_load_document, cache_key)
+    if cached:
+        logger.info(f"[doc-gen] /generate-text/stream cache HIT key={cache_key} doc_id={doc_id}")
+
+        async def _stream_cached():
+            chunk_size = 512
+            for i in range(0, len(cached), chunk_size):
+                yield cached[i : i + chunk_size].encode("utf-8")
+
+        return StreamingResponse(
+            _stream_cached(),
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "X-Document-Id":     doc_id,
+                "X-Cache":           "HIT",
+                "Cache-Control":     "no-cache",
+                "X-Accel-Buffering": "no",
+            },
         )
 
-    except HTTPException as exc:
-        logger.warning(
-            f"[doc-gen] /generate-text/stream aborted doc_id={doc_id} "
-            f"status={exc.status_code} total={time.perf_counter() - request_started:.2f}s"
-        )
-        raise
+    logger.info(f"[doc-gen] /generate-text/stream cache MISS key={cache_key} doc_id={doc_id}")
 
     async def _stream_text():
-        system_prompt = DOCUMENT_GENERATION_TEXT_PROMPT.format(
-            **context,
-            user_request=request.user_prompt,
-        )
         model = os.environ.get("MODEL_NAME", _MODEL)
 
         kwargs: dict = {
             "model":    model,
             "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": request.user_prompt},
+                {"role": "system", "content": _DIRECT_TEXT_SYSTEM_PROMPT},
+                {"role": "user",   "content": user_message},
             ],
             "stream": True,
         }
@@ -1388,16 +1479,18 @@ async def generate_document_text_stream(
                 accumulated.append(delta)
                 yield delta.encode("utf-8")
         except Exception:
-            logger.exception("[doc-gen] /generate-text/stream Step 3 failed")
+            logger.exception("[doc-gen] /generate-text/stream LLM stream failed")
             return
 
         full_text = "".join(accumulated)
         if full_text.strip():
             try:
+                # Save under both cache key (prompt hash) and doc_id
+                await asyncio.to_thread(_save_document, cache_key, full_text)
                 await asyncio.to_thread(_save_document, doc_id, full_text)
                 logger.info(
-                    f"[doc-gen] /generate-text/stream saved doc_id={doc_id} "
-                    f"total={time.perf_counter() - request_started:.2f}s"
+                    f"[doc-gen] /generate-text/stream saved cache_key={cache_key} "
+                    f"doc_id={doc_id} total={time.perf_counter() - request_started:.2f}s"
                 )
             except Exception:
                 logger.exception("[doc-gen] /generate-text/stream storage write failed")
@@ -1545,9 +1638,7 @@ async def regenerate_document_html_stream(
     the full document is cleaned, validated, and saved to storage.
     X-Document-Id header carries the document ID.
     """
-    is_modification = await _check_modification_intent(request.modification_query)
-    logger.info(f"[doc-gen] /regenerate-html/stream modification_intent={is_modification}")
-    if not is_modification:
+    if _is_gibberish(request.modification_query):
         raise HTTPException(
             status_code=422,
             detail=_err_invalid_modification(request.modification_query),

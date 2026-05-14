@@ -629,17 +629,23 @@ Start every document from this base — fill in <style> and body content:
 # ---------------------------------------------------------------------------
 
 REGENERATE_TEXT_PROMPT = SimulatedPromptTemplate(
-    template="""You are an expert document writer. Apply the user's modification to the existing document and return the result as plain text only.
+    template="""You are an expert document writer. Apply the user's modification to the existing document and return the complete updated document in beautifully structured Markdown.
 
 RULES:
-1. Output plain text only — absolutely no HTML tags, no markdown symbols, no backticks.
-2. Document title: write in ALL CAPS, centered using spaces, on its own line.
-3. Section headings: write in ALL CAPS followed by a colon, on their own line.
-4. Separate major sections with a line of dashes: ----------------------------------------
-5. Tables: use plain ASCII alignment with | characters and - separators.
-6. Signature blocks: use underscores for signature lines: ____________________________
-7. Wherever a value is missing, write the placeholder in square brackets: [Email Address].
-8. Do not add any preamble, explanation, or closing note — output the document content only.
+1. Output Markdown only — no HTML tags, no wrapping code fences.
+2. Apply ONLY the requested modification — keep all other content identical.
+3. Preserve the document type's structure and formatting style.
+4. Use **bold** for key terms, labels, party names, amounts, and important dates.
+5. Use *italic* for definitions, recitals, and document-type labels.
+6. Use `---` horizontal rules to separate major sections.
+7. Use tables for structured data (line items, comparisons, schedules).
+8. Use > blockquotes for notices, warnings, or declarations.
+9. Signature blocks: **Party Name:** `___________________________` on its own line.
+10. Section headings as ## (H2), sub-sections as ### (H3).
+11. Numbered clauses: 1., 2., 3. with **bold clause titles**.
+12. Wherever a value is missing, write the placeholder in square brackets: [Email Address].
+13. SPACING — always one blank line after every heading, between paragraphs, before/after tables, before/after `---` rules, and two blank lines before every ## section heading.
+14. Do not add any preamble, explanation, or closing note — output the document only.
 
 Existing Document Content:
 {existing_html}
@@ -715,7 +721,7 @@ Return ONLY this JSON — no markdown, no explanation:
 # ---------------------------------------------------------------------------
 
 DOCUMENT_GENERATION_TEXT_PROMPT = SimulatedPromptTemplate(
-    template="""You are an expert document writer. Produce a complete, professionally formatted plain-text document.
+    template="""You are an expert legal document writer. Produce a COMPLETE, fully detailed, professionally formatted document in Markdown.
 
 Document Type : {doc_label} ({doc_type})
 Tone          : {tone}
@@ -727,14 +733,22 @@ Document Blueprint — generate each section in this exact order:
 Original User Request:
 {user_request}
 
+CONTENT RULES:
+- Every section must contain full, detailed legal/professional language — complete sentences, standard clauses, obligations, rights, and conditions as appropriate for the document type.
+- Do NOT write one-line summaries. Each section should be a proper paragraph or set of clauses (3–6 sentences minimum).
+- Use placeholder brackets ONLY for sensitive or user-specific data: [Landlord Name], [Tenant Name], [Property Address], [Monthly Rent Amount], [Start Date], [End Date], [Governing State/Country], etc.
+- All standard legal language, obligations, conditions, and boilerplate must be written out in full — never replaced with placeholders.
+- If a section has sub-points or numbered clauses, write them all out completely.
+
 FORMATTING RULES:
-- Output plain text only — absolutely no HTML tags, no markdown symbols, no backticks.
-- Document title: write in ALL CAPS, centered using spaces, on its own line.
-- Section headings: write in ALL CAPS followed by a colon, on their own line.
-- Separate major sections with a line of dashes: ----------------------------------------
-- Tables and grids: use plain ASCII alignment with | characters and - separators.
-- Signature blocks: use underscores for signature lines: ____________________________
-- Wherever a value is missing, write the placeholder in square brackets: [Email Address], [Phone Number].
+- Output Markdown only — no HTML tags, no backtick code blocks wrapping the whole document.
+- Document title: # Title (H1)
+- Section headings: ## SECTION NAME (H2)
+- Sub-sections: ### Sub-section (H3)
+- Numbered clauses: use 1., 2., 3. lists
+- Tables: use Markdown table syntax with | and - characters
+- Signature blocks: use ___ underscores on their own line
+- Bold key terms with **bold**
 - Do not add any preamble, explanation, or closing note — output the document content only.""",
     input_variables=["doc_type", "doc_label", "tone", "layout_notes", "sections_block", "user_request"],
 )
