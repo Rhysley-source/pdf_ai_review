@@ -6,6 +6,8 @@ import tempfile
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from auth import verify_api_key
+from docx import Document
+from docx.shared import mm
 
 router = APIRouter()
 
@@ -17,14 +19,30 @@ async def convert_docx_to_pdf(
 ):
     """
     Accepts a .docx file and returns a converted PDF using LibreOffice headless.
+    Forces A4 paper size.
     """
     if not file.filename.endswith(".docx"):
         raise HTTPException(status_code=400, detail="Only .docx files are supported")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         docx_path = os.path.join(tmpdir, file.filename)
+        # Read the file content once
+        content = await file.read()
+        
+        # Write initial docx
         with open(docx_path, "wb") as f:
-            f.write(await file.read())
+            f.write(content)
+
+        # Force A4 size using python-docx
+        try:
+            doc = Document(docx_path)
+            for section in doc.sections:
+                section.page_height = mm(297)
+                section.page_width = mm(210)
+            doc.save(docx_path)
+        except Exception as e:
+            # If docx editing fails, we still try to convert the original
+            pass
 
         result = subprocess.run(
             [
