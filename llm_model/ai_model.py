@@ -732,10 +732,11 @@ async def run_llm_mini(
     text:              str,
     system_prompt:     str,
     max_output_tokens: int = 16000,
-) -> str:
+) -> tuple[str, int, int]:
     """
     Same as run_llm() but uses MINI_MODEL_NAME (default: gpt-4.1-mini).
     Used by /key-clause-extraction and /detect-risks for faster, lower-latency extraction.
+    Returns (content, input_tokens, output_tokens).
     """
     messages = [
         {"role": "system", "content": system_prompt},
@@ -760,7 +761,7 @@ async def run_llm_mini(
             input_tokens  = response.usage.prompt_tokens
             output_tokens = response.usage.completion_tokens
             logger.info(f"[run_llm_mini] model={mini_model} in={input_tokens} out={output_tokens} in {elapsed:.2f}s")
-            return content
+            return content, input_tokens, output_tokens
         except Exception as e:
             logger.exception(f"[run_llm_mini] model={mini_model} OpenAI API call failed: {e}")
             raise
@@ -770,12 +771,13 @@ async def run_llm_comparison(
     text:              str,
     system_prompt:     str,
     max_output_tokens: int = 8000,
-) -> str:
+) -> tuple[str, int, int]:
     """
     High-accuracy LLM runner for document comparison enrichment.
     Uses COMPARISON_MODEL (default: gpt-4.1) — stronger reasoning and better
     exact-value quoting than gpt-4.1-mini for legal clause analysis.
     Override via COMPARISON_MODEL env var without touching code.
+    Returns (content, input_tokens, output_tokens).
     """
     messages = [
         {"role": "system", "content": system_prompt},
@@ -804,7 +806,7 @@ async def run_llm_comparison(
                 f"[run_llm_comparison] model={comparison_model} "
                 f"in={input_tokens} out={output_tokens} in {elapsed:.2f}s"
             )
-            return content
+            return content, input_tokens, output_tokens
         except Exception as e:
             logger.exception(f"[run_llm_comparison] model={comparison_model} API call failed: {e}")
             raise

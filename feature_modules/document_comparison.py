@@ -107,7 +107,7 @@ async def _get_insights(
     doc1_filename: str,
     doc2_filename: str,
 ) -> dict:
-    empty = {"semantic_insights": [], "recommendation": ""}
+    empty = {"semantic_insights": [], "recommendation": "", "in_tokens": 0, "out_tokens": 0}
 
     changed = [b for b in diff_blocks if b["type"] != "equal"]
     if not changed:
@@ -149,13 +149,15 @@ async def _get_insights(
     )
 
     try:
-        raw    = await run_llm_comparison(prompt, _INSIGHTS_SYSTEM, max_output_tokens=2000)
-        result = extract_json_from_text(raw) or {}
+        raw, in_tok, out_tok = await run_llm_comparison(prompt, _INSIGHTS_SYSTEM, max_output_tokens=2000)
+        result   = extract_json_from_text(raw) or {}
         insights = [s for s in (result.get("semantic_insights") or []) if s and s.strip()]
         if insights:
             return {
                 "semantic_insights": insights,
                 "recommendation":    result.get("recommendation") or "",
+                "in_tokens":         in_tok,
+                "out_tokens":        out_tok,
             }
     except Exception as e:
         logger.error(f"[comparison] insights LLM error: {e}")
@@ -182,12 +184,11 @@ async def get_incompatibility_insights(
     doc2_filename: str,
     clauses1: list,
     clauses2: list,
-) -> tuple[str, dict]:
+) -> tuple[str, dict, int, int]:
     """
-    Returns (description: str, insights: dict) for incompatible document pairs.
-    insights has the same shape as compatible-comparison insights:
-      {"semantic_insights": [...], "recommendation": "..."}
-    Both are generated in a single LLM call.
+    Returns (description: str, insights: dict, in_tokens: int, out_tokens: int)
+    for incompatible document pairs.
+    Both description and insights are generated in a single LLM call.
     """
     clauses1_text = "\n".join(
         f"- {c['clause_name']}: {c['excerpt'][:120]}" for c in clauses1[:8]
@@ -221,8 +222,8 @@ async def get_incompatibility_insights(
 
     empty_insights: dict = {"semantic_insights": [], "recommendation": ""}
     try:
-        raw    = await run_llm_comparison(prompt, _INCOMPATIBILITY_SYSTEM, max_output_tokens=800)
-        result = extract_json_from_text(raw) or {}
+        raw, in_tok, out_tok = await run_llm_comparison(prompt, _INCOMPATIBILITY_SYSTEM, max_output_tokens=800)
+        result      = extract_json_from_text(raw) or {}
         description = (result.get("description") or "").strip()
         insights    = {
             "semantic_insights": result.get("semantic_insights") or [],
@@ -234,7 +235,7 @@ async def get_incompatibility_insights(
                 f"Their clauses, obligations, and structure are unrelated, making a direct "
                 f"comparison unreliable and potentially misleading."
             )
-        return description, insights
+        return description, insights, in_tok, out_tok
     except Exception as e:
         logger.error(f"[comparison] incompatibility insights failed: {e}")
         fallback = (
@@ -242,7 +243,7 @@ async def get_incompatibility_insights(
             f"Their clauses, obligations, and structure are unrelated, making a direct "
             f"comparison unreliable and potentially misleading."
         )
-        return fallback, empty_insights
+        return fallback, empty_insights, 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +282,9 @@ async def compare_documents(
     )
 
     # 2. LLM insights only on the changed spans
-    insights = await _get_insights(diff_blocks, doc1_filename, doc2_filename)
+    insights    = await _get_insights(diff_blocks, doc1_filename, doc2_filename)
+    in_tokens   = insights.pop("in_tokens",  0)
+    out_tokens  = insights.pop("out_tokens", 0)
 
     # 3. Document type / compatibility notice
     doc1_type   = extraction1.get("document_type", "")
@@ -307,4 +310,5 @@ async def compare_documents(
         "stats":             stats,
         "diff_blocks":       diff_blocks,
         "insights":          insights,
+        "token_usage":       {"input_tokens": in_tokens, "output_tokens": out_tokens, "total_tokens": in_tokens + out_tokens},
     }

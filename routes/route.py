@@ -274,10 +274,12 @@ async def analyze_pdf(
     if was_truncated:
         final_output.update(truncated=True, pages_analysed=pages_to_read, total_pages=total_pages)
 
-    if analysis_type == 1: return {"overview":   final_output.get("overview", ""),   "session_id": session_id}
-    if analysis_type == 2: return {"summary":    final_output.get("summary", ""),    "session_id": session_id}
-    if analysis_type == 3: return {"highlights": final_output.get("highlights", []), "session_id": session_id}
-    final_output["session_id"] = session_id
+    token_usage = {"input_tokens": total_in_tok, "output_tokens": total_out_tok, "total_tokens": total_in_tok + total_out_tok}
+    if analysis_type == 1: return {"overview":   final_output.get("overview", ""),   "session_id": session_id, "token_usage": token_usage}
+    if analysis_type == 2: return {"summary":    final_output.get("summary", ""),    "session_id": session_id, "token_usage": token_usage}
+    if analysis_type == 3: return {"highlights": final_output.get("highlights", []), "session_id": session_id, "token_usage": token_usage}
+    final_output["session_id"]  = session_id
+    final_output["token_usage"] = token_usage
     return final_output
 
 
@@ -603,6 +605,7 @@ async def red_flag_scanner(
                 "medium":    sum(1 for f in flags if f.get("severity") == "Medium"),
             },
             "detected_flags": flags,
+            "token_usage":    result.get("token_usage"),
         }
 
     except Exception as e:
@@ -1024,7 +1027,7 @@ async def compare_documents_api(
 
         # ── Step 3: Type check — if different, return early with insights ───
         if slug1 != slug2:
-            description, incompatibility_insights = await get_incompatibility_insights(
+            description, incompatibility_insights, inc_in_tok, inc_out_tok = await get_incompatibility_insights(
                 extraction1["document_type"],
                 extraction2["document_type"],
                 file1.filename or "document_1.pdf",
@@ -1049,6 +1052,7 @@ async def compare_documents_api(
                 "document_1":                  doc1_info,
                 "document_2":                  doc2_info,
                 "comparison":                  None,
+                "token_usage":                 {"input_tokens": inc_in_tok, "output_tokens": inc_out_tok, "total_tokens": inc_in_tok + inc_out_tok},
             }
 
         # ── Step 4: Same type — run full comparison ───────────────────────
@@ -1086,6 +1090,7 @@ async def compare_documents_api(
             "document_2_type":      comp_result.get("document_2_type"),
             "compared_at":          comp_result.get("compared_at"),
             "duration_ms":          comp_result.get("duration_ms"),
+            "token_usage":          comp_result.get("token_usage"),
         }
  
     except HTTPException:

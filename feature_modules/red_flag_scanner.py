@@ -347,6 +347,7 @@ async def scan_red_flags(text: str) -> dict:
                 "missing_protections": 0,
                 "overall_risk":        "Low",
             },
+            "token_usage": {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": in_tok + out_tok},
         }
 
     # Step 3 — build flags
@@ -380,4 +381,5 @@ async def scan_red_flags(text: str) -> dict:
             "missing_protections": missing,
             "overall_risk":        overall,
         },
+        "token_usage": {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": in_tok + out_tok},
     }

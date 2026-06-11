@@ -131,8 +131,10 @@ async def analyze_document_risks(text: str) -> dict:
 
     _MAX_ATTEMPTS = 2
     result = {}
+    in_tok = out_tok = 0
     for attempt in range(1, _MAX_ATTEMPTS + 1):
-        raw = await run_llm_mini(document, _SINGLE_CALL_SYSTEM, max_output_tokens=8000)
+        raw, _in, _out = await run_llm_mini(document, _SINGLE_CALL_SYSTEM, max_output_tokens=8000)
+        in_tok += _in; out_tok += _out
         logger.debug(f"[risk_detection] attempt {attempt} raw output ({len(raw)} chars): {raw[:800]}")
         result = extract_json_from_text(raw)
         if result and "detected_risks" in result:
@@ -144,7 +146,8 @@ async def analyze_document_risks(text: str) -> dict:
 
     if not result or "detected_risks" not in result:
         logger.warning(f"[risk_detection] all {_MAX_ATTEMPTS} attempt(s) failed — trying top-5 fallback call")
-        fallback_raw = await run_llm_mini(document, _FALLBACK_SYSTEM, max_output_tokens=3000)
+        fallback_raw, _in, _out = await run_llm_mini(document, _FALLBACK_SYSTEM, max_output_tokens=3000)
+        in_tok += _in; out_tok += _out
         logger.debug(f"[risk_detection] fallback raw output ({len(fallback_raw)} chars): {fallback_raw[:800]}")
         result = extract_json_from_text(fallback_raw)
         if not result or "detected_risks" not in result:
@@ -211,5 +214,6 @@ async def analyze_document_risks(text: str) -> dict:
             "detected_risks": detected_count,
             "total":          detected_count,
         },
-        "data": analysis,
+        "data":        analysis,
+        "token_usage": {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": in_tok + out_tok},
     }

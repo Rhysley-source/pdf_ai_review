@@ -139,7 +139,7 @@ async def extract_key_clauses(text: str) -> dict:
     document = text[:_MAX_SINGLE_CALL_CHARS]
 
     logger.info(f"[key_clause] Single-call extraction — {len(document):,} chars")
-    raw    = await run_llm_mini(document, _SINGLE_CALL_SYSTEM, max_output_tokens=16000)
+    raw, in_tok, out_tok = await run_llm_mini(document, _SINGLE_CALL_SYSTEM, max_output_tokens=16000)
     result = extract_json_from_text(raw)
 
     if not result:
@@ -176,6 +176,7 @@ async def extract_key_clauses(text: str) -> dict:
         "document_type": doc_label,
         "total_clauses": len(cleaned),
         "key_clauses":   cleaned,
+        "token_usage":   {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": in_tok + out_tok},
     }
 
 
@@ -252,7 +253,7 @@ async def extract_key_clauses_for_compare(text: str) -> dict:
     _MAX_ATTEMPTS = 2
     result = {}
     for attempt in range(1, _MAX_ATTEMPTS + 1):
-        raw = await run_llm_mini(document, _COMPARE_CALL_SYSTEM, max_output_tokens=16000)
+        raw, _, _ = await run_llm_mini(document, _COMPARE_CALL_SYSTEM, max_output_tokens=16000)
         logger.debug(f"[key_clause_compare] attempt {attempt} raw ({len(raw)} chars): {raw[:800]}")
         result = extract_json_from_text(raw)
         if result and "key_clauses" in result:
