@@ -217,7 +217,7 @@ async def _call_llm(
     max_tokens:    int | None = _MAX_TOKENS_HTML,
     temperature:   float | None = None,
     use_seed:      bool = True,
-) -> tuple[str, str, int, int]:
+) -> tuple[str, str]:
     """
     Core LLM caller. Uses the full generation model by default.
     Pass model=_FAST_MODEL for lightweight JSON classification steps.
@@ -262,18 +262,17 @@ async def _call_llm(
         )
         if finish == "length":
             logger.warning("[html-gen] finish=length — response was cut off mid-output")
-        return content, finish, response.usage.prompt_tokens, response.usage.completion_tokens
+        return content, finish
     except Exception as e:
         logger.exception(f"[html-gen] OpenAI call failed: {e}")
         raise
 
 
-async def _call_llm_fast(system_prompt: str, user_message: str) -> tuple[str, int, int]:
+async def _call_llm_fast(system_prompt: str, user_message: str) -> str:
     """Lightweight LLM call using the fast model — for JSON classification only."""
-    content, _, in_tok, out_tok = await _call_llm(
-        system_prompt, user_message, model=_FAST_MODEL, max_tokens=_MAX_TOKENS_JSON
-    )
-    return content, in_tok, out_tok
+    content, _ = await _call_llm(system_prompt, user_message,
+                                 model=_FAST_MODEL, max_tokens=_MAX_TOKENS_JSON)
+    return content
 
 
 _INTENT_CHECK_SYSTEM_PROMPT = """\
@@ -336,7 +335,7 @@ async def _check_document_intent(user_prompt: str) -> str:
     decides (and raises 422 if truly invalid).
     """
     try:
-        content, _, _, _ = await _call_llm(
+        content, _ = await _call_llm(
             system_prompt=_INTENT_CHECK_SYSTEM_PROMPT,
             user_message=user_prompt,
             model=_INTENT_MODEL,
@@ -370,7 +369,7 @@ async def _check_modification_intent(query: str) -> bool:
     Falls back to True on any error so the pipeline continues normally.
     """
     try:
-        content, _, _, _ = await _call_llm(
+        content, _ = await _call_llm(
             system_prompt=_MODIFICATION_INTENT_SYSTEM_PROMPT,
             user_message=query,
             model=_INTENT_MODEL,
@@ -720,7 +719,7 @@ async def _analyze_query(user_prompt: str) -> dict:
     Always calls the LLM — no caching.
     """
     logger.info("[doc-gen] Step 1: analysing query (fast model)...")
-    raw, _, _ = await _call_llm_fast(QUERY_ANALYSIS_PROMPT.template, user_prompt)
+    raw      = await _call_llm_fast(QUERY_ANALYSIS_PROMPT.template, user_prompt)
     logger.info(f"[doc-gen] Step 1 raw output: {raw[:300]}")
     analysis = _parse_analysis_json(raw)
     analysis["_user_prompt"] = user_prompt
@@ -832,7 +831,7 @@ async def _build_template_context(analysis: dict, user_prompt: str = "") -> dict
     )
 
     logger.info(f"[doc-gen] Step 2: building blueprint for '{doc_label}'...")
-    raw, _, in_tok, out_tok = await _call_llm(
+    raw, _ = await _call_llm(
         system_prompt,
         f"Build the complete, pre-filled document blueprint for: {doc_label}",
         model=_FAST_MODEL,
@@ -842,7 +841,7 @@ async def _build_template_context(analysis: dict, user_prompt: str = "") -> dict
     )
     logger.info(f"[doc-gen] Step 2 raw output: {raw[:300]}")
 
-    return _parse_blueprint_json(raw, analysis), in_tok, out_tok
+    return _parse_blueprint_json(raw, analysis)
 
 
 async def _analyze_and_build(user_prompt: str) -> dict:
@@ -855,7 +854,7 @@ async def _analyze_and_build(user_prompt: str) -> dict:
     Falls back to static template on JSON parse failure.
     """
     logger.info("[doc-gen] Steps 1+2 (combined): analysing and building blueprint...")
-    raw, finish, in_tok, out_tok = await _call_llm(
+    raw, finish = await _call_llm(
         COMBINED_ANALYSIS_BLUEPRINT_PROMPT.template,
         user_prompt,
         model=_FAST_MODEL,
@@ -880,8 +879,7 @@ async def _analyze_and_build(user_prompt: str) -> dict:
         else:
             logger.warning("[doc-gen] Steps 1+2 combined: parse failed — falling back to two-step flow")
         analysis = await _analyze_query(user_prompt)
-        context, fb_in, fb_out = await _build_template_context(analysis, user_prompt=user_prompt)
-        return context, in_tok + fb_in, out_tok + fb_out
+        return await _build_template_context(analysis, user_prompt=user_prompt)
 
     if not parsed.get("is_document_request", False):
         raise HTTPException(
@@ -897,7 +895,7 @@ async def _analyze_and_build(user_prompt: str) -> dict:
             "doc_label": parsed.get("doc_label", "Document"),
             "fields":    parsed.get("fields") or {},
         }
-        return _static_template_context(analysis), in_tok, out_tok
+        return _static_template_context(analysis)
 
     lines = []
     for i, sec in enumerate(sections, 1):
@@ -918,7 +916,7 @@ async def _analyze_and_build(user_prompt: str) -> dict:
         "tone":           parsed.get("tone", "professional"),
         "layout_notes":   parsed.get("layout_notes", "Standard document layout."),
         "sections_block": "\n\n".join(lines),
-    }, in_tok, out_tok
+    }
 
 
 
@@ -1024,7 +1022,7 @@ async def _generate_html_from_context(
     context: dict,
     user_prompt: str,
     compact_mode: bool = False,
-) -> tuple[str, int, int]:
+) -> str:
     """
     Step 3 - final LLM call using the enriched blueprint context.
     Retries on truncated or invalid response.
@@ -1078,7 +1076,6 @@ Rules:
         model_for_call = None
 
     best_effort_html = ""
-    total_in = total_out = 0
 
     for attempt in range(1, retries + 1):
         if attempt == 1:
@@ -1090,7 +1087,7 @@ Rules:
             logger.warning(f"[doc-gen] Step 3: retry {attempt}/{retries}")
 
         try:
-            raw, finish, in_tok, out_tok = await _call_llm(
+            raw, finish = await _call_llm(
                 system_prompt,
                 user_prompt,
                 model=model_for_call,
@@ -1098,8 +1095,6 @@ Rules:
                 temperature=0.1 if compact_mode else 0.2,
                 use_seed=(attempt == 1),
             )
-            total_in += in_tok
-            total_out += out_tok
         except Exception:
             if attempt == retries:
                 raise
@@ -1116,7 +1111,7 @@ Rules:
                 logger.warning(
                     "[doc-gen] Step 3: finish=length but HTML is complete and valid - accepting output"
                 )
-                return cleaned, total_in, total_out
+                return cleaned
 
             if attempt < retries:
                 logger.warning(
@@ -1132,7 +1127,7 @@ Rules:
                     logger.warning(
                         "[doc-gen] Step 3: returning best-effort repaired HTML after truncation"
                     )
-                    return best_effort_html, total_in, total_out
+                    return best_effort_html
             continue
 
         cleaned = _repair_truncated_html(_clean_html(raw))
@@ -1140,7 +1135,7 @@ Rules:
             best_effort_html = cleaned
         valid, reason = _validate_html(cleaned)
         if valid:
-            return cleaned, total_in, total_out
+            return cleaned
 
         logger.warning(
             f"[doc-gen] Step 3: invalid HTML on attempt {attempt}/{retries} "
@@ -1149,9 +1144,9 @@ Rules:
 
     if best_effort_html:
         logger.warning("[doc-gen] Step 3: returning best-effort repaired HTML after all attempts")
-        return best_effort_html, total_in, total_out
+        return best_effort_html
 
-    return "", 0, 0  # all attempts exhausted - caller raises HTTPException
+    return ""  # all attempts exhausted - caller raises HTTPException
 
 
 # ---------------------------------------------------------------------------
@@ -1193,7 +1188,7 @@ async def _check_regeneration_intent(modification_query: str, existing_html: str
     )
 
     try:
-        raw, _, _ = await _call_llm_fast(system_prompt, modification_query)
+        raw     = await _call_llm_fast(system_prompt, modification_query)
         cleaned = raw.strip().replace("```json", "").replace("```", "").strip()
         parsed  = json.loads(cleaned)
         intent  = parsed.get("intent", "modify")
@@ -1244,7 +1239,7 @@ async def generate_document_html(
         # Steps 1+2: combined analysis + blueprint (single LLM call)
         step_started = time.perf_counter()
         try:
-            context, steps12_in, steps12_out = await _analyze_and_build(request.user_prompt)
+            context = await _analyze_and_build(request.user_prompt)
         except HTTPException:
             raise
         except Exception as e:
@@ -1261,7 +1256,7 @@ async def generate_document_html(
         # Step 3: generate full HTML (with retry + validation)
         step_started = time.perf_counter()
         try:
-            raw_html, step3_in, step3_out = await _generate_html_from_context(context, request.user_prompt)
+            raw_html = await _generate_html_from_context(context, request.user_prompt)
         except Exception as e:
             logger.exception("[doc-gen] Step 3 failed")
             raise HTTPException(
@@ -1278,24 +1273,13 @@ async def generate_document_html(
                 detail=_err_empty_output(request.user_prompt),
             )
 
-        total_in  = steps12_in  + step3_in
-        total_out = steps12_out + step3_out
         safe_html = _ascii_safe_html(raw_html)
         await asyncio.to_thread(_save_document, doc_id, safe_html)
         logger.info(
             f"[doc-gen] /generate-html done doc_id={doc_id} "
-            f"total={time.perf_counter() - request_started:.2f}s "
-            f"tokens={total_in}in+{total_out}out"
+            f"total={time.perf_counter() - request_started:.2f}s"
         )
-        return HTMLResponse(
-            content=safe_html,
-            headers={
-                "X-Document-Id":   doc_id,
-                "X-Input-Tokens":  str(total_in),
-                "X-Output-Tokens": str(total_out),
-                "X-Total-Tokens":  str(total_in + total_out),
-            },
-        )
+        return HTMLResponse(content=safe_html, headers={"X-Document-Id": doc_id})
 
     except HTTPException as exc:
         logger.warning(
@@ -1451,13 +1435,11 @@ async def generate_document_text_stream(
         async def _stream_cached():
             chunk_size = 512
             for i in range(0, len(cached), chunk_size):
-                chunk = cached[i : i + chunk_size]
-                yield f"event: token\ndata: {json.dumps({'delta': chunk})}\n\n".encode("utf-8")
-            yield f"event: done\ndata: {json.dumps({'document_id': doc_id, 'cached': True, 'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0})}\n\n".encode("utf-8")
+                yield cached[i : i + chunk_size].encode("utf-8")
 
         return StreamingResponse(
             _stream_cached(),
-            media_type="text/event-stream",
+            media_type="text/plain; charset=utf-8",
             headers={
                 "X-Document-Id":     doc_id,
                 "X-Cache":           "HIT",
@@ -1477,8 +1459,7 @@ async def generate_document_text_stream(
                 {"role": "system", "content": _DIRECT_TEXT_SYSTEM_PROMPT},
                 {"role": "user",   "content": user_message},
             ],
-            "stream":         True,
-            "stream_options": {"include_usage": True},
+            "stream": True,
         }
         if model not in _FIXED_TEMPERATURE_MODELS:
             kwargs["temperature"] = 0.2
@@ -1489,42 +1470,34 @@ async def generate_document_text_stream(
                 kwargs["max_tokens"] = _MAX_TOKENS_HTML
 
         accumulated: list[str] = []
-        in_tok = out_tok = 0
         try:
             stream = await _CLIENT.chat.completions.create(**kwargs)
             async for chunk in stream:
-                if chunk.usage:
-                    in_tok  = chunk.usage.prompt_tokens
-                    out_tok = chunk.usage.completion_tokens
-                    continue
                 delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
                 if not delta:
                     continue
                 accumulated.append(delta)
-                yield f"event: token\ndata: {json.dumps({'delta': delta})}\n\n".encode("utf-8")
+                yield delta.encode("utf-8")
         except Exception:
             logger.exception("[doc-gen] /generate-text/stream LLM stream failed")
-            yield f"event: error\ndata: {json.dumps({'message': 'Stream failed. Please try again.'})}\n\n".encode("utf-8")
             return
 
         full_text = "".join(accumulated)
         if full_text.strip():
             try:
+                # Save under both cache key (prompt hash) and doc_id
                 await asyncio.to_thread(_save_document, cache_key, full_text)
                 await asyncio.to_thread(_save_document, doc_id, full_text)
                 logger.info(
                     f"[doc-gen] /generate-text/stream saved cache_key={cache_key} "
-                    f"doc_id={doc_id} total={time.perf_counter() - request_started:.2f}s "
-                    f"tokens={in_tok}in+{out_tok}out"
+                    f"doc_id={doc_id} total={time.perf_counter() - request_started:.2f}s"
                 )
             except Exception:
                 logger.exception("[doc-gen] /generate-text/stream storage write failed")
 
-        yield f"event: done\ndata: {json.dumps({'document_id': doc_id, 'cached': False, 'input_tokens': in_tok, 'output_tokens': out_tok, 'total_tokens': in_tok + out_tok})}\n\n".encode("utf-8")
-
     return StreamingResponse(
         _stream_text(),
-        media_type="text/event-stream",
+        media_type="text/plain; charset=utf-8",
         headers={
             "X-Document-Id":     doc_id,
             "Cache-Control":     "no-cache",
@@ -1580,7 +1553,7 @@ async def regenerate_document_html(
             )
 
         try:
-            context, step2_in, step2_out = await _build_template_context(analysis, user_prompt=request.modification_query)
+            context = await _build_template_context(analysis, user_prompt=request.modification_query)
         except HTTPException:
             raise
         except Exception as e:
@@ -1591,7 +1564,7 @@ async def regenerate_document_html(
             )
 
         try:
-            raw_html, step3_in, step3_out = await _generate_html_from_context(context, request.modification_query)
+            raw_html = await _generate_html_from_context(context, request.modification_query)
         except Exception as e:
             logger.exception("[doc-gen] Step 3 failed during regeneration→generate")
             raise HTTPException(
@@ -1607,19 +1580,9 @@ async def regenerate_document_html(
                 detail=_err_empty_output(request.modification_query),
             )
 
-        regen_total_in  = step2_in  + step3_in
-        regen_total_out = step2_out + step3_out
         doc_id = request.document_id or str(uuid.uuid4())
         await asyncio.to_thread(_save_document, doc_id, cleaned_html)
-        return HTMLResponse(
-            content=cleaned_html,
-            headers={
-                "X-Document-Id":   doc_id,
-                "X-Input-Tokens":  str(regen_total_in),
-                "X-Output-Tokens": str(regen_total_out),
-                "X-Total-Tokens":  str(regen_total_in + regen_total_out),
-            },
-        )
+        return HTMLResponse(content=cleaned_html, headers={"X-Document-Id": doc_id})
 
     # ── Modify existing document path ───────────────────────────────────────
     system_prompt = REGENERATE_PROMPT.format(
@@ -1628,7 +1591,7 @@ async def regenerate_document_html(
     )
 
     try:
-        raw_html, _, mod_in, mod_out = await _call_llm(system_prompt, request.modification_query)
+        raw_html, _ = await _call_llm(system_prompt, request.modification_query)
     except Exception as e:
         logger.exception("[doc-gen] Regeneration LLM call failed")
         raise HTTPException(
@@ -1656,14 +1619,7 @@ async def regenerate_document_html(
             },
         )
 
-    return HTMLResponse(
-        content=cleaned_html,
-        headers={
-            "X-Input-Tokens":  str(mod_in),
-            "X-Output-Tokens": str(mod_out),
-            "X-Total-Tokens":  str(mod_in + mod_out),
-        },
-    )
+    return HTMLResponse(content=cleaned_html)
 
 
 @router.post("/regenerate-text/stream")
@@ -1716,8 +1672,7 @@ async def regenerate_document_html_stream(
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_message},
             ],
-            "stream":         True,
-            "stream_options": {"include_usage": True},
+            "stream": True,
         }
         if model not in _FIXED_TEMPERATURE_MODELS:
             kwargs["temperature"] = 0.2
@@ -1727,28 +1682,20 @@ async def regenerate_document_html_stream(
             else:
                 kwargs["max_tokens"] = _MAX_TOKENS_HTML
 
-        in_tok = out_tok = 0
         try:
             stream = await _CLIENT.chat.completions.create(**kwargs)
             async for chunk in stream:
-                if chunk.usage:
-                    in_tok  = chunk.usage.prompt_tokens
-                    out_tok = chunk.usage.completion_tokens
-                    continue
                 delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
                 if not delta:
                     continue
-                yield f"event: token\ndata: {json.dumps({'delta': delta})}\n\n".encode()
+                yield delta.encode()
         except Exception:
             logger.exception("[doc-gen] /regenerate-html/stream Step 3 failed")
-            yield f"event: error\ndata: {json.dumps({'message': 'Stream failed. Please try again.'})}\n\n".encode()
             return
-
-        yield f"event: done\ndata: {json.dumps({'document_id': doc_id, 'input_tokens': in_tok, 'output_tokens': out_tok, 'total_tokens': in_tok + out_tok})}\n\n".encode()
 
     return StreamingResponse(
         _stream(),
-        media_type="text/event-stream",
+        media_type="text/plain",
         headers={
             "X-Document-Id":     doc_id,
             "Cache-Control":     "no-cache",

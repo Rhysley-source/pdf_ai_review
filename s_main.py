@@ -4,7 +4,6 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 
@@ -173,21 +172,6 @@ app = FastAPI(
 """,
     version="2.0.0",
     lifespan=lifespan,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=[
-        "X-Document-Id",
-        "X-Input-Tokens",
-        "X-Output-Tokens",
-        "X-Total-Tokens",
-        "X-Cache",
-    ],
 )
 
 app.include_router(router)
