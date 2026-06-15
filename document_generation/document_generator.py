@@ -1451,11 +1451,13 @@ async def generate_document_text_stream(
         async def _stream_cached():
             chunk_size = 512
             for i in range(0, len(cached), chunk_size):
-                yield cached[i : i + chunk_size].encode("utf-8")
+                chunk = cached[i : i + chunk_size]
+                yield f"event: token\ndata: {json.dumps({'delta': chunk})}\n\n".encode("utf-8")
+            yield f"event: done\ndata: {json.dumps({'document_id': doc_id, 'cached': True, 'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0})}\n\n".encode("utf-8")
 
         return StreamingResponse(
             _stream_cached(),
-            media_type="text/plain; charset=utf-8",
+            media_type="text/event-stream",
             headers={
                 "X-Document-Id":     doc_id,
                 "X-Cache":           "HIT",
@@ -1475,7 +1477,8 @@ async def generate_document_text_stream(
                 {"role": "system", "content": _DIRECT_TEXT_SYSTEM_PROMPT},
                 {"role": "user",   "content": user_message},
             ],
-            "stream": True,
+            "stream":         True,
+            "stream_options": {"include_usage": True},
         }
         if model not in _FIXED_TEMPERATURE_MODELS:
             kwargs["temperature"] = 0.2
@@ -1486,34 +1489,42 @@ async def generate_document_text_stream(
                 kwargs["max_tokens"] = _MAX_TOKENS_HTML
 
         accumulated: list[str] = []
+        in_tok = out_tok = 0
         try:
             stream = await _CLIENT.chat.completions.create(**kwargs)
             async for chunk in stream:
+                if chunk.usage:
+                    in_tok  = chunk.usage.prompt_tokens
+                    out_tok = chunk.usage.completion_tokens
+                    continue
                 delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
                 if not delta:
                     continue
                 accumulated.append(delta)
-                yield delta.encode("utf-8")
+                yield f"event: token\ndata: {json.dumps({'delta': delta})}\n\n".encode("utf-8")
         except Exception:
             logger.exception("[doc-gen] /generate-text/stream LLM stream failed")
+            yield f"event: error\ndata: {json.dumps({'message': 'Stream failed. Please try again.'})}\n\n".encode("utf-8")
             return
 
         full_text = "".join(accumulated)
         if full_text.strip():
             try:
-                # Save under both cache key (prompt hash) and doc_id
                 await asyncio.to_thread(_save_document, cache_key, full_text)
                 await asyncio.to_thread(_save_document, doc_id, full_text)
                 logger.info(
                     f"[doc-gen] /generate-text/stream saved cache_key={cache_key} "
-                    f"doc_id={doc_id} total={time.perf_counter() - request_started:.2f}s"
+                    f"doc_id={doc_id} total={time.perf_counter() - request_started:.2f}s "
+                    f"tokens={in_tok}in+{out_tok}out"
                 )
             except Exception:
                 logger.exception("[doc-gen] /generate-text/stream storage write failed")
 
+        yield f"event: done\ndata: {json.dumps({'document_id': doc_id, 'cached': False, 'input_tokens': in_tok, 'output_tokens': out_tok, 'total_tokens': in_tok + out_tok})}\n\n".encode("utf-8")
+
     return StreamingResponse(
         _stream_text(),
-        media_type="text/plain; charset=utf-8",
+        media_type="text/event-stream",
         headers={
             "X-Document-Id":     doc_id,
             "Cache-Control":     "no-cache",
@@ -1705,7 +1716,8 @@ async def regenerate_document_html_stream(
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_message},
             ],
-            "stream": True,
+            "stream":         True,
+            "stream_options": {"include_usage": True},
         }
         if model not in _FIXED_TEMPERATURE_MODELS:
             kwargs["temperature"] = 0.2
@@ -1715,20 +1727,28 @@ async def regenerate_document_html_stream(
             else:
                 kwargs["max_tokens"] = _MAX_TOKENS_HTML
 
+        in_tok = out_tok = 0
         try:
             stream = await _CLIENT.chat.completions.create(**kwargs)
             async for chunk in stream:
+                if chunk.usage:
+                    in_tok  = chunk.usage.prompt_tokens
+                    out_tok = chunk.usage.completion_tokens
+                    continue
                 delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
                 if not delta:
                     continue
-                yield delta.encode()
+                yield f"event: token\ndata: {json.dumps({'delta': delta})}\n\n".encode()
         except Exception:
             logger.exception("[doc-gen] /regenerate-html/stream Step 3 failed")
+            yield f"event: error\ndata: {json.dumps({'message': 'Stream failed. Please try again.'})}\n\n".encode()
             return
+
+        yield f"event: done\ndata: {json.dumps({'document_id': doc_id, 'input_tokens': in_tok, 'output_tokens': out_tok, 'total_tokens': in_tok + out_tok})}\n\n".encode()
 
     return StreamingResponse(
         _stream(),
-        media_type="text/plain",
+        media_type="text/event-stream",
         headers={
             "X-Document-Id":     doc_id,
             "Cache-Control":     "no-cache",
