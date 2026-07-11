@@ -23,15 +23,6 @@ h11==0.16.0
 openai>=1.30.0
 
 # ------------------------------------------------------------
-# PaddleOCR-VL
-# NOTE: install PaddlePaddle GPU separately before pip install -r requirements.txt
-#   pip install paddlepaddle-gpu==3.2.0 \
-#     -i https://www.paddlepaddle.org.cn/packages/stable/cu123/
-# ------------------------------------------------------------
-paddleocr==3.4.0
-paddlex==3.4.2
-
-# ------------------------------------------------------------
 # PDF processing
 # ------------------------------------------------------------
 PyMuPDF==1.27.1

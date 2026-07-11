@@ -37,10 +37,11 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # ---------------------------------------------------------------------------
 # Async wrapper for load_pdf
 #
-# PaddleOCR-VL's .predict() is a blocking synchronous call that can take
-# 7-20s per page on GPU. Running it directly on the asyncio event loop
-# freezes the entire server for that duration — no other requests are
-# served, no timeouts fire, health checks fail.
+# load_pdf() is a blocking synchronous call — scanned/image pages trigger a
+# synchronous HTTP request to the remote OCR API, which can take tens of
+# seconds. Running it directly on the asyncio event loop freezes the entire
+# server for that duration — no other requests are served, no timeouts fire,
+# health checks fail.
 #
 # Solution: run load_pdf in the default ThreadPoolExecutor so the event
 # loop remains free to handle other work while OCR runs in a thread.
