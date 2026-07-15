@@ -1,5 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException, Depends
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 import os
 import io
 import uuid
@@ -8,7 +9,7 @@ import time
 import asyncio
 import logging
 from functools import partial
-from typing import Optional
+from typing import Literal, Optional
 
 from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
 from llm_model.ai_model import generate_analysis, generate_analysis_stream, transcribe_audio
@@ -21,6 +22,7 @@ from feature_modules.obligation_detection import analyze_document_obligations
 from feature_modules.document_comparison import compare_documents, get_incompatibility_insights
 from utils.session_store import create_session, get_session
 from auth import verify_api_key
+from model_file import generate_phi_response_async
 
 logger = logging.getLogger(__name__)
 
@@ -1153,3 +1155,50 @@ async def compare_documents_api(
 
         duration_ms = int((time.perf_counter() - t_start) * 1000)
         logger.info(f"[{request_id}] ── COMPLETE — {duration_ms}ms status={status} ──")
+
+
+# ---------------------------------------------------------------------------
+# POST /phi/generate — local LLM chat (microsoft/Phi-4-mini-instruct)
+# ---------------------------------------------------------------------------
+
+class PhiChatMessage(BaseModel):
+    role:    Literal["system", "user", "assistant"]
+    content: str
+
+
+class PhiChatRequest(BaseModel):
+    messages:       list[PhiChatMessage] = Field(..., min_length=1)
+    max_new_tokens: int                  = Field(150, ge=1, le=2048)
+
+
+@router.post("/phi/generate")
+async def phi_generate(req: PhiChatRequest):
+    """
+    Local LLM chat endpoint — microsoft/Phi-4-mini-instruct (see model_file.py).
+    Model loads lazily on first call. Generation runs in a thread pool so the
+    event loop isn't blocked, serialised through a semaphore (PHI_CONCURRENCY,
+    default 1) so concurrent requests don't fight over the same model instance.
+    """
+    request_id = str(uuid.uuid4())[:8]
+    messages   = [m.model_dump() for m in req.messages]
+
+    logger.info(f"[{request_id}] /phi/generate — {len(messages)} message(s)")
+
+    try:
+        text, input_tokens, output_tokens, elapsed = await generate_phi_response_async(
+            messages, req.max_new_tokens
+        )
+    except Exception as e:
+        logger.exception(f"[{request_id}] /phi/generate failed: {e}")
+        raise HTTPException(status_code=500, detail="Local model generation failed.")
+
+    logger.info(
+        f"[{request_id}] /phi/generate done — in={input_tokens} out={output_tokens} "
+        f"tokens ({elapsed:.2f}s)"
+    )
+    return {
+        "response":           text,
+        "input_tokens":       input_tokens,
+        "output_tokens":      output_tokens,
+        "generation_time_s":  round(elapsed, 3),
+    }
