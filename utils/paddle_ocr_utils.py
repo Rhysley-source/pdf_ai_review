@@ -55,6 +55,12 @@ def _get_ocr_model():
         with _load_lock:
             if _ocr_vl is None:  # re-check inside the lock
                 from paddleocr import PaddleOCRVL
+                import paddle
+                logger.info(
+                    f"[paddle_ocr_utils] paddle device={paddle.device.get_device()} "
+                    f"cuda_compiled={paddle.device.is_compiled_with_cuda()} "
+                    f"cuda_visible={paddle.device.cuda.device_count() if paddle.device.is_compiled_with_cuda() else 0}"
+                )
                 logger.info("[paddle_ocr_utils] Loading PaddleOCR-VL 1.5 ...")
                 t0 = time.perf_counter()
                 _ocr_vl = PaddleOCRVL("v1.5")
@@ -62,6 +68,24 @@ def _get_ocr_model():
                     f"[paddle_ocr_utils] PaddleOCR-VL ready "
                     f"({time.perf_counter() - t0:.2f}s)"
                 )
+
+                # Warm up now (JIT/kernel autotune on first predict() call can
+                # take far longer than steady-state inference) so that cost is
+                # paid once at load time, not on the first real request —
+                # otherwise it silently eats into that request's OCR_PAGE_TIMEOUT.
+                logger.info("[paddle_ocr_utils] Warming up with a dummy predict() call ...")
+                t_warm = time.perf_counter()
+                try:
+                    dummy_img = np.full((64, 64, 3), 255, dtype=np.uint8)
+                    _ocr_vl.predict(dummy_img)
+                    logger.info(
+                        f"[paddle_ocr_utils] Warmup done ({time.perf_counter() - t_warm:.2f}s)"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[paddle_ocr_utils] Warmup call failed ({time.perf_counter() - t_warm:.2f}s) "
+                        f"— continuing anyway, first real request may pay the cold-start cost: {e}"
+                    )
     return _ocr_vl
 
 
@@ -165,6 +189,11 @@ def run_paddle_ocr_on_pdf(file_path: str, max_pages: int | None = None) -> dict:
 
     total_pages      = len(doc)
     pages_to_process = total_pages if max_pages is None else min(total_pages, max_pages)
+
+    # Load (and warm up) the model here, outside any per-page timeout — on a
+    # cold worker this pays the JIT/kernel-autotune cost up front instead of
+    # eating into page 1's OCR_PAGE_TIMEOUT budget. No-op after the first call.
+    _get_ocr_model()
 
     logger.info(
         f"[paddle_ocr_utils] Running PaddleOCR-VL on {pages_to_process}/{total_pages} page(s) "
