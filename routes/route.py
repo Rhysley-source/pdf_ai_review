@@ -12,6 +12,7 @@ from functools import partial
 from typing import Literal, Optional
 
 from utils.pdf_utils import load_pdf, get_page_count, all_pages_blank
+from utils.paddle_ocr_utils import run_paddle_ocr_on_pdf
 from llm_model.ai_model import generate_analysis, generate_analysis_stream, transcribe_audio
 from utils.json_utils import extract_json
 from db_files.db import log_request, log_comparison_request, log_analyse_detail
@@ -825,6 +826,76 @@ async def analyze_pdf_stream(
             "Connection":        "keep-alive",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /ocr/paddle-vl — local PaddleOCR-VL 1.5, run directly (no native-text
+# skip). Kept separate from /analyze's remote-OCR pipeline for testing /
+# comparing the local GPU engine that was previously used in load_pdf().
+# ---------------------------------------------------------------------------
+
+async def _run_paddle_ocr_async(file_path: str, max_pages: int | None = None) -> dict:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, partial(run_paddle_ocr_on_pdf, file_path, max_pages)
+    )
+
+
+@router.post("/ocr/paddle-vl")
+async def ocr_paddle_vl(
+    file: UploadFile = File(...),
+    max_pages: Optional[int] = Query(None, ge=1, description="Limit OCR to the first N pages."),
+):
+    """
+    Run a PDF through local PaddleOCR-VL 1.5 directly, page by page.
+    Every page is OCR'd unconditionally (no native-text-first check) —
+    this endpoint exists to exercise/inspect the PaddleOCR-VL engine itself.
+    Requires paddleocr + paddlepaddle (GPU build) installed; see requirements.txt.
+    """
+    request_id = str(uuid.uuid4())[:8]
+    t_start    = time.perf_counter()
+
+    logger.info(f"[{request_id}] ── PADDLE OCR REQUEST ────────────────────────")
+    logger.info(f"[{request_id}] filename='{file.filename}' max_pages={max_pages}")
+
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+
+    safe_name = f"{uuid.uuid4()}.pdf"
+    file_path = os.path.join(UPLOAD_FOLDER, safe_name)
+
+    try:
+        pdf_size = await _save_upload_to_disk(file, file_path)
+        logger.info(f"[{request_id}] saved {pdf_size:,} bytes")
+
+        try:
+            result = await _run_paddle_ocr_async(file_path, max_pages)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+        elapsed = time.perf_counter() - t_start
+        logger.info(
+            f"[{request_id}] ── PADDLE OCR COMPLETE — {elapsed:.2f}s "
+            f"({result['pages_processed']} page(s))"
+        )
+        return {
+            "filename":         file.filename,
+            "engine":           "PaddleOCR-VL-1.5",
+            "total_pages":      result["total_pages"],
+            "pages_processed":  result["pages_processed"],
+            "pages":            result["pages"],
+            "total_time_s":     result["total_time_s"],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[{request_id}] Paddle OCR failed: {e}")
+        raise HTTPException(status_code=500, detail="Internal error during PaddleOCR-VL processing.")
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logger.debug(f"[{request_id}] temp file deleted")
 
 
 # ---------------------------------------------------------------------------
