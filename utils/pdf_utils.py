@@ -161,6 +161,7 @@ def _call_remote_ocr(pdf_bytes: bytes, num_pages: int) -> list[str]:
     )
     response.raise_for_status()
     body = response.json()
+    logger.info(f"[pdf_utils] Remote OCR API response: {body}")
 
     if not body.get("success"):
         raise RuntimeError(f"Remote OCR API reported failure: {body}")
