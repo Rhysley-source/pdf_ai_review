@@ -164,6 +164,8 @@ app = FastAPI(
 - **POST /detect-risks** — Detect legal/financial risks in a document
 - **POST /red-flag-scanner** — AI red flag scan: identifies dangerous/unusual contract language with ⚠ warnings
 - **POST /convert/pdf-to-docx** — Convert PDF to DOCX
+- **POST /convert/doc-to-docx** — Convert legacy .doc to .docx
+- **POST /convert/docx-to-pdf** — Convert DOCX to PDF
 - **POST /validate-document** — Validate a PDF document for issues like missing fields, wrong clauses, or harmful terms
 
 ### Document Generation (HTML)
